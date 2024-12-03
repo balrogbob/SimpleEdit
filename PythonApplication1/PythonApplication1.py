@@ -98,6 +98,7 @@ def highlightPythonHelper():
 
 def highlightPythonInit():
     if updateSyntaxHighlighting.get():
+        root.update_idletasks()
         statusBar['text'] = f"Processing Inital Syntax, Please wait... 0%"
     start = "1.0"     # Get index at line 1 char 0 ('END')
     end = END     # Get index at last char
@@ -109,6 +110,7 @@ def highlightPythonInit():
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
     functionNames(start, end)
     if updateSyntaxHighlighting.get():
+        root.update_idletasks()
         statusBar['text'] = f"Processing Inital Syntax, Please wait... 10%"
     defs = match_string
     def highlightKeywords():
@@ -117,6 +119,7 @@ def highlightPythonInit():
         for match in reversed(matches):
             textArea.tag_add("keyword", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
         if updateSyntaxHighlighting.get():
+            root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 20%"
     
     def highlightStrings():
@@ -125,6 +128,7 @@ def highlightPythonInit():
         for match in reversed(matches):
             textArea.tag_add("string", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
         if updateSyntaxHighlighting.get():
+            root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 30%"
 
     def highlightComments():
@@ -133,6 +137,7 @@ def highlightPythonInit():
         for match in reversed(matches):
             textArea.tag_add("comment", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
         if updateSyntaxHighlighting.get():
+            root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 90%"
 
     def highlightNumbers():
@@ -141,6 +146,7 @@ def highlightPythonInit():
         for match in reversed(matches):
             textArea.tag_add("number", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
         if updateSyntaxHighlighting.get():
+            root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 50%"
 
     def highlightSelfs():
@@ -149,6 +155,7 @@ def highlightPythonInit():
         for match in reversed(matches):
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
         if updateSyntaxHighlighting.get():
+            root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
     def highlightDef():
@@ -158,6 +165,7 @@ def highlightPythonInit():
             for match in reversed(matches):
                 textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
             if updateSyntaxHighlighting.get():
+                root.update_idletasks()
                 statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
     Thread(target=root.after(0, highlightKeywords())).start()
@@ -171,6 +179,9 @@ def highlightPythonInit():
         root.after(300)
         statusBar['text'] = f"Ready"
 
+def highlightPythonInitT():
+    thread = Thread(target=highlightPythonInit)
+    thread.start()
 # Create instance
 root = Tk()
 
@@ -210,7 +221,7 @@ def saveFileAs():
     
         def getSizeOfTextArea():
             """Calculate the size (in bytes) of the content in text area"""
-            return sum([1 for c in textArea.get('1.0', END)])   # Count number of characters excluding newlines
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of characters excluding newlines
         if root.fileName == "":
             fileName = filedialog.asksaveasfilename(initialdir="/", title="Select file",
                                                 filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
@@ -220,18 +231,21 @@ def saveFileAs():
         fileName = root.fileName
         if fileName:
             try:
-                total_size = getSizeOfTextArea()  # Get the estimated total size of the file 
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
                 current_size = 0 
-                with open(fileName, 'w') as f:
-                    for char in textArea.get('1.0', END):
-                        f.write(char)
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
                         current_size += 1  # This will give us an estimation but not exact byte count because of variable character sizes and line breaks
                     
-                        progress = round((current_size/total_size)*100, 0)  # Calculate percentage completion rounded to 2 decimal places
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
                         statusBar['text'] = f"Saving... {progress}% - {fileName}"
                 
                 #statusBar['text'] = f"'{fileName}' saved successfully!"  # Change the status message when operation is finished
                 root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
             except Exception as e:
                 messagebox.showerror("Error", str(e))
 
@@ -245,7 +259,7 @@ def saveFileAs2():
     
         def getSizeOfTextArea():
             """Calculate the size (in bytes) of the content in text area"""
-            return sum([1 for c in textArea.get('1.0', END)])   # Count number of characters excluding newlines
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of characters excluding newlines
         
         fileName2 = filedialog.asksaveasfilename(initialdir=root.fileName, title="Select file",
                                                 filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
@@ -256,19 +270,21 @@ def saveFileAs2():
         fileName = fileName2
         if fileName:
             try:
-                total_size = getSizeOfTextArea()  # Get the estimated total size of the file 
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
                 current_size = 0 
-                with open(fileName, 'w') as f:
-                    for char in textArea.get('1.0', END):
-                        f.write(char)
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
                         current_size += 1  # This will give us an estimation but not exact byte count because of variable character sizes and line breaks
                     
-                        progress = round((current_size/total_size)*100, 0)  # Calculate percentage completion rounded to 2 decimal places
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
                         statusBar['text'] = f"Saving... {progress}% - {fileName}"
                 
                 #statusBar['text'] = f"'{fileName}' saved successfully!"  # Change the status message when operation is finished
-                if fileName != "":
-                    root.fileName = fileName
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
             except Exception as e:
                 messagebox.showerror("Error", str(e))
 
@@ -291,14 +307,19 @@ def openFileThreaded():
             statusBar['text'] = f"'{fileName}' opened successfully!"
             root.fileName = fileName
             if updateSyntaxHighlighting.get():
+                root.update_idletasks
                 root.after(0, Thread(target=lambda: root.after(0, highlightPythonInit)).start())
         except Exception as e:
             messagebox.showerror("Error", str(e))
-
+def readyUpdate():
+    time.sleep(1)
+    statusBar['text'] = "Ready"
 
 def newFile():
     textArea.delete('1.0', END)
     statusBar['text'] = "New Document!"
+    thread = Thread(target=readyUpdate)
+    thread.start()
 
 def saveFile():
     fileName = root.fileName
@@ -393,7 +414,7 @@ updateSyntaxHighlighting = IntVar()
 
 Thread(target=lambda: root.after(0, updateHighlights)).start()
 
-checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, Thread(target=highlightPythonInit).start()))
+checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(500, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
 
