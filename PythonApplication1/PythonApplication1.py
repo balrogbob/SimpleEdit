@@ -34,8 +34,8 @@ def highlight_python_helper():
 
     start = round(float(textArea.index(CURRENT)) - 50.0, 1)     # Get index at line 1 char 0 ('END')
     end = round(float(textArea.index(CURRENT)) + 50.0, 1)    # Get index at last char
-    start2 = round(float(textArea.index(CURRENT)) - 1000.0, 1)     # Get index at line 1 char 0 ('END')
-    end2 = round(float(textArea.index(CURRENT)) + 1000.0, 1)    # Get index at last char
+    start2 = round(float(textArea.index(CURRENT)) - 500.0, 1)     # Get index at line 1 char 0 ('END')
+    end2 = round(float(textArea.index(CURRENT)) + 500.0, 1)    # Get index at last char
     textArea.tag_remove('string', start, end)
     textArea.tag_remove('keyword', start, end)
     textArea.tag_remove('comment', start, end)
@@ -82,10 +82,11 @@ def highlight_python_helper():
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
     def highlight_def():
-        content = textArea.get(start, end)
-        matches = [m.span() for m in re.finditer(defs, content)]
-        for match in reversed(matches):
-            textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if not defs == r'\b\b':
+            content = textArea.get(start, end)
+            matches = [m.span() for m in re.finditer(defs, content)]
+            for match in reversed(matches):
+                textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
 
     highlight_keywords()
@@ -138,10 +139,11 @@ def highlight_python_init():
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
     def highlight_def():
-        content = textArea.get(start, end)
-        matches = [m.span() for m in re.finditer(defs, content)]
-        for match in reversed(matches):
-            textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if not defs == r'\b\b':
+            content = textArea.get(start, end)
+            matches = [m.span() for m in re.finditer(defs, content)]
+            for match in reversed(matches):
+                textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
     highlight_keywords()
     highlight_strings()
@@ -317,7 +319,7 @@ def update_highlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-    root.after(1000, update_highlights)  # schedule next run after 1 sec
+    root.after(5000, update_highlights)  # schedule next run after 1 sec
 
 # Start updating highlights on new thread
 
