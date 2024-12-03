@@ -1,39 +1,80 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+SimpleEdit
+
+Got Bored, decided to start with nothing and just code whatever came into my head. 
+Turns out that was a python code editor to write the code for the editor I am writing. 
+Has basic syntax highlighting, save and load functionality, and you can make text bold. 
+But you cant unmake it bold. Also doesnt use any non-standard libraries, a fresh 
+python install is enough. Uses Tkinter for GUI, and badly written unoptimized but 
+threaded code to do the saving, loading, and highlighting. 
+
+MIT License
+
+Copyright (c) 2024 Joshua Richards
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+"""
+
+# Built-in/Generic Imports
+import os
+import sys
+import threading
+import time
+import re
 from ast import Not
 from selectors import SelectorKey
 from tkinter import *
 from tkinter import filedialog, messagebox
 from io import StringIO
 from threading import Thread
-import concurrent.futures
-import threading
-import time
-import os
-import sys
-import re
+# […]
+
+__author__ = 'Joshua Richards'
+__copyright__ = 'Copyright 2024, SimpleEdit'
+__credits__ = ['Balrogbob (Joshua Richards)']
+__license__ = 'MIT'
+__version__ = '0.0.1'
+__maintainer__ = 'Balrogbob'
+__email__ = 'josh@iconofgaming.com'
+__status__ = 'pre-alpha'
 
 def matchCaseLikeThis(start, end):
     pattern = r'def\s+[\w]*\s*\('
     pattern2 = r'\s[\w]*\s*\.*'
     matches = []
-    
     for line in textArea.get(start, end).split('\n'):
         if re.search(pattern, line):
              matches.append(re.search(pattern, line).group(0))
-
     matche = '\n'.join(matches)
     matches2 = []
-    
     for line in matche.split('\n'):
         if re.search(pattern2, line):
             matches2.append(re.search(pattern2, line).group(0).lstrip())
-
     return r'\b' + '|'.join(matches2) + r'\b'
 
 def functionNames(start, end):
     global match_string
     match_string = matchCaseLikeThis(start, end)
 def highlightPythonHelper(event):
-
     start = round(float(textArea.index(CURRENT)) - 100.0, 1)     # Get index at line 1 char 0 ('END')
     end = round(float(textArea.index(CURRENT)) + 50.0, 1)    # Get index at last char
     start2 = round(float(textArea.index(CURRENT)) - 500.0, 1)     # Get index at line 1 char 0 ('END')
@@ -52,45 +93,37 @@ def highlightPythonHelper(event):
     comments = r'#[^\n]*|"""(.*?)"""'
     string = r'"[^"]*"|\'[^\']*\''
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
-
     def highlightKeywords():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(keywords, content)]
         for match in reversed(matches):
             textArea.tag_add("keyword", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
     def highlightStrings():
         content = textArea.get(start2, end2)
         matches = [m.span() for m in re.finditer(string, content)]
         for match in reversed(matches):
             textArea.tag_add("string", f"{start2} + {match[0]}c", f"{start2} + {match[1]}c")
-
     def highlightComments():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(comments, content, re.DOTALL)]
         for match in reversed(matches):
             textArea.tag_add("comment", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
     def highlightNumbers():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(number, content)]
         for match in reversed(matches):
             textArea.tag_add("number", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
     def highlightSelfs():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(selfs, content)]
         for match in reversed(matches):
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
     def highlightDef():
         if not defs == r'\b\b':
             content = textArea.get(start, end)
             matches = [m.span() for m in re.finditer(defs, content)]
             for match in reversed(matches):
                 textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
-    
     highlightKeywords()
     highlightDef()
     highlightNumbers()
@@ -125,7 +158,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 20%"
-    
     def highlightStrings():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(string, content)]
@@ -134,7 +166,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 30%"
-
     def highlightComments():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(comments, content, re.DOTALL)]
@@ -143,7 +174,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 90%"
-
     def highlightNumbers():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(number, content)]
@@ -152,7 +182,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 50%"
-
     def highlightSelfs():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(selfs, content)]
@@ -161,7 +190,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
-
     def highlightDef():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(defs, content)]
@@ -170,7 +198,6 @@ def highlightPythonInit():
         if updateSyntaxHighlighting.get():
             root.update_idletasks()
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
-
     keywordt = Thread(target=highlightKeywords())
     keywordt.start()
     stringst = Thread(target=highlightStrings())
@@ -201,13 +228,10 @@ def highlightPythonInitT():
         textArea.tag_remove('number', "1.0", END)
 # Create instance
 root = Tk()
-
 # Set geometry
 root.geometry("800x600")
-
 # Change the title of the window
 root.title('SimpleEdit')
-
 # Add menu bar
 menuBar = Menu(root)
 root.config(menu=menuBar)
@@ -231,19 +255,18 @@ def cutSelectedText():
 def saveFileAsThreaded():
     thread = Thread(target=saveFileAs)
     thread.start()
+
 def saveFileAs():
     if stop_event.is_set():
         exit
     else:
-    
         def getSizeOfTextArea():
             """Calculate the size (in bytes) of the content in text area"""
-            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of characters excluding newlines
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
         if root.fileName == "":
             fileName = filedialog.asksaveasfilename(initialdir="/", title="Select file",
                                                 filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
             root.fileName = fileName
-
         sys.stdout = statusBar['text']
         fileName = root.fileName
         if fileName:
@@ -253,14 +276,11 @@ def saveFileAs():
                 with open(fileName, 'w', errors='replace') as f:
                     for line in textArea.get('1.0', END).split('\n'):
                         f.write(line + '\n')
-                        current_size += 1  # This will give us an estimation but not exact byte count because of variable character sizes and line breaks
-                    
+                        current_size += 1  
                         progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
                         if progress >= 100.00:
                             progress = 100.00
                         statusBar['text'] = f"Saving... {progress}% - {fileName}"
-                
-                #statusBar['text'] = f"'{fileName}' saved successfully!"  # Change the status message when operation is finished
                 root.fileName = fileName
                 statusBar['text'] = f"Saving... 100% - {fileName}"
             except Exception as e:
@@ -269,20 +289,18 @@ def saveFileAs():
 def saveFileAsThreaded2():
     thread = Thread(target=saveFileAs2)
     thread.start()
+
 def saveFileAs2():
     if stop_event.is_set():
         exit
     else:
-    
         def getSizeOfTextArea():
             """Calculate the size (in bytes) of the content in text area"""
-            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of characters excluding newlines
-        
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
         fileName2 = filedialog.asksaveasfilename(initialdir=root.fileName, title="Select file",
                                                 filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
         if root.fileName == "":
             root.fileName = fileName2
-
         sys.stdout = statusBar['text']
         fileName = fileName2
         if fileName:
@@ -292,14 +310,11 @@ def saveFileAs2():
                 with open(fileName, 'w', errors='replace') as f:
                     for line in textArea.get('1.0', END).split('\n'):
                         f.write(line + '\n')
-                        current_size += 1  # This will give us an estimation but not exact byte count because of variable character sizes and line breaks
-                    
+                        current_size += 1 
                         progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
                         if progress >= 100.00:
                             progress = 100.00
                         statusBar['text'] = f"Saving... {progress}% - {fileName}"
-                
-                #statusBar['text'] = f"'{fileName}' saved successfully!"  # Change the status message when operation is finished
                 root.fileName = fileName
                 statusBar['text'] = f"Saving... 100% - {fileName}"
             except Exception as e:
@@ -308,6 +323,7 @@ def saveFileAs2():
 def openFile():
     thread = Thread(target=openFileThreaded)
     thread.start()
+
 def openFileThreaded():
     if root.fileName == "":
         fileName = filedialog.askopenfilename(initialdir="/", title="Select file",
@@ -315,7 +331,6 @@ def openFileThreaded():
     else:
                 fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
                                           filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
-        
     if fileName:
         try:
             with open(fileName, 'r', errors='replace') as f:
@@ -329,6 +344,7 @@ def openFileThreaded():
                 thread.start()
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
 def readyUpdate():
     time.sleep(1)
     statusBar['text'] = "Ready"
@@ -344,7 +360,6 @@ def saveFile():
     statusBar['text'] = "Ready"
     if fileName:
         try:
-            
             with open(fileName, 'w') as f:
                 f.write(textArea.get('1.0', END)) # get everything from line 1 char 0 (starting point) to end ('END')
             statusBar['text'] = f"'{fileName}' saved successfully!"
@@ -369,13 +384,8 @@ def updateHighlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-
     root.after(500, updateHighlights)  # schedule next run after 0.5 sec
     root.update_idletasks()
-
-# Start updating highlights on new thread
-
-    
 
 root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
 # Create menu options
@@ -399,13 +409,10 @@ editMenu.add_command(label='Redo', command=lambda: textArea.edit_redo(), acceler
 # Create toolbar
 toolBar = Frame(root, bg='blue')
 toolBar.pack(side=TOP, fill=X)
-
 btn1 = Button(toolBar, text='New', command=newFile)
 btn1.pack(side=LEFT, padx=2, pady=2)
-
 btn2 = Button(toolBar, text='Open', command=openFile)
 btn2.pack(side=LEFT, padx=2, pady=2)
-
 btn3 = Button(toolBar, text='Save', command=saveFileAsThreaded)
 btn3.pack(side=LEFT, padx=2, pady=2)
 
@@ -428,6 +435,7 @@ textArea.tag_config("bold", font=("consolas", 12, "bold"))
 textArea['fg'] = '#4AF626'
 textArea['font'] = 'consolas 12'
 textArea['undo'] = True
+
 def highlightPythonHelperT(event):
     if updateSyntaxHighlighting.get():
         highlightPythonHelper(event)
@@ -439,17 +447,11 @@ def highlightPythonHelperT(event):
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
 
-
 textArea.bind('<KeyRelease>', lambda event: root.after(200, Thread(target=highlightPythonHelperT(Event))))   # Call the function on key release (i.e., after typing finishes)
-
 updateSyntaxHighlighting = IntVar()
-
 #Thread(target=lambda: root.after(0, updateHighlights)).start()
-
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
-
-
 
 def formatBold():
     try:
@@ -461,11 +463,13 @@ def formatBold():
 
 formatButton1 = Button(toolBar, text='Bold', command=formatBold)
 formatButton1.pack(side=LEFT, padx=2, pady=2)
-# Start mainloop
+
+# Define Main Loop
 def main():
     root.mainloop()
     stop_event.set()
     SystemExit()
 
+# Start mainloop with proper convention
 if __name__ == '__main__':
     main()
