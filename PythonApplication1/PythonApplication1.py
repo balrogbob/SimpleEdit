@@ -329,8 +329,7 @@ stop_event = threading.Event()
 
 def update_highlights():
     if updateSyntaxHighlighting.get():
-        Thread(target=root.after(0, highlight_python_helper)).start()  # your function to apply highlights
-    
+        Thread(target=root.after(0, highlight_python_helper())).start()  # your function to apply highlights
     else:
         textArea.tag_remove('string', "1.0", END)
         textArea.tag_remove('keyword', "1.0", END)
@@ -338,7 +337,7 @@ def update_highlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-    Thread(target=root.after(100, update_highlights)).start()  # schedule next run after 1 sec
+    root.after(100, update_highlights)  # schedule next run after 1 sec
     root.update_idletasks()
 
 # Start updating highlights on new thread
