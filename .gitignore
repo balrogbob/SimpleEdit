@@ -361,9 +361,11 @@ MigrationBackup/
 
 # Fody - auto-generated XML schema
 FodyWeavers.xsd
+/PythonApplication1/build/
 /PythonApplication1/build/PythonApplication1/Analysis-00.toc
 /PythonApplication1/build/PythonApplication1/EXE-00.toc
 /PythonApplication1/build/PythonApplication1/PKG-00.toc
 /PythonApplication1/build/PythonApplication1/PythonApplication1.pkg
 /PythonApplication1/build/PythonApplication1/warn-PythonApplication1.txt
 /PythonApplication1/build/PythonApplication1/xref-PythonApplication1.html
+/PythonApplication1/env/
