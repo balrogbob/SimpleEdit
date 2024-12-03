@@ -4,6 +4,7 @@ from tkinter import *
 from tkinter import filedialog, messagebox
 from io import StringIO
 from threading import Thread
+import concurrent.futures
 import threading
 import time
 import os
@@ -17,10 +18,11 @@ def matchCaseLikeThis(start, end):
     
     for line in textArea.get(start, end).split('\n'):
         if re.search(pattern, line):
-            matches.append(re.search(pattern, line).group(0))
+             matches.append(re.search(pattern, line).group(0))
 
     matche = '\n'.join(matches)
     matches2 = []
+    
     for line in matche.split('\n'):
         if re.search(pattern2, line):
             matches2.append(re.search(pattern2, line).group(0).lstrip())
@@ -30,7 +32,7 @@ def matchCaseLikeThis(start, end):
 def functionNames(start, end):
     global match_string
     match_string = matchCaseLikeThis(start, end)
-def highlightPythonHelper():
+def highlightPythonHelper(event):
 
     start = round(float(textArea.index(CURRENT)) - 100.0, 1)     # Get index at line 1 char 0 ('END')
     end = round(float(textArea.index(CURRENT)) + 50.0, 1)    # Get index at last char
@@ -88,14 +90,14 @@ def highlightPythonHelper():
             for match in reversed(matches):
                 textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
-
+    
     highlightKeywords()
     highlightDef()
     highlightNumbers()
     highlightSelfs()
-    stringst = Thread(target=root.after(0, highlightStrings()))
+    stringst = Thread(target=highlightStrings())
     stringst.start()
-    commentst = Thread(target=root.after(0, highlightComments()))
+    commentst = Thread(target=highlightComments())
     commentst.start()
 
 def highlightPythonInit():
@@ -106,7 +108,7 @@ def highlightPythonInit():
     end = END     # Get index at last char
     # Define regex patterns
     keywords = r'\b(if|else|while|for|return|def|from|import|class)\b'
-    selfs = '\b(?:[a-z])(?:[A-Z]?[a-z])*(?:[A-Z][a-z]*)|\b(self|root)\b'
+    selfs = r'\b(?:[a-z])(?:[A-Z]?[a-z])*(?:[A-Z][a-z]*)|\b(self|root)\b'
     comments = r'#[^\n]*|"""(.*?)"""'
     string = r'"[^"]*"|\'[^\']*\''
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
@@ -161,26 +163,25 @@ def highlightPythonInit():
             statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
     def highlightDef():
-        if not defs == r'\b\b':
-            content = textArea.get(start, end)
-            matches = [m.span() for m in re.finditer(defs, content)]
-            for match in reversed(matches):
-                textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-            if updateSyntaxHighlighting.get():
-                root.update_idletasks()
-                statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
+        content = textArea.get(start, end)
+        matches = [m.span() for m in re.finditer(defs, content)]
+        for match in reversed(matches):
+            textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if updateSyntaxHighlighting.get():
+            root.update_idletasks()
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
-    keywordt = Thread(target=root.after(0, highlightKeywords()))
+    keywordt = Thread(target=highlightKeywords())
     keywordt.start()
-    stringst = Thread(target=root.after(0, highlightStrings()))
+    stringst = Thread(target=highlightStrings())
     stringst.start()
-    defst = Thread(target=root.after(0, highlightDef()))
+    defst = Thread(target=highlightDef())
     defst.start()
-    numberst = Thread(target=root.after(0, highlightNumbers()))
+    numberst = Thread(target=highlightNumbers())
     numberst.start()
-    selfst = Thread(target=root.after(0, highlightSelfs()))
+    selfst = Thread(target=highlightSelfs())
     selfst.start()
-    commentst = Thread(target=root.after(0, highlightComments()))
+    commentst = Thread(target=highlightComments())
     commentst.start()
     if updateSyntaxHighlighting.get():
         statusBar['text'] = f"Processing Inital Syntax, Please wait... 100%"
@@ -188,8 +189,16 @@ def highlightPythonInit():
         statusBar['text'] = f"Ready"
 
 def highlightPythonInitT():
-    thread = Thread(target=highlightPythonInit)
-    thread.start()
+    if updateSyntaxHighlighting.get():
+        thread = Thread(target=highlightPythonInit)
+        thread.start()
+    else:
+        textArea.tag_remove('string', "1.0", END)
+        textArea.tag_remove('keyword', "1.0", END)
+        textArea.tag_remove('comment', "1.0", END)
+        textArea.tag_remove('selfs', "1.0", END)
+        textArea.tag_remove('def', "1.0", END)
+        textArea.tag_remove('number', "1.0", END)
 # Create instance
 root = Tk()
 
@@ -316,7 +325,8 @@ def openFileThreaded():
             root.fileName = fileName
             if updateSyntaxHighlighting.get():
                 root.update_idletasks
-                root.after(0, Thread(target=lambda: root.after(0, highlightPythonInit)).start())
+                thread = Thread(target=lambda: root.after(0, highlightPythonInit))
+                thread.start()
         except Exception as e:
             messagebox.showerror("Error", str(e))
 def readyUpdate():
@@ -345,12 +355,13 @@ def saveFile():
 def highlightPythonThreaded(event):
     if updateSyntaxHighlighting.get():
         thread = Thread(target=highlightPythonHelper)
-        root.after(0, thread.start())
+        root.after(100, thread.start())
 stop_event = threading.Event()
 
 def updateHighlights():
     if updateSyntaxHighlighting.get():
-        Thread(target=root.after(0, highlightPythonHelper())).start()  # your function to apply highlights
+        thread = Thread(target=highlightPythonHelper())
+        thread.start()  # your function to apply highlights
     else:
         textArea.tag_remove('string', "1.0", END)
         textArea.tag_remove('keyword', "1.0", END)
@@ -359,7 +370,7 @@ def updateHighlights():
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
 
-    root.after(250, updateHighlights)  # schedule next run after 1 sec
+    root.after(500, updateHighlights)  # schedule next run after 0.5 sec
     root.update_idletasks()
 
 # Start updating highlights on new thread
@@ -417,13 +428,25 @@ textArea.tag_config("bold", font=("consolas", 12, "bold"))
 textArea['fg'] = '#4AF626'
 textArea['font'] = 'consolas 12'
 textArea['undo'] = True
-#textArea.bind('<KeyRelease>', root.after(0,highlightPythonHelper()))   # Call the function on key release (i.e., after typing finishes)
+def highlightPythonHelperT(event):
+    if updateSyntaxHighlighting.get():
+        highlightPythonHelper(event)
+    else:
+        textArea.tag_remove('string', "1.0", END)
+        textArea.tag_remove('keyword', "1.0", END)
+        textArea.tag_remove('comment', "1.0", END)
+        textArea.tag_remove('selfs', "1.0", END)
+        textArea.tag_remove('def', "1.0", END)
+        textArea.tag_remove('number', "1.0", END)
+
+
+textArea.bind('<KeyRelease>', lambda event: root.after(200, Thread(target=highlightPythonHelperT(Event))))   # Call the function on key release (i.e., after typing finishes)
 
 updateSyntaxHighlighting = IntVar()
 
-Thread(target=lambda: root.after(0, updateHighlights)).start()
+#Thread(target=lambda: root.after(0, updateHighlights)).start()
 
-checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(500, highlightPythonInitT))
+checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
 
@@ -439,6 +462,10 @@ def formatBold():
 formatButton1 = Button(toolBar, text='Bold', command=formatBold)
 formatButton1.pack(side=LEFT, padx=2, pady=2)
 # Start mainloop
-root.mainloop()
-stop_event.set()
-SystemExit()
+def main():
+    root.mainloop()
+    stop_event.set()
+    SystemExit()
+
+if __name__ == '__main__':
+    main()

@@ -22,6 +22,7 @@
     <EnableUnmanagedDebugging>false</EnableUnmanagedDebugging>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="beep.py" />
     <Compile Include="PythonApplication1.py" />
   </ItemGroup>
   <ItemGroup>
