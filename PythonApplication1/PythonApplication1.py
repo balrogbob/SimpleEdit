@@ -97,7 +97,8 @@ def highlight_python_helper():
     highlight_comments()
 
 def highlight_python_init():
-
+    if updateSyntaxHighlighting.get():
+        statusBar['text'] = f"Processing Inital Syntax, Please wait... 0%"
     start = "1.0"     # Get index at line 1 char 0 ('END')
     end = END     # Get index at last char
     # Define regex patterns
@@ -107,36 +108,48 @@ def highlight_python_init():
     string = r'"[^"]*"|\'[^\']*\''
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
     functionNames(start, end)
+    if updateSyntaxHighlighting.get():
+        statusBar['text'] = f"Processing Inital Syntax, Please wait... 10%"
     defs = match_string
     def highlight_keywords():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(keywords, content)]
         for match in reversed(matches):
             textArea.tag_add("keyword", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
-
+        if updateSyntaxHighlighting.get():
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 20%"
+    
     def highlight_strings():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(string, content)]
         for match in reversed(matches):
             textArea.tag_add("string", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if updateSyntaxHighlighting.get():
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 30%"
 
     def highlight_comments():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(comments, content, re.DOTALL)]
         for match in reversed(matches):
             textArea.tag_add("comment", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if updateSyntaxHighlighting.get():
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 90%"
 
     def highlight_numbers():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(number, content)]
         for match in reversed(matches):
             textArea.tag_add("number", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if updateSyntaxHighlighting.get():
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 50%"
 
     def highlight_selfs():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(selfs, content)]
         for match in reversed(matches):
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+        if updateSyntaxHighlighting.get():
+            statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
     def highlight_def():
         if not defs == r'\b\b':
@@ -144,13 +157,19 @@ def highlight_python_init():
             matches = [m.span() for m in re.finditer(defs, content)]
             for match in reversed(matches):
                 textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+            if updateSyntaxHighlighting.get():
+                statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
-    highlight_keywords()
-    highlight_strings()
-    highlight_def()
-    highlight_numbers()
-    highlight_selfs()
-    highlight_comments()
+    Thread(target=root.after(0, highlight_keywords())).start()
+    Thread(target=root.after(0, highlight_strings())).start()
+    Thread(target=root.after(0, highlight_def())).start()
+    Thread(target=root.after(0, highlight_numbers())).start()
+    Thread(target=root.after(0, highlight_selfs())).start()
+    Thread(target=root.after(0, highlight_comments())).start()
+    if updateSyntaxHighlighting.get():
+        statusBar['text'] = f"Processing Inital Syntax, Please wait... 100%"
+        root.after(300)
+        statusBar['text'] = f"Ready"
 
 # Create instance
 root = Tk()
@@ -280,7 +299,7 @@ def openFileThreaded():
             statusBar['text'] = f"'{fileName}' opened successfully!"
             root.fileName = fileName
             if updateSyntaxHighlighting.get():
-                Thread(target=lambda: root.after(0, highlight_python_init)).start()
+                root.after(0, Thread(target=lambda: root.after(0, highlight_python_init)).start())
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
@@ -305,12 +324,12 @@ def saveFile():
 def highlight_python_threaded(event):
     if updateSyntaxHighlighting.get():
         thread = Thread(target=highlight_python_helper)
-        thread.start()
+        root.after(0, thread.start())
 stop_event = threading.Event()
 
 def update_highlights():
     if updateSyntaxHighlighting.get():
-        root.after(0, highlight_python_helper)  # your function to apply highlights
+        Thread(target=root.after(0, highlight_python_helper)).start()  # your function to apply highlights
     
     else:
         textArea.tag_remove('string', "1.0", END)
@@ -319,7 +338,8 @@ def update_highlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-    root.after(5000, update_highlights)  # schedule next run after 1 sec
+    Thread(target=root.after(100, update_highlights)).start()  # schedule next run after 1 sec
+    root.update_idletasks()
 
 # Start updating highlights on new thread
 
@@ -376,13 +396,13 @@ textArea.tag_config("bold", font=("consolas", 12, "bold"))
 textArea['fg'] = '#4AF626'
 textArea['font'] = 'consolas 12'
 textArea['undo'] = True
-textArea.bind('<KeyRelease>', root.after(50, highlight_python_threaded))   # Call the function on key release (i.e., after typing finishes)
+#textArea.bind('<KeyRelease>', root.after(0, highlight_python_threaded))   # Call the function on key release (i.e., after typing finishes)
 
 updateSyntaxHighlighting = IntVar()
 
 Thread(target=lambda: root.after(0, update_highlights)).start()
 
-checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: Thread(target=highlight_python_init).start())
+checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, Thread(target=highlight_python_init).start()))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
 
