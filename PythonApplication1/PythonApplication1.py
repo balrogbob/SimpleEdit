@@ -32,7 +32,7 @@ def functionNames(start, end):
     match_string = matchCaseLikeThis(start, end)
 def highlightPythonHelper():
 
-    start = round(float(textArea.index(CURRENT)) - 50.0, 1)     # Get index at line 1 char 0 ('END')
+    start = round(float(textArea.index(CURRENT)) - 100.0, 1)     # Get index at line 1 char 0 ('END')
     end = round(float(textArea.index(CURRENT)) + 50.0, 1)    # Get index at last char
     start2 = round(float(textArea.index(CURRENT)) - 500.0, 1)     # Get index at line 1 char 0 ('END')
     end2 = round(float(textArea.index(CURRENT)) + 500.0, 1)    # Get index at last char
@@ -93,8 +93,10 @@ def highlightPythonHelper():
     highlightDef()
     highlightNumbers()
     highlightSelfs()
-    highlightStrings()
-    highlightComments()
+    stringst = Thread(target=root.after(0, highlightStrings()))
+    stringst.start()
+    commentst = Thread(target=root.after(0, highlightComments()))
+    commentst.start()
 
 def highlightPythonInit():
     if updateSyntaxHighlighting.get():
@@ -168,12 +170,18 @@ def highlightPythonInit():
                 root.update_idletasks()
                 statusBar['text'] = f"Processing Inital Syntax, Please wait... 70%"
 
-    Thread(target=root.after(0, highlightKeywords())).start()
-    Thread(target=root.after(0, highlightStrings())).start()
-    Thread(target=root.after(0, highlightDef())).start()
-    Thread(target=root.after(0, highlightNumbers())).start()
-    Thread(target=root.after(0, highlightSelfs())).start()
-    Thread(target=root.after(0, highlightComments())).start()
+    keywordt = Thread(target=root.after(0, highlightKeywords()))
+    keywordt.start()
+    stringst = Thread(target=root.after(0, highlightStrings()))
+    stringst.start()
+    defst = Thread(target=root.after(0, highlightDef()))
+    defst.start()
+    numberst = Thread(target=root.after(0, highlightNumbers()))
+    numberst.start()
+    selfst = Thread(target=root.after(0, highlightSelfs()))
+    selfst.start()
+    commentst = Thread(target=root.after(0, highlightComments()))
+    commentst.start()
     if updateSyntaxHighlighting.get():
         statusBar['text'] = f"Processing Inital Syntax, Please wait... 100%"
         root.after(300)
@@ -350,7 +358,8 @@ def updateHighlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-    root.after(100, updateHighlights)  # schedule next run after 1 sec
+
+    root.after(250, updateHighlights)  # schedule next run after 1 sec
     root.update_idletasks()
 
 # Start updating highlights on new thread
@@ -408,7 +417,7 @@ textArea.tag_config("bold", font=("consolas", 12, "bold"))
 textArea['fg'] = '#4AF626'
 textArea['font'] = 'consolas 12'
 textArea['undo'] = True
-#textArea.bind('<KeyRelease>', root.after(0, highlightPythonThreaded))   # Call the function on key release (i.e., after typing finishes)
+#textArea.bind('<KeyRelease>', root.after(0,highlightPythonHelper()))   # Call the function on key release (i.e., after typing finishes)
 
 updateSyntaxHighlighting = IntVar()
 
