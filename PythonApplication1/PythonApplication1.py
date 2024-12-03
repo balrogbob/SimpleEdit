@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-SimpleEdit
+SimpleEdit 
 
 Got Bored, decided to start with nothing and just code whatever came into my head. 
 Turns out that was a python code editor to write the code for the editor I am writing. 
