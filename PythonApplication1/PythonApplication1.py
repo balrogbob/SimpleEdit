@@ -10,22 +10,44 @@ import os
 import sys
 import re
 
+def match_case_like_this(start, end):
+    pattern = r'def\s+[\w]*\s*\('
+    pattern2 = r'\s[\w]*\s*\.*'
+    matches = []
+    
+    for line in textArea.get(start, end).split('\n'):
+        if re.search(pattern, line):
+            matches.append(re.search(pattern, line).group(0))
 
+    matche = '\n'.join(matches)
+    matches2 = []
+    for line in matche.split('\n'):
+        if re.search(pattern2, line):
+            matches2.append(re.search(pattern2, line).group(0).lstrip())
+
+    return r'\b' + '|'.join(matches2) + r'\b'
+
+def functionNames(start, end):
+    global match_string
+    match_string = match_case_like_this(start, end)
 def highlight_python_helper():
 
-    start = float(textArea.index(CURRENT)) - 50.0     # Get index at line 1 char 0 ('END')
-    end = float(textArea.index(CURRENT)) + 50.0    # Get index at last char
-    start2 = float(textArea.index(CURRENT)) - 1000.0     # Get index at line 1 char 0 ('END')
-    end2 = float(textArea.index(CURRENT)) + 1000.0    # Get index at last char
+    start = round(float(textArea.index(CURRENT)) - 50.0, 1)     # Get index at line 1 char 0 ('END')
+    end = round(float(textArea.index(CURRENT)) + 50.0, 1)    # Get index at last char
+    start2 = round(float(textArea.index(CURRENT)) - 1000.0, 1)     # Get index at line 1 char 0 ('END')
+    end2 = round(float(textArea.index(CURRENT)) + 1000.0, 1)    # Get index at last char
     textArea.tag_remove('string', start, end)
     textArea.tag_remove('keyword', start, end)
     textArea.tag_remove('comment', start, end)
     textArea.tag_remove('selfs', start, end)
+    textArea.tag_remove('def', start, end)
     textArea.tag_remove('number', start, end)
     # Define regex patterns
+    functionNames(start, end)
+    defs = match_string
     keywords = r'\b(if|else|while|for|return|def|from|import|class)\b'
     selfs = r'\b(?:[a-z])(?:[A-Z]?[a-z])*(?:[A-Z][a-z]*)|\b(self|root)\b'
-    comments = r'#[^\n]*'
+    comments = r'#[^\n]*|"""(.*?)"""'
     string = r'"[^"]*"|\'[^\']*\''
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
 
@@ -43,7 +65,7 @@ def highlight_python_helper():
 
     def highlight_comments():
         content = textArea.get(start, end)
-        matches = [m.span() for m in re.finditer(comments, content)]
+        matches = [m.span() for m in re.finditer(comments, content, re.DOTALL)]
         for match in reversed(matches):
             textArea.tag_add("comment", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
@@ -59,12 +81,19 @@ def highlight_python_helper():
         for match in reversed(matches):
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
-    highlight_strings()
+    def highlight_def():
+        content = textArea.get(start, end)
+        matches = [m.span() for m in re.finditer(defs, content)]
+        for match in reversed(matches):
+            textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+
+
     highlight_keywords()
-    
-    highlight_comments()
+    highlight_def()
     highlight_numbers()
     highlight_selfs()
+    highlight_strings()
+    highlight_comments()
 
 def highlight_python_init():
 
@@ -73,10 +102,11 @@ def highlight_python_init():
     # Define regex patterns
     keywords = r'\b(if|else|while|for|return|def|from|import|class)\b'
     selfs = '\b(?:[a-z])(?:[A-Z]?[a-z])*(?:[A-Z][a-z]*)|\b(self|root)\b'
-    comments = r'#[^\n]*'
+    comments = r'#[^\n]*|"""(.*?)"""'
     string = r'"[^"]*"|\'[^\']*\''
     number = r'\b(\d+(\.\d*)?|\.\d+)\b'
-
+    functionNames(start, end)
+    defs = match_string
     def highlight_keywords():
         content = textArea.get(start, end)
         matches = [m.span() for m in re.finditer(keywords, content)]
@@ -91,7 +121,7 @@ def highlight_python_init():
 
     def highlight_comments():
         content = textArea.get(start, end)
-        matches = [m.span() for m in re.finditer(comments, content)]
+        matches = [m.span() for m in re.finditer(comments, content, re.DOTALL)]
         for match in reversed(matches):
             textArea.tag_add("comment", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
@@ -107,11 +137,18 @@ def highlight_python_init():
         for match in reversed(matches):
             textArea.tag_add("selfs", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
 
+    def highlight_def():
+        content = textArea.get(start, end)
+        matches = [m.span() for m in re.finditer(defs, content)]
+        for match in reversed(matches):
+            textArea.tag_add("def", f"{start} + {match[0]}c", f"{start} + {match[1]}c")
+
     highlight_keywords()
     highlight_strings()
-    highlight_comments()
+    highlight_def()
     highlight_numbers()
     highlight_selfs()
+    highlight_comments()
 
 # Create instance
 root = Tk()
@@ -263,9 +300,10 @@ def saveFile():
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-def highlight_python(event):
+def highlight_python_threaded(event):
     if updateSyntaxHighlighting.get():
-        highlight_python_helper
+        thread = Thread(target=highlight_python_helper)
+        thread.start()
 stop_event = threading.Event()
 
 def update_highlights():
@@ -277,6 +315,7 @@ def update_highlights():
         textArea.tag_remove('keyword', "1.0", END)
         textArea.tag_remove('comment', "1.0", END)
         textArea.tag_remove('selfs', "1.0", END)
+        textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
     root.after(1000, update_highlights)  # schedule next run after 1 sec
 
@@ -284,7 +323,7 @@ def update_highlights():
 
     
 
-root.bind('<Control-Key-s>', lambda event: saveFile())
+root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
 # Create menu options
 fileMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="File", menu=fileMenu)
@@ -325,22 +364,23 @@ textArea = Text(root)
 textArea.pack(fill=BOTH, expand=True, anchor="center")
 textArea['bg'] = 'black'
 textArea.tag_config("keyword", foreground="red")
-textArea.tag_config("comment", foreground="#75715E")
-textArea.tag_config("string", foreground="#C9CA6B")
 textArea.tag_config("number", foreground="#FDFD6A")
 textArea.tag_config("selfs", foreground="#33ccff")
+textArea.tag_config("def", foreground="#33ccff")
 textArea.tag_config("all", foreground="#4AF626")
+textArea.tag_config("string", foreground="#C9CA6B")
+textArea.tag_config("comment", foreground="#75715E")
 textArea.tag_config("bold", font=("consolas", 12, "bold"))
 textArea['fg'] = '#4AF626'
 textArea['font'] = 'consolas 12'
 textArea['undo'] = True
-textArea.bind('<KeyRelease>', root.after(50, highlight_python))   # Call the function on key release (i.e., after typing finishes)
+textArea.bind('<KeyRelease>', root.after(50, highlight_python_threaded))   # Call the function on key release (i.e., after typing finishes)
 
 updateSyntaxHighlighting = IntVar()
 
 Thread(target=lambda: root.after(0, update_highlights)).start()
 
-checkButton = Checkbutton(toolBar, text="Python context highlighting", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: highlight_python_init)
+checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: Thread(target=highlight_python_init).start())
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
 
