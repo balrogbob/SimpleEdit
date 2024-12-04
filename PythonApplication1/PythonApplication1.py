@@ -62,7 +62,7 @@ class CursorIndicator(Canvas):
         Canvas.__init__(self, *args, **kwargs)
         self.config(width=2, bg="white")  # Change the color here
 config = {}
-config['[Section1]'] = {'fontName': 'consolas', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True}
+config['[Section1]'] = {'fontName': 'consolas', 'cursorColor': 'white', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True}
 
 ini_path = 'config.ini'  # Create the .ini file in the same directory as your Python script
 
@@ -82,6 +82,7 @@ fontSize = config.get("Section1", "fontSize")  # prints: 12
 fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
 backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
 undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
+cursorColor = config.get("Section1", "cursorColor")  # prints: white
 
 def matchCaseLikeThis(start, end):
     pattern = r'def\s+[\w]*\s*\('
@@ -574,7 +575,7 @@ statusBar = Label(root, text="Ready", bd='1', relief=SUNKEN, anchor=W)
 statusBar.pack(side=BOTTOM, fill=X)
 
 # Create text area
-textArea = Text(root)
+textArea = Text(root, insertbackground=cursorColor)
 textArea.pack(side=LEFT, fill=BOTH, expand=True, anchor="w")
 textArea['bg'] = backgroundColor
 textArea.tag_config("keyword", foreground="red")
