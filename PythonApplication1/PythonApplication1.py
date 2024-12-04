@@ -46,13 +46,12 @@ from tkinter import *
 from tkinter import filedialog, messagebox
 from io import StringIO
 from threading import Thread
-# […]
 
 __author__ = 'Joshua Richards'
 __copyright__ = 'Copyright 2024, SimpleEdit'
 __credits__ = ['Balrogbob (Joshua Richards)']
 __license__ = 'MIT'
-__version__ = '0.0.1'
+__version__ = '0.0.2'
 __maintainer__ = 'Balrogbob'
 __email__ = 'josh@iconofgaming.com'
 __status__ = 'pre-alpha'
@@ -251,6 +250,18 @@ def cutSelectedText():
     textArea.delete(SEL_FIRST, SEL_LAST) # delete selection
     root.clipboard_clear() # clear clipboard content
     root.clipboard_append(cuttedText) # add cutted text to clipboard
+
+def formatBold():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises a TclError
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    
+    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+        textArea.tag_remove("bold", sel_start, sel_end)  # Remove bold formatting from selected/all text
+    else:
+        textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
+
     
 def saveFileAsThreaded():
     thread = Thread(target=saveFileAs)
@@ -329,7 +340,7 @@ def openFileThreaded():
         fileName = filedialog.askopenfilename(initialdir="/", title="Select file",
                                           filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
     else:
-                fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
+        fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
                                           filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
     if fileName:
         try:
@@ -371,11 +382,12 @@ def highlightPythonThreaded(event):
     if updateSyntaxHighlighting.get():
         thread = Thread(target=highlightPythonHelper)
         root.after(100, thread.start())
+
 stop_event = threading.Event()
 
 def updateHighlights():
     if updateSyntaxHighlighting.get():
-        thread = Thread(target=highlightPythonHelper())
+        thread = Thread(target=highlightPythonHelper(NONE))
         thread.start()  # your function to apply highlights
     else:
         textArea.tag_remove('string', "1.0", END)
@@ -384,7 +396,7 @@ def updateHighlights():
         textArea.tag_remove('selfs', "1.0", END)
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
-    root.after(500, updateHighlights)  # schedule next run after 0.5 sec
+    root.after(2000, updateHighlights)  # schedule next run after 10 sec
     root.update_idletasks()
 
 root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
@@ -449,17 +461,10 @@ def highlightPythonHelperT(event):
 
 textArea.bind('<KeyRelease>', lambda event: root.after(200, Thread(target=highlightPythonHelperT(Event))))   # Call the function on key release (i.e., after typing finishes)
 updateSyntaxHighlighting = IntVar()
-#Thread(target=lambda: root.after(0, updateHighlights)).start()
+Thread(target=lambda: root.after(0, updateHighlights)).start()
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
-def formatBold():
-    try:
-        sel_start, sel_end = textArea.tag_ranges("sel")
-        # Replace 'sel' with the current selection in the text area
-        textArea.tag_add("bold", sel_start, sel_end)
-    except Exception as e:
-        textArea.tag_add("bold", "1.0", END)
 
 formatButton1 = Button(toolBar, text='Bold', command=formatBold)
 formatButton1.pack(side=LEFT, padx=2, pady=2)
