@@ -44,7 +44,7 @@ import configparser
 from ast import Not
 from selectors import SelectorKey
 from tkinter import *
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, colorchooser
 from io import StringIO
 from threading import Thread
 
@@ -83,6 +83,133 @@ fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
 backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
 undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
 cursorColor = config.get("Section1", "cursorColor")  # prints: white
+
+
+def createConfigWindow():
+    # This function creates and displays the configuration window as a modal dialog.
+    global top
+
+    # Create new top level widget.
+    top = Toplevel()
+    top.grab_set() # Modal behavior.
+    top.title("Settings")
+
+    # Frame for the Text Boxes.
+    text_frame = Frame(top)
+    text_frame.pack()
+
+    fontNameField = Entry(text_frame, width=20, text=config.get("Section1", "fontName"))
+    fontNameField.grid(row=0, column=2)
+    fontNameLabel = Label(text_frame, width=20, text="Font")
+    fontNameLabel.grid(row=0, column=1)
+
+    fontSizeField = Entry(text_frame, width=20, text=config.get("Section1", "fontSize"))
+    fontSizeField.grid(row=1, column=2)
+    fontSizeLabel = Label(text_frame, width=20, text="Font Size")
+    fontSizeLabel.grid(row=1, column=1)
+
+    undoCheckVar = IntVar()
+    undoCheck = Checkbutton(text_frame, text="Enable undo", variable=undoCheckVar)
+    undoCheck.grid(row=6, column=1)
+
+
+    backgroundColorField = Entry(text_frame, width=20)
+    backgroundColorField.grid(row=2, column=2) 
+    cursorColorField = Entry(text_frame, width=20)
+    cursorColorField.grid(column=2, row=4)
+
+    fontColorChoice = Entry(text_frame, width=20)
+    fontColorChoice.grid(column=2, row=5)
+    fontColorVar = StringVar()
+
+    def fontColor():
+        fontColor = colorchooser.askcolor(title="Font Color", initialcolor=config.get("Section1", "fontColor"))
+        if fontColor:
+            fontColorChoice.delete(0, END)
+            fontColorChoice.insert(0, getHexColor(fontColor))
+
+    def backgroundColor():
+        backgroundColor = colorchooser.askcolor(title='Background Color', initialcolor=config.get("Section1", "backgroundColor"))
+        if backgroundColor:
+            backgroundColorField.delete(0, END)
+            backgroundColorField.insert(0, getHexColor(backgroundColor))
+
+    def cursorColor():
+        cursorColor = colorchooser.askcolor(title="Cursor Color", initialcolor=config.get("Section1", "cursorColor"))
+        if cursorColor:
+            cursorColorField.delete(0, END)
+            cursorColorField.insert(0, getHexColor(cursorColor))
+
+    color_chooser_button = Button(text_frame, text='Choose Font Color', command=fontColor)
+    color_chooser_button.grid(row=5, column=1)
+
+    backgroundFocusField = Button(text_frame, text="Choose Background", command=backgroundColor) 
+    backgroundFocusField.grid(row=2, column=1)
+
+    cursorFocusField = Button(text_frame, text="Choose Cursor Color", command=cursorColor) 
+    cursorFocusField.grid(row=4, column=1)
+
+
+    def onClosing():
+        fontName = fontNameField.get()
+        fontSize = fontSizeField.get()
+        fontColor = fontColorChoice.get()
+        backgroundColor = backgroundColorField.get()
+        undoSetting = undoCheckVar.get()
+        cursorColor = cursorColorField.get()
+
+        config.set("Section1", "fontName", fontName)
+        config.set("Section1", "fontSize", fontSize)
+        config.set("Section1", "fontColor", fontColor)
+        config.set("Section1", "backgroundColor", backgroundColor) 
+        config.set("Section1", "undoSetting", str(undoSetting))
+        config.set("Section1", "cursorColor", cursorColor)
+
+        with open('config.ini', 'w') as configfile:
+            config.write(configfile)
+        top.destroy()
+
+
+
+    def refreshFromFile():
+        fontNameField.delete(0, END)
+        fontNameField.insert(0, config.get("Section1", "fontName"))  
+        fontSizeField.delete(0, END)
+        fontSizeField.insert(0, config.get("Section1", "fontSize"))
+        fontColorChoice.delete(0, END)
+        fontColorChoice.insert(0, config.get("Section1", "fontColor"))
+        undoCheckVar.set(config.getboolean("Section1", "undoSetting"))  
+        cursorColorField.delete(0, END)
+        cursorColorField.insert(0, config.get("Section1", "cursorColor"))
+        backgroundColorField.delete(0, END)
+        backgroundColorField.insert(0, config.get("Section1", "backgroundColor"))
+
+
+        # Create a color picker button that opens a color dialog.
+    
+
+        # Add the widgets.
+    text_frame.pack()
+    saveButton = Button(top, text="Save", command=onClosing)
+    saveButton.pack()
+
+    refreshButton = Button(top, text="Refresh from file", command=refreshFromFile)
+    refreshButton.pack()
+    refreshFromFile()
+
+
+    def saveToFile():
+        onClosing()
+
+# Then elsewhere in your tkinter program when you want to open this window as a popup on a button click
+def getHexColor(s):
+    match = re.search(r'#\w+', str(s))
+    if match:
+        return match.group(0)
+
+def settingModal():
+    createConfigWindow()
+    top.mainloop()
 
 def matchCaseLikeThis(start, end):
     pattern = r'def\s+[\w]*\s*\('
@@ -613,6 +740,8 @@ updateSyntaxHighlighting = IntVar()
 Thread(target=lambda: root.after(0, updateHighlights)).start()
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
+formatButton5 = Button(toolBar, text='Settings', command=settingModal)
+formatButton5.pack(side=RIGHT, padx=2, pady=2)
 scroll.pack(side=RIGHT, fill=Y)
 
 
