@@ -57,6 +57,10 @@ __maintainer__ = 'Balrogbob'
 __email__ = 'josh@iconofgaming.com'
 __status__ = 'pre-alpha'
 
+class CursorIndicator(Canvas):
+    def __init__(self, *args, **kwargs):
+        Canvas.__init__(self, *args, **kwargs)
+        self.config(width=2, bg="white")  # Change the color here
 config = {}
 config['[Section1]'] = {'fontName': 'consolas', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True}
 
@@ -571,7 +575,7 @@ statusBar.pack(side=BOTTOM, fill=X)
 
 # Create text area
 textArea = Text(root)
-textArea.pack(fill=BOTH, expand=True, anchor="center")
+textArea.pack(side=LEFT, fill=BOTH, expand=True, anchor="w")
 textArea['bg'] = backgroundColor
 textArea.tag_config("keyword", foreground="red")
 textArea.tag_config("number", foreground="#FDFD6A")
@@ -589,6 +593,8 @@ textArea.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
 textArea['fg'] = fontColor
 textArea['font'] = f'{fontName} {str(fontSize)}'
 textArea['undo'] = undoSetting
+scroll = Scrollbar(root, command=textArea.yview)
+textArea.configure(yscrollcommand=scroll.set)
 
 def highlightPythonHelperT(event):
     if updateSyntaxHighlighting.get():
@@ -606,7 +612,7 @@ updateSyntaxHighlighting = IntVar()
 Thread(target=lambda: root.after(0, updateHighlights)).start()
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
-
+scroll.pack(side=RIGHT, fill=Y)
 
 
 
