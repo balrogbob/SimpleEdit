@@ -40,6 +40,7 @@ import sys
 import threading
 import time
 import re
+import configparser
 from ast import Not
 from selectors import SelectorKey
 from tkinter import *
@@ -55,6 +56,28 @@ __version__ = '0.0.2'
 __maintainer__ = 'Balrogbob'
 __email__ = 'josh@iconofgaming.com'
 __status__ = 'pre-alpha'
+
+config = {}
+config['[Section1]'] = {'fontName': 'consolas', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True}
+
+ini_path = 'config.ini'  # Create the .ini file in the same directory as your Python script
+
+# Check if file exists. If it doesn't, write it.
+if not os.path.isfile(ini_path):
+    with open(ini_path, "w") as f:
+        for section in config.keys():
+            f.write(f"{section}\n")
+            for key, value in config[section].items():
+                f.write(f"{key} = {value}\n")
+
+config = configparser.ConfigParser()
+config.read(ini_path)
+
+fontName = config.get("Section1", "fontName")  # prints: consolas
+fontSize = config.get("Section1", "fontSize")  # prints: 12
+fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
+backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
+undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
 
 def matchCaseLikeThis(start, end):
     pattern = r'def\s+[\w]*\s*\('
@@ -257,12 +280,118 @@ def formatBold():
     except Exception as e:  # If no selection exists, it raises a TclError
         sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
     
-    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
-        textArea.tag_remove("bold", sel_start, sel_end)  # Remove bold formatting from selected/all text
+    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("bold", sel_start, sel_end)  # Remove underline formatting from selected/all text
     else:
-        textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
+        if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("bolditalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("underlineitalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("underline", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("boldunderline", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("italic"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("italic", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("underlineitalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
 
-    
+def formatItalic():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("italic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("underline", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("boldunderline", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                     textArea.tag_remove("bolditalic", sel_start, sel_end)
+                     textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("boldunderline", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("italic", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatUnderLine():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("bolditalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("italic", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("boldunderline", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("bolditalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("underline", sel_start, sel_end)  # Add bold formatting to selected/all text
+   
+def removeAllFormatting():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+    textArea.tag_remove("boldunderline", sel_start, sel_end)
+    textArea.tag_remove("italic", sel_start, sel_end)
+    textArea.tag_remove("bold", sel_start, sel_end)
+    textArea.tag_remove("bolditalic", sel_start, sel_end)
+
 def saveFileAsThreaded():
     thread = Thread(target=saveFileAs)
     thread.start()
@@ -427,6 +556,14 @@ btn2 = Button(toolBar, text='Open', command=openFile)
 btn2.pack(side=LEFT, padx=2, pady=2)
 btn3 = Button(toolBar, text='Save', command=saveFileAsThreaded)
 btn3.pack(side=LEFT, padx=2, pady=2)
+formatButton1 = Button(toolBar, text='Bold', command=formatBold)
+formatButton1.pack(side=LEFT, padx=2, pady=2)
+formatButton2 = Button(toolBar, text='Italic', command=formatItalic)
+formatButton2.pack(side=LEFT, padx=2, pady=2)
+formatButton3 = Button(toolBar, text='Underline', command=formatUnderLine)
+formatButton3.pack(side=LEFT, padx=2, pady=2)
+formatButton4 = Button(toolBar, text='Remove Formatting', command=removeAllFormatting)
+formatButton4.pack(side=LEFT, padx=2, pady=2)
 
 # Create status bar
 statusBar = Label(root, text="Ready", bd='1', relief=SUNKEN, anchor=W)
@@ -435,18 +572,23 @@ statusBar.pack(side=BOTTOM, fill=X)
 # Create text area
 textArea = Text(root)
 textArea.pack(fill=BOTH, expand=True, anchor="center")
-textArea['bg'] = 'black'
+textArea['bg'] = backgroundColor
 textArea.tag_config("keyword", foreground="red")
 textArea.tag_config("number", foreground="#FDFD6A")
 textArea.tag_config("selfs", foreground="#33ccff")
 textArea.tag_config("def", foreground="#33ccff")
-textArea.tag_config("all", foreground="#4AF626")
 textArea.tag_config("string", foreground="#C9CA6B")
 textArea.tag_config("comment", foreground="#75715E")
-textArea.tag_config("bold", font=("consolas", 12, "bold"))
-textArea['fg'] = '#4AF626'
-textArea['font'] = 'consolas 12'
-textArea['undo'] = True
+textArea.tag_config("bold", font=(fontName, fontSize, "bold"))
+textArea.tag_config("italic", font=(fontName, fontSize, "italic"))
+textArea.tag_config("underline", font=(fontName, fontSize, "underline"))
+textArea.tag_config("all", font=(fontName, fontSize, "bold", "italic", "underline"))
+textArea.tag_config("underlineitalic", font=(fontName, fontSize, "italic", "underline"))
+textArea.tag_config("boldunderline", font=(fontName, fontSize, "bold", "underline"))
+textArea.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
+textArea['fg'] = fontColor
+textArea['font'] = f'{fontName} {str(fontSize)}'
+textArea['undo'] = undoSetting
 
 def highlightPythonHelperT(event):
     if updateSyntaxHighlighting.get():
@@ -459,15 +601,14 @@ def highlightPythonHelperT(event):
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
 
-textArea.bind('<KeyRelease>', lambda event: root.after(200, Thread(target=highlightPythonHelperT(Event))))   # Call the function on key release (i.e., after typing finishes)
+textArea.bind('<KeyRelease>', lambda event: Thread(target=highlightPythonHelperT(Event)).start())   # Call the function on key release (i.e., after typing finishes)
 updateSyntaxHighlighting = IntVar()
 Thread(target=lambda: root.after(0, updateHighlights)).start()
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 
 
-formatButton1 = Button(toolBar, text='Bold', command=formatBold)
-formatButton1.pack(side=LEFT, padx=2, pady=2)
+
 
 # Define Main Loop
 def main():
