@@ -167,6 +167,17 @@ def createConfigWindow():
 
         with open('config.ini', 'w') as configfile:
             config.write(configfile)
+        fontName = config.get("Section1", "fontName")  # prints: consolas
+        fontSize = config.get("Section1", "fontSize")  # prints: 12
+        fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
+        backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
+        undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
+        cursorColor = config.get("Section1", "cursorColor")  # prints: white
+        textArea.config(font=(fontName, fontSize))
+        textArea.config(bg=(backgroundColor))
+        textArea.config(fg=(fontColor))
+        textArea.config(insertbackground=(cursorColor))
+
         top.destroy()
 
 
@@ -618,7 +629,7 @@ def openFileThreaded():
             messagebox.showerror("Error", str(e))
 
 def readyUpdate():
-    time.sleep(1)
+    root.after(1000)
     statusBar['text'] = "Ready"
 
 def newFile():
