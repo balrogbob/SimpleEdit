@@ -69,8 +69,8 @@ out_dir = 'out' # ignored if init_from is not 'resume'
 start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
 num_samples = 1 # number of samples to draw
 max_new_tokens = 128 # number of tokens generated in each sample
-temperature = 0.4 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 100 # retain only the top_k most likely tokens, clamp others to have 0 probability
+temperature = 1.1 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 300 # retain only the top_k most likely tokens, clamp others to have 0 probability
 seed = 1337
 device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
 dtype = 'float16'
@@ -108,7 +108,7 @@ class CursorIndicator(Canvas):
         Canvas.__init__(self, *args, **kwargs)
         self.config(width=2, bg="white")  # Change the color here
 config = {}
-config['[Section1]'] = {'fontName': 'consolas', 'cursorColor': 'white', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True}
+config['[Section1]'] = {'fontName': 'consolas', 'cursorColor': 'white', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True, 'aiMaxContext': 512}
 
 ini_path = 'config.ini'  # Create the .ini file in the same directory as your Python script
 
@@ -129,32 +129,69 @@ fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
 backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
 undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
 cursorColor = config.get("Section1", "cursorColor")  # prints: white
-
+aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
 def pythonAIAutoComplete():
+    end = ''
     try:
         start, end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+        if len(textArea.get(start, end)) >= aiMaxContext:
+            textArea.tag_remove("sel", '1.0', END)
+            start = textArea.index(f'{start}-{aiMaxContext}c')
+            statusBar['text'] = f"Reducing Selection to avoid model insanity!"
+            textArea.tag_add("sel", start, end)
+            bypass = True
     except Exception as e:  # If no selection exists, it raises a TclError
-        start = textArea.index('insert-256c')   # Get index at line 1 char 0 ('END')
-        end = textArea.index('insert')    # Get index at last char
-        textArea.tag_add("sel", start, end)
+        if end == '':
+            start = textArea.index(f'insert-{aiMaxContext}c')   # Get index at line 1 char 0 ('END')
+            end = textArea.index('insert')    # Get index at last char
+            statusBar['text'] = f"Selecing previous {aiMaxContext} characters as context for generation."
+            root.update_idletasks
+            root.after(0, textArea.tag_add("sel", start, end))
     content = textArea.get(start, end)
-    maxTokens = int(len(content) / 4 + 32)
-    if maxTokens >= 256:
-        maxTokens = 256
+    maxTokens = int(len(content) / 8 + 64)
+    statusBar['text'] = f"Setting max tokens to {maxTokens}."
+    print(f"Setting max tokens to {maxTokens}.")
+    root.update_idletasks
+    root.after(200)
+    #if maxTokens >= 256:
+    #    maxTokens = 256
     if content == '':
-        content = f'if '
+        content = f'<|endoftext|>'
+        statusBar['text'] = f"Empty Context!!! Good Luck!"
+        root.update_idletasks
+        root.after(300)
+    else:
+        content = f'<|endoftext|>{content}'
+    statusBar['text'] = f"Encoding!"
+    root.update_idletasks
+    root.after(50)
     start_ids = encode(content)
+    statusBar['text'] = f"Encoded!"
+    root.update_idletasks
+    root.after(0)
+
     x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
     # run generation
     with torch.no_grad():
+         statusBar['text'] = f"Generating!"
+         root.update_idletasks
+         root.after(0)
          y = model.generate(x, maxTokens, temperature=temperature, top_k=top_k)
+         statusBar['text'] = f"Generated, Populating now."
+         root.update_idletasks
+         root.after(0)
+
          textArea.mark_set('insert', f'{end}')
          textArea.delete(start, end)
-         decoded = str(decode(y[0].tolist()))
-         length = len(decoded)
+         def clean_string(input_text):
+            pattern = r'<\|\s*endoftext\s*\|>'
+            cleaned_text = re.sub(pattern, '', input_text)
+            return cleaned_text
+         decoded = clean_string(str(decode(y[0].tolist())))
          textArea.insert(textArea.index(INSERT), decoded)
-         textArea.tag_remove("sel", start, end)
+         textArea.tag_remove("sel", '1.0', END)
          textArea.see(INSERT)
+         readyUpdate()
 
 def createConfigWindow():
     # This function creates and displays the configuration window as a modal dialog.
@@ -179,9 +216,16 @@ def createConfigWindow():
     fontSizeLabel = Label(text_frame, width=20, text="Font Size")
     fontSizeLabel.grid(row=1, column=1)
 
+
     undoCheckVar = IntVar()
     undoCheck = Checkbutton(text_frame, text="Enable undo", variable=undoCheckVar)
     undoCheck.grid(row=6, column=1)
+
+    aiMaxContext
+    aiMaxContextField = Entry(text_frame, width=20, text=config.get("Section1", "aiMaxContext"))
+    aiMaxContextField.grid(row=7, column=2)
+    aiMaxContextLabel = Label(text_frame, width=20, text="Max AI Context")
+    aiMaxContextLabel.grid(row=7, column=1)
 
 
     backgroundColorField = Entry(text_frame, width=20)
@@ -228,13 +272,16 @@ def createConfigWindow():
         backgroundColor = backgroundColorField.get()
         undoSetting = undoCheckVar.get()
         cursorColor = cursorColorField.get()
-
+        aiMaxContext = aiMaxContextField.get()
+        
         config.set("Section1", "fontName", fontName)
         config.set("Section1", "fontSize", fontSize)
         config.set("Section1", "fontColor", fontColor)
         config.set("Section1", "backgroundColor", backgroundColor) 
         config.set("Section1", "undoSetting", str(undoSetting))
         config.set("Section1", "cursorColor", cursorColor)
+        config.set("Section1", "aiMaxContext", aiMaxContext)
+        
 
         with open('config.ini', 'w') as configfile:
             config.write(configfile)
@@ -244,6 +291,7 @@ def createConfigWindow():
         backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
         undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
         cursorColor = config.get("Section1", "cursorColor")  # prints: white
+        aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
         textArea.config(font=(fontName, fontSize))
         textArea.config(bg=(backgroundColor))
         textArea.config(fg=(fontColor))
@@ -265,6 +313,8 @@ def createConfigWindow():
         cursorColorField.insert(0, config.get("Section1", "cursorColor"))
         backgroundColorField.delete(0, END)
         backgroundColorField.insert(0, config.get("Section1", "backgroundColor"))
+        aiMaxContextField.delete(0, END)
+        aiMaxContextField.insert(0, config.get("Section1", "aiMaxContext"))
 
 
         # Create a color picker button that opens a color dialog.
@@ -785,7 +835,7 @@ statusBar.pack(side=BOTTOM, fill=X)
 
 # Create text area
 textArea = Text(root, insertbackground=cursorColor)
-textArea.pack(side=LEFT, fill=BOTH, expand=True, anchor="w")
+textArea.pack(side=LEFT, fill=BOTH, expand=True, anchor="center")
 textArea['bg'] = backgroundColor
 textArea.tag_config("keyword", foreground="red")
 textArea.tag_config("number", foreground="#FDFD6A")
