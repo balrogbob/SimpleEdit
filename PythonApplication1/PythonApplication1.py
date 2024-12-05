@@ -177,7 +177,7 @@ def createConfigWindow():
         textArea.config(bg=(backgroundColor))
         textArea.config(fg=(fontColor))
         textArea.config(insertbackground=(cursorColor))
-
+        textArea.config(undo=(undoSetting))
         top.destroy()
 
 
