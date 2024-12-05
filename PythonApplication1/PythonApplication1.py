@@ -139,6 +139,8 @@ def pythonAIAutoComplete():
         textArea.tag_add("sel", start, end)
     content = textArea.get(start, end)
     maxTokens = int(len(content) / 4 + 32)
+    if maxTokens >= 256:
+        maxTokens = 256
     if content == '':
         content = f'if '
     start_ids = encode(content)
