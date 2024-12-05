@@ -41,12 +41,19 @@ import threading
 import time
 import re
 import configparser
+import pickle
+from token import NEWLINE
+import torch
+import tiktoken
+from model import GPTConfig, GPT
 from ast import Not
 from selectors import SelectorKey
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser
 from io import StringIO
 from threading import Thread
+from contextlib import nullcontext
+
 
 __author__ = 'Joshua Richards'
 __copyright__ = 'Copyright 2024, SimpleEdit'
@@ -56,6 +63,45 @@ __version__ = '0.0.2'
 __maintainer__ = 'Balrogbob'
 __email__ = 'josh@iconofgaming.com'
 __status__ = 'pre-alpha'
+
+init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
+out_dir = 'out' # ignored if init_from is not 'resume'
+start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
+num_samples = 1 # number of samples to draw
+max_new_tokens = 128 # number of tokens generated in each sample
+temperature = 0.4 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
+top_k = 100 # retain only the top_k most likely tokens, clamp others to have 0 probability
+seed = 1337
+device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+dtype = 'float16'
+torch.manual_seed(seed)
+device_type = 'cpu'
+ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
+
+# model
+
+# init from a model saved in a specific directory
+ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+checkpoint = torch.load(ckpt_path, map_location=device, weights_only=True)
+gptconf = GPTConfig(**checkpoint['model_args'])
+model = GPT(gptconf)
+state_dict = checkpoint['model']
+unwanted_prefix = '_orig_mod.'
+for k,v in list(state_dict.items()):
+    if k.startswith(unwanted_prefix):
+        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+model.load_state_dict(state_dict)
+model.eval()
+model.to(device)
+# look for the meta pickle in case it is available in the dataset folder
+load_meta = False
+
+
+# ok let's assume gpt-2 encodings by default
+enc = tiktoken.get_encoding("gpt2")
+encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+decode = lambda l: enc.decode(l)
+# encode the beginning of the prompt
 
 class CursorIndicator(Canvas):
     def __init__(self, *args, **kwargs):
@@ -84,6 +130,29 @@ backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
 undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
 cursorColor = config.get("Section1", "cursorColor")  # prints: white
 
+def pythonAIAutoComplete():
+    try:
+        start, end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises a TclError
+        start = textArea.index('insert-256c')   # Get index at line 1 char 0 ('END')
+        end = textArea.index('insert')    # Get index at last char
+        textArea.tag_add("sel", start, end)
+    content = textArea.get(start, end)
+    maxTokens = int(len(content) / 4 + 32)
+    if content == '':
+        content = f'if '
+    start_ids = encode(content)
+    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
+    # run generation
+    with torch.no_grad():
+         y = model.generate(x, maxTokens, temperature=temperature, top_k=top_k)
+         textArea.mark_set('insert', f'{end}')
+         textArea.delete(start, end)
+         decoded = str(decode(y[0].tolist()))
+         length = len(decoded)
+         textArea.insert(textArea.index(INSERT), decoded)
+         textArea.tag_remove("sel", start, end)
+         textArea.see(INSERT)
 
 def createConfigWindow():
     # This function creates and displays the configuration window as a modal dialog.
@@ -752,6 +821,8 @@ Thread(target=lambda: root.after(0, updateHighlights)).start()
 checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 formatButton5 = Button(toolBar, text='Settings', command=settingModal)
+formatButton5.pack(side=RIGHT, padx=2, pady=2)
+formatButton5 = Button(toolBar, text='AI Autocomplete (Experimental)', command=lambda: Thread(target=pythonAIAutoComplete).start())
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
 scroll.pack(side=RIGHT, fill=Y)
 
