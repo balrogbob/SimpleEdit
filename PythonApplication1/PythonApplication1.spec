@@ -5,7 +5,7 @@ a = Analysis(
     ['PythonApplication1.py'],
     pathex=[],
     binaries=[],
-    datas=[('.\\ckpt.pt', '.')],
+    datas=[],
     hiddenimports=['tiktoken_ext.openai_public', 'tiktoken_ext'],
     hookspath=[],
     hooksconfig={},

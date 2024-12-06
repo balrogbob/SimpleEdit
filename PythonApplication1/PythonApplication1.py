@@ -53,7 +53,7 @@ from tkinter import filedialog, messagebox, colorchooser
 from io import StringIO
 from threading import Thread
 from contextlib import nullcontext
-
+import random
 
 __author__ = 'Joshua Richards'
 __copyright__ = 'Copyright 2024, SimpleEdit'
@@ -64,17 +64,40 @@ __maintainer__ = 'Balrogbob'
 __email__ = 'josh@iconofgaming.com'
 __status__ = 'pre-alpha'
 
+config = {}
+config['[Section1]'] = {'fontName': 'consolas', 'cursorColor': 'white', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True, 'aiMaxContext': 512, 'temperature': 1.1, 'top_k': 300, 'seed': 1337}
+
+ini_path = 'config.ini'  # Create the .ini file in the same directory as your Python script
+
+# Check if file exists. If it doesn't, write it.
+if not os.path.isfile(ini_path):
+    with open(ini_path, "w") as f:
+        for section in config.keys():
+            f.write(f"{section}\n")
+            for key, value in config[section].items():
+                f.write(f"{key} = {value}\n")
+
+config = configparser.ConfigParser()
+config.read(ini_path)
+
+fontName = config.get("Section1", "fontName")  # prints: consolas
+fontSize = config.get("Section1", "fontSize")  # prints: 12
+fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
+backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
+undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
+cursorColor = config.get("Section1", "cursorColor")  # prints: white
+aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
+temperature = float(config.get("Section1", "temperature"))  # prints: white
+top_k = int(config.get("Section1", "top_k"))  # prints: white
+seed = int(config.get("Section1", "seed"))  # prints: white
+
+
 init_from = 'resume' # either 'resume' (from an out_dir) or a gpt2 variant (e.g. 'gpt2-xl')
 out_dir = 'out' # ignored if init_from is not 'resume'
-start = "\n" # or "<|endoftext|>" or etc. Can also specify a file, use as: "FILE:prompt.txt"
-num_samples = 1 # number of samples to draw
-max_new_tokens = 128 # number of tokens generated in each sample
-temperature = 1.1 # 1.0 = no change, < 1.0 = less random, > 1.0 = more random, in predictions
-top_k = 300 # retain only the top_k most likely tokens, clamp others to have 0 probability
-seed = 1337
-device = 'cpu' # examples: 'cpu', 'cuda', 'cuda:0', 'cuda:1', etc.
+device = 'cpu' 
 dtype = 'float16'
-torch.manual_seed(seed)
+
+torch.manual_seed(seed + random.randint(seed,9999))
 device_type = 'cpu'
 ptdtype = {'float32': torch.float32, 'bfloat16': torch.bfloat16, 'float16': torch.float16}[dtype]
 
@@ -107,36 +130,13 @@ class CursorIndicator(Canvas):
     def __init__(self, *args, **kwargs):
         Canvas.__init__(self, *args, **kwargs)
         self.config(width=2, bg="white")  # Change the color here
-config = {}
-config['[Section1]'] = {'fontName': 'consolas', 'cursorColor': 'white', 'fontSize': 12, 'fontColor': '#4AF626', 'backgroundColor': 'black', 'undoSetting': True, 'aiMaxContext': 512}
-
-ini_path = 'config.ini'  # Create the .ini file in the same directory as your Python script
-
-# Check if file exists. If it doesn't, write it.
-if not os.path.isfile(ini_path):
-    with open(ini_path, "w") as f:
-        for section in config.keys():
-            f.write(f"{section}\n")
-            for key, value in config[section].items():
-                f.write(f"{key} = {value}\n")
-
-config = configparser.ConfigParser()
-config.read(ini_path)
-
-fontName = config.get("Section1", "fontName")  # prints: consolas
-fontSize = config.get("Section1", "fontSize")  # prints: 12
-fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
-backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
-undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
-cursorColor = config.get("Section1", "cursorColor")  # prints: white
-aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
 def pythonAIAutoComplete():
     end = ''
     try:
         start, end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
-        if len(textArea.get(start, end)) >= aiMaxContext:
+        if len(textArea.get(start, end)) >= int(aiMaxContext):
             textArea.tag_remove("sel", '1.0', END)
-            start = textArea.index(f'{start}-{aiMaxContext}c')
+            start = textArea.index(f'{end}-{aiMaxContext}c')
             statusBar['text'] = f"Reducing Selection to avoid model insanity!"
             textArea.tag_add("sel", start, end)
             bypass = True
@@ -148,20 +148,22 @@ def pythonAIAutoComplete():
             root.update_idletasks
             root.after(0, textArea.tag_add("sel", start, end))
     content = textArea.get(start, end)
-    maxTokens = int(len(content) / 8 + 64)
+    maxTokens = int(len(content) / 8 + 128)
     statusBar['text'] = f"Setting max tokens to {maxTokens}."
     print(f"Setting max tokens to {maxTokens}.")
     root.update_idletasks
     root.after(200)
     #if maxTokens >= 256:
     #    maxTokens = 256
+    skipstrip = False
     if content == '':
+        skipstrip = True
         content = f'<|endoftext|>'
         statusBar['text'] = f"Empty Context!!! Good Luck!"
         root.update_idletasks
         root.after(300)
     else:
-        content = f'<|endoftext|>{content}'
+        content = f'{content}'
     statusBar['text'] = f"Encoding!"
     root.update_idletasks
     root.after(50)
@@ -183,9 +185,13 @@ def pythonAIAutoComplete():
 
          textArea.mark_set('insert', f'{end}')
          textArea.delete(start, end)
+         
          def clean_string(input_text):
             pattern = r'<\|\s*endoftext\s*\|>'
-            cleaned_text = re.sub(pattern, '', input_text)
+            if skipstrip == False:
+                cleaned_text = re.sub(pattern, '\n', input_text)
+            else:
+                cleaned_text = re.sub(pattern, '', input_text)
             return cleaned_text
          decoded = clean_string(str(decode(y[0].tolist())))
          textArea.insert(textArea.index(INSERT), decoded)
@@ -221,12 +227,24 @@ def createConfigWindow():
     undoCheck = Checkbutton(text_frame, text="Enable undo", variable=undoCheckVar)
     undoCheck.grid(row=6, column=1)
 
-    aiMaxContext
     aiMaxContextField = Entry(text_frame, width=20, text=config.get("Section1", "aiMaxContext"))
     aiMaxContextField.grid(row=7, column=2)
     aiMaxContextLabel = Label(text_frame, width=20, text="Max AI Context")
     aiMaxContextLabel.grid(row=7, column=1)
+    temperatureField = Entry(text_frame, width=20, text=config.get("Section1", "temperature"))
+    temperatureField.grid(row=8, column=2)
+    temperatureLabel = Label(text_frame, width=20, text="AI Temperature")
+    temperatureLabel.grid(row=8, column=1)
 
+    top_kField = Entry(text_frame, width=20, text=config.get("Section1", "top_k"))
+    top_kField.grid(row=9, column=2)
+    top_kLabel = Label(text_frame, width=20, text="AI top_k")
+    top_kLabel.grid(row=9, column=1)
+
+    seedField = Entry(text_frame, width=20, text=config.get("Section1", "seed"))
+    seedField.grid(row=10, column=2)
+    seedLabel = Label(text_frame, width=20, text="AI seed")
+    seedLabel.grid(row=10, column=1)
 
     backgroundColorField = Entry(text_frame, width=20)
     backgroundColorField.grid(row=2, column=2) 
@@ -273,7 +291,9 @@ def createConfigWindow():
         undoSetting = undoCheckVar.get()
         cursorColor = cursorColorField.get()
         aiMaxContext = aiMaxContextField.get()
-        
+        temperature = float(temperatureField.get())
+        top_k = int(top_kField.get())
+        seed = int(seedField.get())
         config.set("Section1", "fontName", fontName)
         config.set("Section1", "fontSize", fontSize)
         config.set("Section1", "fontColor", fontColor)
@@ -281,6 +301,13 @@ def createConfigWindow():
         config.set("Section1", "undoSetting", str(undoSetting))
         config.set("Section1", "cursorColor", cursorColor)
         config.set("Section1", "aiMaxContext", aiMaxContext)
+        config.set("Section1", "temperature", str(temperature))
+        config.set("Section1", "top_k", str(top_k))
+        config.set("Section1", "seedField", str(seed))
+
+
+        
+
         
 
         with open('config.ini', 'w') as configfile:
@@ -292,6 +319,9 @@ def createConfigWindow():
         undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
         cursorColor = config.get("Section1", "cursorColor")  # prints: white
         aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
+        seed = int(config.get("Section1", "seedField"))  # prints: white
+        top_k = int(config.get("Section1", "top_k"))  # prints: white
+        temperature = float(config.get("Section1", "temperature"))  # prints: white
         textArea.config(font=(fontName, fontSize))
         textArea.config(bg=(backgroundColor))
         textArea.config(fg=(fontColor))
@@ -315,6 +345,13 @@ def createConfigWindow():
         backgroundColorField.insert(0, config.get("Section1", "backgroundColor"))
         aiMaxContextField.delete(0, END)
         aiMaxContextField.insert(0, config.get("Section1", "aiMaxContext"))
+        top_kField.delete(0, END)
+        top_kField.insert(0, config.get("Section1", "top_k"))
+        seedField.delete(0, END)
+        seedField.insert(0, config.get("Section1", "seed"))
+        temperatureField.delete(0, END)
+        temperatureField.insert(0, config.get("Section1", "temperature"))
+
 
 
         # Create a color picker button that opens a color dialog.
