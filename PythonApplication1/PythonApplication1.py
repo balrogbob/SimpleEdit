@@ -17,10 +17,12 @@ import threading
 import re
 import configparser
 import random
+import time
 from io import StringIO
 from threading import Thread
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
+from tkinter import ttk
 
 # Optional ML dependencies (wrapped so editor still runs without them)
 try:
@@ -318,6 +320,15 @@ def init_line_numbers():
         lineNumbersCanvas = Canvas(root, width=40, bg='black', highlightthickness=0)
         lineNumbersCanvas.pack(side=LEFT, fill=Y)
 
+# status bar area (now a frame so we can place a button at lower-right)
+statusFrame = Frame(root)
+statusFrame.pack(side=BOTTOM, fill=X)
+
+statusBar = Label(statusFrame, text="Ready", bd=1, relief=SUNKEN, anchor=W)
+statusBar.pack(side=LEFT, fill=X, expand=True)
+
+# placeholder for refresh button (created below near bindings so function names exist)
+refreshSyntaxButton = None
 
 init_line_numbers()
 
@@ -333,9 +344,7 @@ scroll = Scrollbar(root, command=textArea.yview)
 textArea.configure(yscrollcommand=scroll.set)
 scroll.pack(side=RIGHT, fill=Y)
 
-# status bar
-statusBar = Label(root, text="Ready", bd=1, relief=SUNKEN, anchor=W)
-statusBar.pack(side=BOTTOM, fill=X)
+
 
 # tag configs (extended)
 textArea.tag_config("number", foreground="#FDFD6A")
@@ -421,6 +430,251 @@ def _save_symbol_buffers(vars_set, defs_set):
     except Exception:
         pass
 
+def _apply_full_tags(actions, new_vars, new_defs):
+    """Apply tag actions on the main/UI thread and persist discovered symbols."""
+    try:
+        # clear tags across the whole buffer first
+        for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                  'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
+            textArea.tag_remove(t, "1.0", "end")
+
+        # add tags collected by the worker
+        for tag, ranges in actions.items():
+            if not ranges:
+                continue
+            for s, e in ranges:
+                # s/e are absolute character offsets from start of buffer
+                textArea.tag_add(tag, f"1.0 + {s}c", f"1.0 + {e}c")
+
+        # persist newly discovered symbols (union)
+        updated = False
+        if new_vars:
+            if not new_vars.issubset(persisted_vars):
+                persisted_vars.update(new_vars)
+                updated = True
+        if new_defs:
+            if not new_defs.issubset(persisted_defs):
+                persisted_defs.update(new_defs)
+                updated = True
+        if updated:
+            _save_symbol_buffers(persisted_vars, persisted_defs)
+
+        statusBar['text'] = "Ready"
+    except Exception:
+        # keep UI resilient to errors
+        pass
+
+
+def _bg_full_scan_and_collect(content, progress_callback=None):
+    """Background worker: scan content string and return tag ranges + discovered symbols.
+
+    Accepts optional progress_callback(percent:int, message:str) which will be called
+    periodically from the worker thread. Caller must ensure UI updates happen on main thread
+    (i.e. use root.after inside the callback).
+    Returns (actions_dict, new_vars_set, new_defs_set)
+    where actions_dict is mapping tag -> list of (abs_start, abs_end) offsets.
+    """
+    actions = {
+        'string': [], 'comment': [], 'number': [], 'decorator': [], 'class_name': [], 'variable': [],
+        'constant': [], 'attribute': [], 'def': [], 'keyword': [], 'builtin': [], 'selfs': [], 'todo': []
+    }
+
+    def report(pct, msg=None):
+        try:
+            if progress_callback:
+                progress_callback(int(pct), msg or "")
+        except Exception:
+            pass
+
+    try:
+        # We'll report progress in steps as we run each major pass.
+        # List of passes (name, function to run)
+        protected_spans = []
+
+        # Pass 1: strings
+        report(2, "Scanning strings...")
+        for m in STRING_RE.finditer(content):
+            s, e = m.span()
+            actions['string'].append((s, e))
+            protected_spans.append((s, e))
+        report(8)
+
+        # Pass 2: comments and TODOs
+        report(9, "Scanning comments...")
+        for m in COMMENT_RE.finditer(content):
+            s, e = m.span()
+            actions['comment'].append((s, e))
+            protected_spans.append((s, e))
+            mm = TODO_RE.search(content, m.start(), m.end())
+            if mm:
+                ts, te = mm.span()
+                actions['todo'].append((ts, te))
+        report(14)
+
+        def overlaps_protected(s, e):
+            for ps, pe in protected_spans:
+                if not (e <= ps or s >= pe):
+                    return True
+            return False
+
+        # Pass 3: numbers
+        report(16, "Scanning numbers...")
+        for i, m in enumerate(NUMBER_RE.finditer(content)):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                actions['number'].append((s, e))
+            # occasionally yield progress
+            if i and (i % 200) == 0:
+                report(16 + min(10, i // 200), "Scanning numbers...")
+                time.sleep(0)  # yield thread
+        report(22)
+
+        # Pass 4: decorators
+        report(23, "Scanning decorators...")
+        for m in DECORATOR_RE.finditer(content):
+            s, e = m.span(1)
+            if not overlaps_protected(s, e):
+                actions['decorator'].append((s, e))
+        report(27)
+
+        # Pass 5: classes
+        report(28, "Scanning classes...")
+        for m in CLASS_RE.finditer(content):
+            s, e = m.span(1)
+            if not overlaps_protected(s, e):
+                actions['class_name'].append((s, e))
+        report(32)
+
+        # Pass 6: variable assignments
+        report(33, "Scanning variable assignments...")
+        for i, m in enumerate(VAR_ASSIGN_RE.finditer(content)):
+            s, e = m.span(1)
+            if not overlaps_protected(s, e):
+                actions['variable'].append((s, e))
+            if i and (i % 200) == 0:
+                report(33 + min(8, i // 200), "Scanning variable assignments...")
+                time.sleep(0)
+        report(41)
+
+        # Pass 7: constants ALL_CAPS
+        report(42, "Scanning constants...")
+        for m in CONSTANT_RE.finditer(content):
+            s, e = m.span(1)
+            if not overlaps_protected(s, e):
+                actions['constant'].append((s, e))
+        report(46)
+
+        # Pass 8: attributes (a.b -> tag 'b')
+        report(47, "Scanning attributes...")
+        for i, m in enumerate(ATTRIBUTE_RE.finditer(content)):
+            s, e = m.span(1)
+            if not overlaps_protected(s, e):
+                actions['attribute'].append((s, e))
+            if i and (i % 500) == 0:
+                report(47 + min(8, i // 500), "Scanning attributes...")
+                time.sleep(0)
+        report(55)
+
+        # Pass 9: dunder names
+        report(56, "Scanning dunder names...")
+        for m in DUNDER_RE.finditer(content):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                actions['def'].append((s, e))
+        report(60)
+
+        # Pass 10: f-strings (tag whole)
+        report(61, "Scanning f-strings...")
+        for m in FSTRING_RE.finditer(content):
+            s, e = m.span()
+            # already tagged as "string"; we keep for completeness
+        report(64)
+
+        # Pass 11: defs discovery and marking
+        report(65, "Discovering defs...")
+        try:
+            DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
+        except Exception:
+            DEF_RE = None
+        new_defs = set()
+        if DEF_RE:
+            for i, m in enumerate(DEF_RE.finditer(content)):
+                name = m.group(1)
+                new_defs.add(name)
+                if i and (i % 200) == 0:
+                    report(65 + min(6, i // 200), "Discovering defs...")
+                    time.sleep(0)
+        report(72)
+
+        # Pass 12: create def-tags by searching occurrences
+        report(73, "Tagging defs...")
+        if new_defs:
+            pattern = re.compile(r'\b(' + r'|'.join(re.escape(x) for x in new_defs) + r')\b')
+            for m in pattern.finditer(content):
+                s, e = m.span(1)
+                if not overlaps_protected(s, e):
+                    actions['def'].append((s, e))
+        report(76)
+
+        # Pass 13: keywords and builtins
+        report(77, "Scanning keywords and builtins...")
+        for i, m in enumerate(KEYWORD_RE.finditer(content)):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                actions['keyword'].append((s, e))
+            if i and (i % 1000) == 0:
+                report(77 + min(8, i // 1000), "Scanning keywords...")
+                time.sleep(0)
+        for i, m in enumerate(BUILTIN_RE.finditer(content)):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                actions['builtin'].append((s, e))
+            if i and (i % 1000) == 0:
+                report(85 + min(5, i // 1000), "Scanning builtins...")
+                time.sleep(0)
+        report(88)
+
+        # Pass 14: selfs/attributes highlight
+        report(89, "Scanning self/attributes...")
+        for m in SELFS_RE.finditer(content):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                actions['selfs'].append((s, e))
+        report(90)
+
+        # Pass 15: variables discovered across full file
+        report(91, "Collecting variables...")
+        new_vars = {m.group(1) for m in VAR_ASSIGN_RE.finditer(content)}
+        report(93)
+
+        # Pass 16: include persisted buffers
+        report(94, "Tagging persisted symbols...")
+        if persisted_vars:
+            try:
+                pattern_pv = re.compile(r'\b(' + r'|'.join(re.escape(x) for x in persisted_vars) + r')\b')
+                for m in pattern_pv.finditer(content):
+                    s, e = m.span(1)
+                    if not overlaps_protected(s, e):
+                        actions['variable'].append((s, e))
+            except re.error:
+                pass
+        if persisted_defs:
+            try:
+                pattern_pd = re.compile(r'\b(' + r'|'.join(re.escape(x) for x in persisted_defs) + r')\b')
+                for m in pattern_pd.finditer(content):
+                    s, e = m.span(1)
+                    if not overlaps_protected(s, e):
+                        actions['def'].append((s, e))
+            except re.error:
+                pass
+        report(98)
+
+        # Finalize
+        report(100, "Done, please wait while highlighting is applied")
+        return actions, new_vars, new_defs
+    except Exception:
+        report(100, "Error")
+        return actions, set(), set()
 
 # initialize persisted buffers
 persisted_vars, persisted_defs = _load_symbol_buffers()
@@ -755,10 +1009,74 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
         pass
 
 
-def highlightPythonInit():
-    """Force a full-buffer initial syntax pass (used when opening files)."""
-    global persisted_vars, persisted_defs
+# -------------------------
+# Progress popup helpers (centered, auto-close)
+# -------------------------
+def center_window(win):
+    win.update_idletasks()
+    w = win.winfo_width()
+    h = win.winfo_height()
+    sw = root.winfo_screenwidth()
+    sh = root.winfo_screenheight()
+    x = max(0, (sw // 2) - (w // 2))
+    y = max(0, (sh // 2) - (h // 2))
+    win.geometry(f"{w}x{h}+{x}+{y}")
 
+
+def show_progress_popup(title, determinate=True):
+    """
+    Create a centered progress dialog and return (dlg, progressbar, status_label).
+
+    By default the progressbar is determinate (determinate=True). Callers that
+    prefer an indeterminate spinner can pass determinate=False.
+
+    The returned Progressbar widget will have a 0-100 range when determinate.
+    """
+    dlg = Toplevel(root)
+    dlg.title(title)
+    dlg.transient(root)
+    dlg.grab_set()
+    Label(dlg, text=title).pack(padx=10, pady=(10, 0))
+
+    if determinate:
+        pb = ttk.Progressbar(dlg, mode='determinate', length=360, maximum=100, value=0)
+    else:
+        pb = ttk.Progressbar(dlg, mode='indeterminate', length=360)
+
+    pb.pack(padx=10, pady=10)
+    status = Label(dlg, text="")
+    status.pack(padx=10, pady=(0, 10))
+    dlg.update_idletasks()
+    center_window(dlg)
+
+    # start indeterminate only when requested
+    if not determinate:
+        try:
+            pb.start()
+        except Exception:
+            pass
+
+    return dlg, pb, status
+
+
+def close_progress_popup(dlg, pb=None):
+    try:
+        if pb:
+            pb.stop()
+    except Exception:
+        pass
+    try:
+        dlg.grab_release()
+    except Exception:
+        pass
+    try:
+        dlg.destroy()
+    except Exception:
+        pass
+
+
+def highlightPythonInit():
+    """Trigger a non-blocking initial syntax scan on load (snapshot + background worker)."""
     if not updateSyntaxHighlighting.get():
         # clear tags (include new tags)
         for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
@@ -770,36 +1088,134 @@ def highlightPythonInit():
     statusBar['text'] = "Processing initial syntax..."
     root.update_idletasks()
 
-    # Full content scan to discover new symbols (persist them)
-    full = textArea.get("1.0", "end-1c")
-    new_vars = {m.group(1) for m in VAR_ASSIGN_RE.finditer(full)}
-    # defs via explicit def/class regex
     try:
-        DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
+        content_snapshot = textArea.get("1.0", "end-1c")
     except Exception:
-        DEF_RE = None
-    new_defs = set()
-    if DEF_RE:
-        new_defs = {m.group(1) for m in DEF_RE.finditer(full)}
-    # update persisted buffers (union so manual removals are preserved only until user clears them)
-    # We add discoveries to persisted buffers so they remain highlighted even when not visible.
-    if new_vars:
-        persisted_vars.update(new_vars)
-    if new_defs:
-        persisted_defs.update(new_defs)
-    _save_symbol_buffers(persisted_vars, persisted_defs)
+        content_snapshot = ""
 
-    # force full-buffer scan and tagging
-    highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
-    statusBar['text'] = "Ready"
+    # show progress popup (starts indeterminate)
+    dlg, pb, status = show_progress_popup("Initial syntax highlighting")
+    status['text'] = "Scanning..."
+
+    # progress callback MUST be safe to call from worker thread.
+    def progress_cb(pct, msg=""):
+        # schedule UI update on main thread
+        def ui():
+            try:
+                # switch to determinate on first meaningful update
+                if pb['mode'] != 'determinate':
+                    pb.config(mode='determinate', maximum=100)
+                pb['value'] = max(0, min(100, int(pct)))
+                status['text'] = msg or f"{pb['value']}%"
+                dlg.update_idletasks()
+            except Exception:
+                pass
+        root.after(0, ui)
+
+    def worker():
+        actions, new_vars, new_defs = _bg_full_scan_and_collect(content_snapshot, progress_callback=progress_cb)
+        # schedule application of tags on UI thread and finish-up steps
+        def apply_and_finish():
+            try:
+                _apply_full_tags(actions, new_vars, new_defs)
+                # Full content scan to discover new symbols (persist them)
+                full = textArea.get("1.0", "end-1c")
+                new_vars2 = {m.group(1) for m in VAR_ASSIGN_RE.finditer(full)}
+                try:
+                    DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
+                except Exception:
+                    DEF_RE = None
+                new_defs2 = set()
+                if DEF_RE:
+                    new_defs2 = {m.group(1) for m in DEF_RE.finditer(full)}
+                if new_vars2:
+                    persisted_vars.update(new_vars2)
+                if new_defs2:
+                    persisted_defs.update(new_defs2)
+                _save_symbol_buffers(persisted_vars, persisted_defs)
+
+                # force full-buffer scan and tagging
+                highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+                statusBar['text'] = "Ready"
+            finally:
+                close_progress_popup(dlg, pb)
+
+        try:
+            root.after(0, apply_and_finish)
+        except Exception:
+            close_progress_popup(dlg, pb)
+
+    Thread(target=worker, daemon=True).start()
 
 
 def highlightPythonInitT():
-    if updateSyntaxHighlighting.get():
-        Thread(target=highlightPythonInit, daemon=True).start()
-    else:
-        for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number'):
+    """Compatibility wrapper used around the codebase; simply calls the non-blocking init."""
+    highlightPythonInit()
+
+
+def refresh_full_syntax():
+    """Manual refresh for full-file syntax highlighting with progress popup."""
+    if not updateSyntaxHighlighting.get():
+        for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                  'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
             textArea.tag_remove(t, "1.0", "end")
+        statusBar['text'] = "Syntax highlighting disabled."
+        return
+
+    statusBar['text'] = "Refreshing syntax..."
+    root.update_idletasks()
+
+    try:
+        content_snapshot = textArea.get("1.0", "end-1c")
+    except Exception:
+        content_snapshot = ""
+
+    dlg, pb, status = show_progress_popup("Refreshing syntax")
+    status['text'] = "Scanning..."
+
+    def progress_cb(pct, msg=""):
+        def ui():
+            try:
+                if pb['mode'] != 'determinate':
+                    pb.config(mode='determinate', maximum=100)
+                pb['value'] = max(0, min(100, int(pct)))
+                status['text'] = msg or f"{pb['value']}%"
+                dlg.update_idletasks()
+            except Exception:
+                pass
+        root.after(0, ui)
+
+    def worker():
+        actions, new_vars, new_defs = _bg_full_scan_and_collect(content_snapshot, progress_callback=progress_cb)
+        def apply_and_close():
+            try:
+                _apply_full_tags(actions, new_vars, new_defs)
+                # persist any discoveries from a full scan
+                full = textArea.get("1.0", "end-1c")
+                new_vars2 = {m.group(1) for m in VAR_ASSIGN_RE.finditer(full)}
+                try:
+                    DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
+                except Exception:
+                    DEF_RE = None
+                new_defs2 = set()
+                if DEF_RE:
+                    new_defs2 = {m.group(1) for m in DEF_RE.finditer(full)}
+                if new_vars2:
+                    persisted_vars.update(new_vars2)
+                if new_defs2:
+                    persisted_defs.update(new_defs2)
+                _save_symbol_buffers(persisted_vars, persisted_defs)
+                highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+                statusBar['text'] = "Ready"
+            finally:
+                close_progress_popup(dlg, pb)
+
+        try:
+            root.after(0, apply_and_close)
+        except Exception:
+            close_progress_popup(dlg, pb)
+
+    Thread(target=worker, daemon=True).start()
 
 
 # -------------------------
@@ -1035,6 +1451,10 @@ buttonAI.pack(side=LEFT, padx=2, pady=2)
 formatButton5 = Button(toolBar, text='Settings', command=lambda: setting_modal())
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
 
+# create refresh button on status bar (lower-right)
+refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
+refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
+
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
@@ -1049,83 +1469,92 @@ root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
 # Settings modal
 # -------------------------
 def create_config_window():
-    top = Toplevel()
+    top = Toplevel(root)
+    top.transient(root)
     top.grab_set()
     top.title("Settings")
+    top.resizable(False, False)
 
-    text_frame = Frame(top)
-    text_frame.pack(padx=8, pady=8)
+    # outer container with padding for nicer spacing
+    container = ttk.Frame(top, padding=12)
+    container.grid(row=0, column=0, sticky='nsew')
 
-    Label(text_frame, text="Font").grid(row=0, column=0, sticky='e')
-    fontNameField = Entry(text_frame, width=20)
-    fontNameField.grid(row=0, column=1)
-    fontNameField.insert(0, config.get("Section1", "fontName"))
+    # Grid configuration for neat alignment
+    container.columnconfigure(0, weight=0)
+    container.columnconfigure(1, weight=1)
+    container.columnconfigure(2, weight=0)
 
-    Label(text_frame, text="Font Size").grid(row=1, column=0, sticky='e')
-    fontSizeField = Entry(text_frame, width=20)
-    fontSizeField.grid(row=1, column=1)
-    fontSizeField.insert(0, config.get("Section1", "fontSize"))
+    # Helper to create label + entry + optional swatch button
+    def mk_row(label_text, row, initial='', width=24):
+        ttk.Label(container, text=label_text).grid(row=row, column=0, sticky='e', padx=(0,8), pady=6)
+        ent = ttk.Entry(container, width=width)
+        ent.grid(row=row, column=1, sticky='ew', pady=6)
+        ent.insert(0, initial)
+        return ent
 
-    Label(text_frame, text="Font Color").grid(row=2, column=0, sticky='e')
-    fontColorChoice = Entry(text_frame, width=20)
-    fontColorChoice.grid(row=2, column=1)
-    fontColorChoice.insert(0, config.get("Section1", "fontColor"))
-
-    Label(text_frame, text="Background").grid(row=3, column=0, sticky='e')
-    backgroundColorField = Entry(text_frame, width=20)
-    backgroundColorField.grid(row=3, column=1)
-    backgroundColorField.insert(0, config.get("Section1", "backgroundColor"))
-
-    Label(text_frame, text="Cursor Color").grid(row=4, column=0, sticky='e')
-    cursorColorField = Entry(text_frame, width=20)
-    cursorColorField.grid(row=4, column=1)
-    cursorColorField.insert(0, config.get("Section1", "cursorColor"))
+    fontNameField = mk_row("Font", 0, config.get("Section1", "fontName"))
+    fontSizeField = mk_row("Font Size", 1, config.get("Section1", "fontSize"))
+    fontColorChoice = mk_row("Font Color", 2, config.get("Section1", "fontColor"))
+    backgroundColorField = mk_row("Background", 3, config.get("Section1", "backgroundColor"))
+    cursorColorField = mk_row("Cursor Color", 4, config.get("Section1", "cursorColor"))
 
     undoCheckVar = IntVar(value=config.getboolean("Section1", "undoSetting"))
-    undoCheck = Checkbutton(text_frame, text="Enable undo", variable=undoCheckVar)
-    undoCheck.grid(row=5, column=1, sticky='w')
+    undoCheck = ttk.Checkbutton(container, text="Enable undo", variable=undoCheckVar)
+    undoCheck.grid(row=5, column=1, sticky='w', pady=6)
 
-    Label(text_frame, text="Max AI Context").grid(row=6, column=0, sticky='e')
-    aiMaxContextField = Entry(text_frame, width=20)
-    aiMaxContextField.grid(row=6, column=1)
-    aiMaxContextField.insert(0, config.get("Section1", "aiMaxContext"))
+    aiMaxContextField = mk_row("Max AI Context", 6, config.get("Section1", "aiMaxContext"))
+    temperatureField = mk_row("AI Temperature", 7, config.get("Section1", "temperature"))
+    top_kField = mk_row("AI top_k", 8, config.get("Section1", "top_k"))
+    seedField = mk_row("AI seed", 9, config.get("Section1", "seed"))
 
-    Label(text_frame, text="AI Temperature").grid(row=7, column=0, sticky='e')
-    temperatureField = Entry(text_frame, width=20)
-    temperatureField.grid(row=7, column=1)
-    temperatureField.insert(0, config.get("Section1", "temperature"))
+    # color swatches (small visual previews)
+    sw_font = Label(container, width=3, relief='sunken', bg=config.get("Section1", "fontColor"))
+    sw_font.grid(row=2, column=2, padx=(8,0))
+    sw_bg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "backgroundColor"))
+    sw_bg.grid(row=3, column=2, padx=(8,0))
+    sw_cursor = Label(container, width=3, relief='sunken', bg=config.get("Section1", "cursorColor"))
+    sw_cursor.grid(row=4, column=2, padx=(8,0))
 
-    Label(text_frame, text="AI top_k").grid(row=8, column=0, sticky='e')
-    top_kField = Entry(text_frame, width=20)
-    top_kField.grid(row=8, column=1)
-    top_kField.insert(0, config.get("Section1", "top_k"))
-
-    Label(text_frame, text="AI seed").grid(row=9, column=0, sticky='e')
-    seedField = Entry(text_frame, width=20)
-    seedField.grid(row=9, column=1)
-    seedField.insert(0, config.get("Section1", "seed"))
-
+    # color chooser callbacks update both entry and swatch
     def choose_font_color():
-        c = colorchooser.askcolor(title="Font Color", initialcolor=config.get("Section1", "fontColor"))
-        if c:
+        c = colorchooser.askcolor(title="Font Color", initialcolor=fontColorChoice.get())
+        hexc = get_hex_color(c)
+        if hexc:
             fontColorChoice.delete(0, END)
-            fontColorChoice.insert(0, get_hex_color(c))
+            fontColorChoice.insert(0, hexc)
+            sw_font.config(bg=hexc)
 
     def choose_background_color():
-        c = colorchooser.askcolor(title='Background Color', initialcolor=config.get("Section1", "backgroundColor"))
-        if c:
+        c = colorchooser.askcolor(title='Background Color', initialcolor=backgroundColorField.get())
+        hexc = get_hex_color(c)
+        if hexc:
             backgroundColorField.delete(0, END)
-            backgroundColorField.insert(0, get_hex_color(c))
+            backgroundColorField.insert(0, hexc)
+            sw_bg.config(bg=hexc)
 
     def choose_cursor_color():
-        c = colorchooser.askcolor(title="Cursor Color", initialcolor=config.get("Section1", "cursorColor"))
-        if c:
+        c = colorchooser.askcolor(title="Cursor Color", initialcolor=cursorColorField.get())
+        hexc = get_hex_color(c)
+        if hexc:
             cursorColorField.delete(0, END)
-            cursorColorField.insert(0, get_hex_color(c))
+            cursorColorField.insert(0, hexc)
+            sw_cursor.config(bg=hexc)
 
-    Button(text_frame, text='Choose Font Color', command=choose_font_color).grid(row=2, column=2, padx=4)
-    Button(text_frame, text='Choose Background', command=choose_background_color).grid(row=3, column=2, padx=4)
-    Button(text_frame, text='Choose Cursor Color', command=choose_cursor_color).grid(row=4, column=2, padx=4)
+    # chooser buttons (visually grouped)
+    btn_frame = ttk.Frame(container)
+    btn_frame.grid(row=10, column=0, columnspan=3, pady=(8,0), sticky='ew')
+    btn_frame.columnconfigure(0, weight=1)
+    ttk.Button(btn_frame, text='Choose Font Color', command=choose_font_color).grid(row=0, column=0, padx=4, sticky='w')
+    ttk.Button(btn_frame, text='Choose Background', command=choose_background_color).grid(row=0, column=1, padx=4, sticky='w')
+    ttk.Button(btn_frame, text='Choose Cursor Color', command=choose_cursor_color).grid(row=0, column=2, padx=4, sticky='w')
+
+    # Save/Refresh/Close buttons at the bottom with spacing
+    action_frame = ttk.Frame(top, padding=(12,8))
+    action_frame.grid(row=1, column=0, sticky='ew')
+    action_frame.columnconfigure(0, weight=1)
+    action_frame.columnconfigure(1, weight=0)
+    action_frame.columnconfigure(2, weight=0)
+    action_frame.columnconfigure(3, weight=0)
 
     def on_closing():
         config.set("Section1", "fontName", fontNameField.get())
@@ -1139,10 +1568,12 @@ def create_config_window():
         config.set("Section1", "top_k", top_kField.get())
         config.set("Section1", "seed", seedField.get())
 
-        with open(INI_PATH, 'w') as configfile:
-            config.write(configfile)
+        try:
+            with open(INI_PATH, 'w') as configfile:
+                config.write(configfile)
+        except Exception:
+            pass
 
-        # Reload runtime values
         nonlocal_values_reload()
         top.destroy()
 
@@ -1167,8 +1598,21 @@ def create_config_window():
         temperatureField.delete(0, END)
         temperatureField.insert(0, config.get("Section1", "temperature"))
 
-    Button(top, text="Save", command=on_closing).pack(pady=4)
-    Button(top, text="Refresh from file", command=refresh_from_file).pack(pady=4)
+        # update swatches to match refreshed values
+        try:
+            sw_font.config(bg=config.get("Section1", "fontColor"))
+            sw_bg.config(bg=config.get("Section1", "backgroundColor"))
+            sw_cursor.config(bg=config.get("Section1", "cursorColor"))
+        except Exception:
+            pass
+
+    ttk.Button(action_frame, text="Save", command=on_closing).grid(row=0, column=1, padx=6)
+    ttk.Button(action_frame, text="Refresh from file", command=refresh_from_file).grid(row=0, column=2, padx=6)
+    ttk.Button(action_frame, text="Close", command=top.destroy).grid(row=0, column=3, padx=6)
+
+    # initial focus & center the dialog
+    fontNameField.focus_set()
+    center_window(top)
     refresh_from_file()
 
 
