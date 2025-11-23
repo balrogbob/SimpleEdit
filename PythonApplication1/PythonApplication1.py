@@ -116,14 +116,17 @@ for k,v in list(state_dict.items()):
 model.load_state_dict(state_dict)
 model.eval()
 model.to(device)
-# look for the meta pickle in case it is available in the dataset folder
-load_meta = False
 
+# (Optional) compile for speed if PyTorch 2.x and not on Windows with unsupported backends
+try:
+    model = torch.compile(model, mode="reduce-overhead")
+except Exception:
+    pass
 
-# ok let's assume gpt-2 encodings by default
 enc = tiktoken.get_encoding("gpt2")
 encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
 decode = lambda l: enc.decode(l)
+
 # encode the beginning of the prompt
 
 class CursorIndicator(Canvas):
@@ -172,9 +175,9 @@ def pythonAIAutoComplete():
     root.update_idletasks
     root.after(0)
 
-    x = (torch.tensor(start_ids, dtype=torch.long, device=device)[None, ...])
-    # run generation
-    with torch.no_grad():
+    x = torch.tensor(start_ids, dtype=torch.long, device=device)[None, :]
+    # Efficient inference context
+    with torch.inference_mode():
          statusBar['text'] = f"Generating!"
          root.update_idletasks
          root.after(0)
