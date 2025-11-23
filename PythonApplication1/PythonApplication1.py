@@ -49,7 +49,7 @@ from model import GPTConfig, GPT
 from ast import Not
 from selectors import SelectorKey
 from tkinter import *
-from tkinter import filedialog, messagebox, colorchooser
+from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from io import StringIO
 from threading import Thread
 from contextlib import nullcontext
@@ -306,7 +306,7 @@ def createConfigWindow():
         config.set("Section1", "aiMaxContext", aiMaxContext)
         config.set("Section1", "temperature", str(temperature))
         config.set("Section1", "top_k", str(top_k))
-        config.set("Section1", "seedField", str(seed))
+        config.set("Section1", "seed", str(seed))  # fixed key name
 
 
         
@@ -315,16 +315,17 @@ def createConfigWindow():
 
         with open('config.ini', 'w') as configfile:
             config.write(configfile)
-        fontName = config.get("Section1", "fontName")  # prints: consolas
-        fontSize = config.get("Section1", "fontSize")  # prints: 12
-        fontColor = config.get("Section1", "fontColor")  # prints: '#4AF626'
-        backgroundColor = config.get("Section1", "backgroundColor")  # prints: 'black'
-        undoSetting = config.getboolean("Section1", "undoSetting")  # prints: True
-        cursorColor = config.get("Section1", "cursorColor")  # prints: white
-        aiMaxContext = config.get("Section1", "aiMaxContext")  # prints: white
-        seed = int(config.get("Section1", "seedField"))  # prints: white
-        top_k = int(config.get("Section1", "top_k"))  # prints: white
-        temperature = float(config.get("Section1", "temperature"))  # prints: white
+        # reload values (fixed seed key)
+        fontName = config.get("Section1", "fontName")
+        fontSize = config.get("Section1", "fontSize")
+        fontColor = config.get("Section1", "fontColor")
+        backgroundColor = config.get("Section1", "backgroundColor")
+        undoSetting = config.getboolean("Section1", "undoSetting")
+        cursorColor = config.get("Section1", "cursorColor")
+        aiMaxContext = config.get("Section1", "aiMaxContext")
+        seed = int(config.get("Section1", "seed"))
+        top_k = int(config.get("Section1", "top_k"))
+        temperature = float(config.get("Section1", "temperature"))
         textArea.config(font=(fontName, fontSize))
         textArea.config(bg=(backgroundColor))
         textArea.config(fg=(fontColor))
@@ -833,7 +834,6 @@ def updateHighlights():
     root.update_idletasks()
 
 root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
-# Create menu options
 fileMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="File", menu=fileMenu)
 fileMenu.add_command(label='New', command=newFile)
@@ -850,6 +850,929 @@ editMenu.add_command(label='Paste', command=pasteFromClipboard)
 editMenu.add_separator()
 editMenu.add_command(label='Undo', command=lambda: textArea.edit_undo(), accelerator='Ctrl+Z')
 editMenu.add_command(label='Redo', command=lambda: textArea.edit_redo(), accelerator='Ctrl+Y')
+root.config(menu=menuBar)
+root.fileName = ""
+
+def copyToClipboard():
+    copiedText = textArea.selection_get() # get selected text
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(copiedText) # add selected text to clipboard
+    
+def pasteFromClipboard():
+    pastedText = root.clipboard_get() # get content from clipboard
+    textArea.insert('insert', pastedText) # insert that content into textarea at cursor position
+    
+def cutSelectedText():
+    cuttedText = textArea.selection_get() # get selected text
+    textArea.delete(SEL_FIRST, SEL_LAST) # delete selection
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(cuttedText) # add cutted text to clipboard
+
+def formatBold():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises a TclError
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    
+    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("bold", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("bolditalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("underlineitalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("underline", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("boldunderline", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("italic"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("italic", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("underlineitalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatItalic():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("italic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("underline", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("boldunderline", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                     textArea.tag_remove("bolditalic", sel_start, sel_end)
+                     textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("boldunderline", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("italic", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatUnderLine():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("bolditalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("italic", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("boldunderline", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("bolditalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("underline", sel_start, sel_end)  # Add bold formatting to selected/all text
+   
+def removeAllFormatting():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+    textArea.tag_remove("boldunderline", sel_start, sel_end)
+    textArea.tag_remove("italic", sel_start, sel_end)
+    textArea.tag_remove("bold", sel_start, sel_end)
+    textArea.tag_remove("bolditalic", sel_start, sel_end)
+
+def saveFileAsThreaded():
+    thread = Thread(target=saveFileAs)
+    thread.start()
+
+def saveFileAs():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        if root.fileName == "":
+            fileName = filedialog.asksaveasfilename(initialdir="/", title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+            root.fileName = fileName
+        sys.stdout = statusBar['text']
+        fileName = root.fileName
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1  
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def saveFileAsThreaded2():
+    thread = Thread(target=saveFileAs2)
+    thread.start()
+
+def saveFileAs2():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        fileName2 = filedialog.asksaveasfilename(initialdir=root.fileName, title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+        if root.fileName == "":
+            root.fileName = fileName2
+        sys.stdout = statusBar['text']
+        fileName = fileName2
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1 
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def openFile():
+    thread = Thread(target=openFileThreaded)
+    thread.start()
+
+def openFileThreaded():
+    if root.fileName == "":
+        fileName = filedialog.askopenfilename(initialdir="/", title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    else:
+        fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    if fileName:
+        try:
+            with open(fileName, 'r', errors='replace') as f:
+                textArea.delete('1.0', END) # clear the current content of the text area
+                textArea.insert('1.0', f.read()) # insert the content of the opened file at line 1 char 0 (starting point)
+            statusBar['text'] = f"'{fileName}' opened successfully!"
+            root.fileName = fileName
+            if updateSyntaxHighlighting.get():
+                root.update_idletasks
+                thread = Thread(target=lambda: root.after(0, highlightPythonInit))
+                thread.start()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def readyUpdate():
+    root.after(1000)
+    statusBar['text'] = "Ready"
+
+def newFile():
+    textArea.delete('1.0', END)
+    statusBar['text'] = "New Document!"
+    thread = Thread(target=readyUpdate)
+    thread.start()
+
+def saveFile():
+    fileName = root.fileName
+    statusBar['text'] = "Ready"
+    if fileName:
+        try:
+            with open(fileName, 'w') as f:
+                f.write(textArea.get('1.0', END)) # get everything from line 1 char 0 (starting point) to end ('END')
+            statusBar['text'] = f"'{fileName}' saved successfully!"
+            root.fileName = fileName
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def highlightPythonThreaded(event):
+    if updateSyntaxHighlighting.get():
+        thread = Thread(target=highlightPythonHelper)
+        root.after(100, thread.start())
+
+stop_event = threading.Event()
+
+def updateHighlights():
+    if updateSyntaxHighlighting.get():
+        thread = Thread(target=highlightPythonHelper(NONE))
+        thread.start()  # your function to apply highlights
+    else:
+        textArea.tag_remove('string', "1.0", END)
+        textArea.tag_remove('keyword', "1.0", END)
+        textArea.tag_remove('comment', "1.0", END)
+        textArea.tag_remove('selfs', "1.0", END)
+        textArea.tag_remove('def', "1.0", END)
+        textArea.tag_remove('number', "1.0", END)
+    root.after(2000, updateHighlights)  # schedule next run after 10 sec
+    root.update_idletasks()
+
+root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
+# Create menu options
+fileMenu = Menu(menuBar, tearoff=False)
+root.config(menu=menuBar)
+root.fileName = ""
+
+def copyToClipboard():
+    copiedText = textArea.selection_get() # get selected text
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(copiedText) # add selected text to clipboard
+    
+def pasteFromClipboard():
+    pastedText = root.clipboard_get() # get content from clipboard
+    textArea.insert('insert', pastedText) # insert that content into textarea at cursor position
+    
+def cutSelectedText():
+    cuttedText = textArea.selection_get() # get selected text
+    textArea.delete(SEL_FIRST, SEL_LAST) # delete selection
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(cuttedText) # add cutted text to clipboard
+
+def formatBold():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises a TclError
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    
+    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("bold", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("bolditalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("underlineitalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("underline", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("boldunderline", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("italic"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("italic", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("underlineitalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatItalic():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("italic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("underline", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("boldunderline", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                     textArea.tag_remove("bolditalic", sel_start, sel_end)
+                     textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("boldunderline", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("italic", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatUnderLine():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("bolditalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("italic", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("boldunderline", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("bolditalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("underline", sel_start, sel_end)  # Add bold formatting to selected/all text
+   
+def removeAllFormatting():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+    textArea.tag_remove("boldunderline", sel_start, sel_end)
+    textArea.tag_remove("italic", sel_start, sel_end)
+    textArea.tag_remove("bold", sel_start, sel_end)
+    textArea.tag_remove("bolditalic", sel_start, sel_end)
+
+def saveFileAsThreaded():
+    thread = Thread(target=saveFileAs)
+    thread.start()
+
+def saveFileAs():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        if root.fileName == "":
+            fileName = filedialog.asksaveasfilename(initialdir="/", title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+            root.fileName = fileName
+        sys.stdout = statusBar['text']
+        fileName = root.fileName
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1  
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def saveFileAsThreaded2():
+    thread = Thread(target=saveFileAs2)
+    thread.start()
+
+def saveFileAs2():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        fileName2 = filedialog.asksaveasfilename(initialdir=root.fileName, title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+        if root.fileName == "":
+            root.fileName = fileName2
+        sys.stdout = statusBar['text']
+        fileName = fileName2
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1 
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def openFile():
+    thread = Thread(target=openFileThreaded)
+    thread.start()
+
+def openFileThreaded():
+    if root.fileName == "":
+        fileName = filedialog.askopenfilename(initialdir="/", title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    else:
+        fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    if fileName:
+        try:
+            with open(fileName, 'r', errors='replace') as f:
+                textArea.delete('1.0', END) # clear the current content of the text area
+                textArea.insert('1.0', f.read()) # insert the content of the opened file at line 1 char 0 (starting point)
+            statusBar['text'] = f"'{fileName}' opened successfully!"
+            root.fileName = fileName
+            if updateSyntaxHighlighting.get():
+                root.update_idletasks
+                thread = Thread(target=lambda: root.after(0, highlightPythonInit))
+                thread.start()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def readyUpdate():
+    root.after(1000)
+    statusBar['text'] = "Ready"
+
+def newFile():
+    textArea.delete('1.0', END)
+    statusBar['text'] = "New Document!"
+    thread = Thread(target=readyUpdate)
+    thread.start()
+
+def saveFile():
+    fileName = root.fileName
+    statusBar['text'] = "Ready"
+    if fileName:
+        try:
+            with open(fileName, 'w') as f:
+                f.write(textArea.get('1.0', END)) # get everything from line 1 char 0 (starting point) to end ('END')
+            statusBar['text'] = f"'{fileName}' saved successfully!"
+            root.fileName = fileName
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def highlightPythonThreaded(event):
+    if updateSyntaxHighlighting.get():
+        thread = Thread(target=highlightPythonHelper)
+        root.after(100, thread.start())
+
+stop_event = threading.Event()
+
+def updateHighlights():
+    if updateSyntaxHighlighting.get():
+        thread = Thread(target=highlightPythonHelper(NONE))
+        thread.start()  # your function to apply highlights
+    else:
+        textArea.tag_remove('string', "1.0", END)
+        textArea.tag_remove('keyword', "1.0", END)
+        textArea.tag_remove('comment', "1.0", END)
+        textArea.tag_remove('selfs', "1.0", END)
+        textArea.tag_remove('def', "1.0", END)
+        textArea.tag_remove('number', "1.0", END)
+    root.after(2000, updateHighlights)  # schedule next run after 10 sec
+    root.update_idletasks()
+
+root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
+# Create menu options
+fileMenu = Menu(menuBar, tearoff=False)
+root.config(menu=menuBar)
+root.fileName = ""
+
+def copyToClipboard():
+    copiedText = textArea.selection_get() # get selected text
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(copiedText) # add selected text to clipboard
+    
+def pasteFromClipboard():
+    pastedText = root.clipboard_get() # get content from clipboard
+    textArea.insert('insert', pastedText) # insert that content into textarea at cursor position
+    
+def cutSelectedText():
+    cuttedText = textArea.selection_get() # get selected text
+    textArea.delete(SEL_FIRST, SEL_LAST) # delete selection
+    root.clipboard_clear() # clear clipboard content
+    root.clipboard_append(cuttedText) # add cutted text to clipboard
+
+def formatBold():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises a TclError
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    
+    if textArea.tag_ranges("bold"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("bold", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("bolditalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("underlineitalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("underline", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("boldunderline", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("italic"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("italic", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("underlineitalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("bold", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatItalic():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("italic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("underline", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("boldunderline", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                     textArea.tag_remove("bolditalic", sel_start, sel_end)
+                     textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("underline", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("bolditalic", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("boldunderline", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("italic", sel_start, sel_end)  # Add bold formatting to selected/all text
+
+def formatUnderLine():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+
+    if textArea.tag_ranges("underline"):  # Check if the selected/all text is already underline
+        textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    else:
+        if textArea.tag_ranges("underlineitalic"):  # Check if the selected/all text is already underline
+            textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+            textArea.tag_add("italic", sel_start, sel_end) # leave the text just italic
+        else:
+            if textArea.tag_ranges("all"):  # Check if the selected/all text is already underline
+                textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+                textArea.tag_add("bolditalic", sel_start, sel_end) # leave the text just bold italic
+            else:
+                if textArea.tag_ranges("boldunderline"):  # Check if the selected/all text is already bolded
+                    textArea.tag_remove("boldunderline", sel_start, sel_end)
+                    textArea.tag_add("bold", sel_start, sel_end)
+                else:
+                    if textArea.tag_ranges("italic"):  # Check if the selected/all text is already italic
+                        textArea.tag_remove("italic", sel_start, sel_end)
+                        textArea.tag_add("underlineitalic", sel_start, sel_end)
+                    else:
+                        if textArea.tag_ranges("bold"):  # Check if the selected/all text is already bolded
+                            textArea.tag_remove("bold", sel_start, sel_end)
+                            textArea.tag_add("boldunderline", sel_start, sel_end)
+                        else:
+                            if textArea.tag_ranges("bolditalic"):  # Check if the selected/all text is already bolded
+                                textArea.tag_remove("bolditalic", sel_start, sel_end)
+                                textArea.tag_add("all", sel_start, sel_end)
+                            else:
+                                textArea.tag_add("underline", sel_start, sel_end)  # Add bold formatting to selected/all text
+   
+def removeAllFormatting():
+    try:
+        sel_start, sel_end = textArea.tag_ranges("sel")  # Get start and end of selected text in the Text widget
+    except Exception as e:  # If no selection exists, it raises an error
+        sel_start, sel_end = "1.0", END  # Set start to first character (line 1, char 0) and end to last character (END)
+    textArea.tag_remove("underline", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("underlineitalic", sel_start, sel_end)  # Remove underline formatting from selected/all text
+    textArea.tag_remove("all", sel_start, sel_end)  # Remove all formatting from selected/all text
+    textArea.tag_remove("boldunderline", sel_start, sel_end)
+    textArea.tag_remove("italic", sel_start, sel_end)
+    textArea.tag_remove("bold", sel_start, sel_end)
+    textArea.tag_remove("bolditalic", sel_start, sel_end)
+
+def saveFileAsThreaded():
+    thread = Thread(target=saveFileAs)
+    thread.start()
+
+def saveFileAs():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        if root.fileName == "":
+            fileName = filedialog.asksaveasfilename(initialdir="/", title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+            root.fileName = fileName
+        sys.stdout = statusBar['text']
+        fileName = root.fileName
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1  
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def saveFileAsThreaded2():
+    thread = Thread(target=saveFileAs2)
+    thread.start()
+
+def saveFileAs2():
+    if stop_event.is_set():
+        exit
+    else:
+        def getSizeOfTextArea():
+            """Calculate the size (in bytes) of the content in text area"""
+            return sum([1 for c in textArea.get('1.0', END).split('\n')])   # Count number of lines
+        fileName2 = filedialog.asksaveasfilename(initialdir=root.fileName, title="Select file",
+                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+        if root.fileName == "":
+            root.fileName = fileName2
+        sys.stdout = statusBar['text']
+        fileName = fileName2
+        if fileName:
+            try:
+                total_size = getSizeOfTextArea()# Get the estimated total size of the file 
+                current_size = 0 
+                with open(fileName, 'w', errors='replace') as f:
+                    for line in textArea.get('1.0', END).split('\n'):
+                        f.write(line + '\n')
+                        current_size += 1 
+                        progress = round((current_size/total_size)*100, 2)  # Calculate percentage completion rounded to 2 decimal places
+                        if progress >= 100.00:
+                            progress = 100.00
+                        statusBar['text'] = f"Saving... {progress}% - {fileName}"
+                root.fileName = fileName
+                statusBar['text'] = f"Saving... 100% - {fileName}"
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+
+def openFile():
+    thread = Thread(target=openFileThreaded)
+    thread.start()
+
+def openFileThreaded():
+    if root.fileName == "":
+        fileName = filedialog.askopenfilename(initialdir="/", title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    else:
+        fileName = filedialog.askopenfilename(initialdir=root.fileName, title="Select file",
+                                          filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    if fileName:
+        try:
+            with open(fileName, 'r', errors='replace') as f:
+                textArea.delete('1.0', END) # clear the current content of the text area
+                textArea.insert('1.0', f.read()) # insert the content of the opened file at line 1 char 0 (starting point)
+            statusBar['text'] = f"'{fileName}' opened successfully!"
+            root.fileName = fileName
+            if updateSyntaxHighlighting.get():
+                root.update_idletasks
+                thread = Thread(target=lambda: root.after(0, highlightPythonInit))
+                thread.start()
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def readyUpdate():
+    root.after(1000)
+    statusBar['text'] = "Ready"
+
+def newFile():
+    textArea.delete('1.0', END)
+    statusBar['text'] = "New Document!"
+    thread = Thread(target=readyUpdate)
+    thread.start()
+
+def saveFile():
+    fileName = root.fileName
+    statusBar['text'] = "Ready"
+    if fileName:
+        try:
+            with open(fileName, 'w') as f:
+                f.write(textArea.get('1.0', END)) # get everything from line 1 char 0 (starting point) to end ('END')
+            statusBar['text'] = f"'{fileName}' saved successfully!"
+            root.fileName = fileName
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+
+def updateStatusBar(event=None):
+    try:
+        line, col = textArea.index('insert').split('.')
+        statusBar['text'] = f"Ln {line} Col {int(col)+1}"
+    except Exception:
+        pass
+
+def highlightCurrentLine(event=None):
+    try:
+        textArea.tag_remove('currentLine','1.0',END)
+        line = textArea.index('insert').split('.')[0]
+        textArea.tag_add('currentLine', f'{line}.0', f'{line}.0 lineend+1c')
+    except Exception:
+        pass
+
+# CHANGED: Added trailing whitespace visualization
+def showTrailingWhitespace():
+    """
+    Highlight trailing spaces/tabs for all currently visible lines.
+    Only processes visible lines for performance.
+    """
+    try:
+        first_visible = textArea.index('@0,0')
+        last_visible = textArea.index(f'@0,{textArea.winfo_height()}')
+        start_line = int(first_visible.split('.')[0])
+        end_line = int(last_visible.split('.')[0])
+
+        # Remove existing tags in visible area first
+        for ln in range(start_line, end_line + 1):
+            textArea.tag_remove('trailingWhitespace', f'{ln}.0', f'{ln}.0 lineend')
+
+        for ln in range(start_line, end_line + 1):
+            line_text = textArea.get(f'{ln}.0', f'{ln}.0 lineend')
+            m = re.search(r'[ \t]+$', line_text)
+            if m:
+                s = f'{ln}.0 + {m.start()}c'
+                e = f'{ln}.0 + {m.end()}c'
+                textArea.tag_add('trailingWhitespace', s, e)
+    except Exception:
+        pass
+
+pairs = {'(' : ')', '[':']', '{':'}', '"':'"', "'":"'"}
+
+def autoPair(event):
+    ch = event.char
+    if ch in pairs:
+        sel = textArea.tag_ranges('sel')
+        if sel:
+            start, end = sel
+            inside = textArea.get(start, end)
+            textArea.delete(start, end)
+            textArea.insert(start, ch + inside + pairs[ch])
+            textArea.mark_set('insert', f"{start}+{len(ch)+len(inside)}c")
+        else:
+            textArea.insert('insert', ch + pairs[ch])
+            textArea.mark_set('insert', 'insert-1c')
+        return 'break'
+
+lineNumbersCanvas = None
+
+def initLineNumbers():
+    global lineNumbersCanvas
+    if lineNumbersCanvas is None:
+        lineNumbersCanvas = Canvas(root, width=40, bg='black', highlightthickness=0)
+        lineNumbersCanvas.pack(side=LEFT, fill=Y)
+
+
+def redrawLineNumbers(event=None):
+    if not lineNumbersCanvas:
+        return
+    lineNumbersCanvas.delete('all')
+    i = textArea.index('@0,0')
+    while True:
+        dline = textArea.dlineinfo(i)
+        if dline is None:
+            break
+        y = dline[1]
+        line = i.split('.')[0]
+        lineNumbersCanvas.create_text(2, y, anchor='nw', text=line, fill='#555555')
+        i = textArea.index(f'{i}+1line')
+
+
+def goToLine():
+    line = simpledialog.askinteger("Go To Line", "Line number:", parent=root, minvalue=1)
+    if line:
+        max_line = int(textArea.index('end-1c').split('.')[0])
+        if line > max_line:
+            line = max_line
+        textArea.mark_set('insert', f'{line}.0')
+        textArea.see(f'{line}.0')
+        highlightCurrentLine()
+        updateStatusBar()
+
+
+def openFindReplace():
+    fr = Toplevel(root)
+    fr.title("Find / Replace")
+    Label(fr, text="Find").grid(row=0, column=0)
+    findE = Entry(fr, width=30); findE.grid(row=0, column=1)
+    Label(fr, text="Replace").grid(row=1, column=0)
+    replE = Entry(fr, width=30); replE.grid(row=1, column=1)
+    statusL = Label(fr, text=""); statusL.grid(row=3, columnspan=2)
+    def do_find():
+        textArea.tag_remove('find_match','1.0',END)
+        pat = findE.get()
+        if not pat: return
+        content = textArea.get('1.0','end-1c')
+        count = 0
+        for m in re.finditer(re.escape(pat), content):
+            start = f"1.0 + {m.start()}c"; end = f"1.0 + {m.end()}c"
+            textArea.tag_add('find_match', start, end); count += 1
+        statusL.config(text=f"Matches: {count}")
+    def do_replace():
+        pat = findE.get(); repl = replE.get()
+        if not pat: return
+        content = textArea.get('1.0','end-1c')
+        new_content = content.replace(pat, repl)
+        textArea.delete('1.0', END); textArea.insert('1.0', new_content)
+        do_find()
+    Button(fr, text='Find', command=do_find).grid(row=2, column=0)
+    Button(fr, text='Replace All', command=do_replace).grid(row=2, column=1)
+    textArea.tag_config('find_match', background='#444444', foreground='white')
 
 # Create toolbar
 toolBar = Frame(root, bg='blue')
@@ -868,12 +1791,15 @@ formatButton3 = Button(toolBar, text='Underline', command=formatUnderLine)
 formatButton3.pack(side=LEFT, padx=2, pady=2)
 formatButton4 = Button(toolBar, text='Remove Formatting', command=removeAllFormatting)
 formatButton4.pack(side=LEFT, padx=2, pady=2)
+buttonAI = Button(toolBar, text='AI Autocomplete (Experimental)', command=lambda: Thread(target=pythonAIAutoComplete).start())
+buttonAI.pack(side=LEFT, padx=2, pady=2)
 
 # Create status bar
 statusBar = Label(root, text="Ready", bd='1', relief=SUNKEN, anchor=W)
 statusBar.pack(side=BOTTOM, fill=X)
 
 # Create text area
+initLineNumbers()  # added line number gutter
 textArea = Text(root, insertbackground=cursorColor)
 textArea.pack(side=LEFT, fill=BOTH, expand=True, anchor="center")
 textArea['bg'] = backgroundColor
@@ -893,6 +1819,8 @@ textArea.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
 textArea['fg'] = fontColor
 textArea['font'] = f'{fontName} {str(fontSize)}'
 textArea['undo'] = undoSetting
+textArea.tag_config("currentLine", background="#222222")  # current line highlight
+textArea.tag_config("trailingWhitespace", background="#331111")  # CHANGED
 scroll = Scrollbar(root, command=textArea.yview)
 textArea.configure(yscrollcommand=scroll.set)
 
@@ -907,19 +1835,90 @@ def highlightPythonHelperT(event):
         textArea.tag_remove('def', "1.0", END)
         textArea.tag_remove('number', "1.0", END)
 
-textArea.bind('<KeyRelease>', lambda event: Thread(target=highlightPythonHelperT(Event)).start())   # Call the function on key release (i.e., after typing finishes)
+textArea.unbind('<KeyRelease>')
+
+def onKeyRelease(event):
+    highlightPythonHelperT(event)
+    highlightCurrentLine()
+    redrawLineNumbers()
+    updateStatusBar()
+    showTrailingWhitespace()  # CHANGED
+
+textArea.bind('<KeyRelease>', onKeyRelease)
 updateSyntaxHighlighting = IntVar()
-Thread(target=lambda: root.after(0, updateHighlights)).start()
-checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting, onvalue=True, offvalue=False, command=lambda: root.after(0, highlightPythonInitT))
+
+# CHANGED: Replace direct lambda with deferred mouse click handler
+def onMouseClick(event):
+    # Use after_idle so Tk updates 'insert' position before highlighting.
+    root.after_idle(lambda: (highlightCurrentLine(),
+                             redrawLineNumbers(),
+                             updateStatusBar(),
+                             showTrailingWhitespace()))
+
+textArea.bind('<Button-1>', onMouseClick)
+
+# CHANGED: Update scroll and resize bindings to refresh trailing whitespace
+textArea.bind('<MouseWheel>', lambda e: (redrawLineNumbers(), showTrailingWhitespace()))
+textArea.bind('<Configure>', lambda e: (redrawLineNumbers(), showTrailingWhitespace()))
+
+checkButton = Checkbutton(toolBar, text="Python Syntax", variable=updateSyntaxHighlighting,
+                          onvalue=True, offvalue=False,
+                          command=lambda: root.after(0, highlightPythonInitT))
 checkButton.pack(side=LEFT, padx=2, pady=2)
 formatButton5 = Button(toolBar, text='Settings', command=settingModal)
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
-formatButton5 = Button(toolBar, text='AI Autocomplete (Experimental)', command=lambda: Thread(target=pythonAIAutoComplete).start())
-formatButton5.pack(side=RIGHT, padx=2, pady=2)
-scroll.pack(side=RIGHT, fill=Y)
 
+for k in ['(', '[', '{', '"', "'"]:
+    textArea.bind(k, autoPair)
 
+def smart_newline(event):
+    try:
+        insert_index = textArea.index('insert')
+        line_no = int(insert_index.split('.')[0])
+        line_start = f"{line_no}.0"
+        before = textArea.get(line_start, insert_index)
+        leading_ws_match = re.match(r'([ \t]*)', before)
+        current_indent = leading_ws_match.group(1) if leading_ws_match else ''
+        indent_unit = '\t' if '\t' in current_indent else ' ' * 4
+        stripped_left = before.rstrip()
+        dedent_keywords = ('return', 'pass', 'break', 'continue', 'raise', 'yield')
+        new_indent = current_indent
+        if stripped_left.endswith(':'):
+            new_indent = current_indent + indent_unit
+        else:
+            left_no_comment = re.split(r'#', stripped_left, 1)[0].strip()
+            left_tokens = left_no_comment.split()
+            if left_tokens and left_tokens[0] in dedent_keywords:
+                if current_indent.endswith(indent_unit):
+                    new_indent = current_indent[:-len(indent_unit)]
+                else:
+                    new_indent = current_indent[:-len(indent_unit)] if len(current_indent) >= len(indent_unit) else ''
+            elif current_indent == '' and stripped_left.strip() != '':
+                prev = line_no - 1
+                prev_indent = ''
+                while prev >= 1:
+                    prev_line = textArea.get(f'{prev}.0', f'{prev}.end')
+                    if prev_line.strip() != '':
+                        m = re.match(r'([ \t]*)', prev_line)
+                        prev_indent = m.group(1) if m else ''
+                        break
+                    prev -= 1
+                new_indent = prev_indent
 
+        # Insert newline + computed indent
+        textArea.insert('insert', '\n' + new_indent)
+    except Exception:
+        # On any failure, fallback to a plain newline
+        textArea.insert('insert', '\n')
+    return 'break'
+
+# Bind Return to smart newline behavior
+textArea.bind('<Return>', smart_newline)
+
+# Add menu items for new features
+editMenu.add_command(label='Find/Replace', command=openFindReplace)
+editMenu.add_command(label='Go To Line', command=goToLine, accelerator='Ctrl+G')
+root.bind('<Control-g>', lambda e: goToLine())
 # Define Main Loop
 def main():
     root.mainloop()
