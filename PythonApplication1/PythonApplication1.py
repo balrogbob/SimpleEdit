@@ -62,8 +62,41 @@ DEFAULT_CONFIG = {
         'loadAIOnOpen': 'False',
         'loadAIOnNew': 'False',
         'saveFormattingInFile': 'False',   # new: persist whether to embed formatting header
+        'exportCssMode': 'inline-element', # 'inline-element' | 'inline-block' | 'external'
+        'exportCssPath': ''                # used when 'external' chosen; default generated at save time
     }
 }
+
+exportCssMode = 'inline-element'  # default
+exportCssPath = ''
+
+
+def _generate_css():
+    """Return CSS text used for inline-block or external export modes."""
+    try:
+        # Base wrapper class to preserve whitespace and colors
+        parts = []
+        parts.append(".simpleedit-export{")
+        parts.append(f"background: {backgroundColor};")
+        parts.append(f"color: {fontColor};")
+        parts.append(f"font-family: {fontName}, monospace;")
+        parts.append("white-space: pre-wrap;")
+        parts.append("padding: 8px;")
+        parts.append("}")
+        # map tag classes to colors/backgrounds
+        for tag, color in _TAG_COLOR_MAP.items():
+            cls = f".se-{tag}"
+            if tag == 'todo':
+                parts.append(f"{cls}{{ color:#ffffff; background:#B22222; }}")
+            else:
+                parts.append(f"{cls}{{ color: {color}; }}")
+        # formatting classes
+        parts.append(".se-bold{ font-weight: bold; }")
+        parts.append(".se-italic{ font-style: italic; }")
+        parts.append(".se-underline{ text-decoration: underline; }")
+        return "\n".join(parts)
+    except Exception:
+        return ""
 
 _TAG_COLOR_MAP = {
     'number': '#FDFD6A',
@@ -156,48 +189,42 @@ class _SimpleHTMLToTagged(HTMLParser):
 
 # --- Convert buffer to HTML fragment (used for .md and .html outputs) ---
 def _convert_buffer_to_html_fragment():
-    """Produce an HTML fragment representing the buffer: syntax highlighting
-    rendered as <span style="color:..."> and formatting as <strong>/<em>/<u>.
-    Fragment is safe to embed directly into Markdown (.md) as raw HTML or into
-    a full HTML document (.html).
+    """
+    Produce HTML fragment. Behavior depends on `exportCssMode`:
+     - 'inline-element': (original) produce per-element inline style attributes
+     - 'inline-block': produce class-based spans and caller should include <style> with _generate_css()
+     - 'external': produce class-based spans; caller should write CSS file and include <link>
     """
     try:
         content = textArea.get('1.0', 'end-1c')
         if not content:
             return ''
 
-        # gather all tag ranges (formatting + syntax)
-        tags_by_name = _collect_all_tag_ranges()  # returns dict tag -> [[s,e],...]
-
-        # build events and walk linear segments (end events before start events)
+        tags_by_name = _collect_all_tag_ranges()  # dict tag -> [[s,e], ...]
+        # build events list
         events = []
         for tag, ranges in tags_by_name.items():
             for s, e in ranges:
                 events.append((s, 'start', tag))
                 events.append((e, 'end', tag))
         if not events:
-            # no tags -> just escape HTML and return text with newlines preserved as <br>
-            return html.escape(content).replace('\n', '\n')
+            return html.escape(content)
 
         events_by_pos = {}
         for pos, kind, tag in events:
             events_by_pos.setdefault(pos, []).append((kind, tag))
-        # ensure start and end boundaries included
         positions = sorted(set(list(events_by_pos.keys()) + [0, len(content)]))
         for pos in events_by_pos:
-            # ensure 'end' sorts before 'start'
             events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
 
         out_parts = []
-        active = []  # maintain stack of active tags to produce nested HTML
+        active = []  # track active tags for nested closing
         for i in range(len(positions) - 1):
             pos = positions[i]
             for kind, tag in events_by_pos.get(pos, []):
                 if kind == 'end':
-                    # close last occurrence of tag in active stack (search right-to-left)
                     for j in range(len(active) - 1, -1, -1):
                         if active[j] == tag:
-                            # close tags in reverse order until that tag is closed
                             for k in range(len(active) - 1, j - 1, -1):
                                 t = active.pop()
                                 if t in ('bold', 'italic', 'underline'):
@@ -208,35 +235,50 @@ def _convert_buffer_to_html_fragment():
                                     elif t == 'underline':
                                         out_parts.append('</u>')
                                 else:
-                                    # syntax tags: close span
                                     out_parts.append('</span>')
                             break
                 elif kind == 'start':
-                    # start tag: open HTML wrapper and push to active
                     if tag in ('bold', 'italic', 'underline'):
-                        if tag == 'bold':
-                            out_parts.append('<strong>')
-                        elif tag == 'italic':
-                            out_parts.append('<em>')
-                        elif tag == 'underline':
-                            out_parts.append('<u>')
+                        if exportCssMode in ('inline-block', 'external'):
+                            # use class wrappers for formatting when using block/external CSS
+                            if tag == 'bold':
+                                out_parts.append('<strong class="se-bold">')
+                            elif tag == 'italic':
+                                out_parts.append('<em class="se-italic">')
+                            elif tag == 'underline':
+                                out_parts.append('<u class="se-underline">')
+                        else:
+                            if tag == 'bold':
+                                out_parts.append('<strong>')
+                            elif tag == 'italic':
+                                out_parts.append('<em>')
+                            elif tag == 'underline':
+                                out_parts.append('<u>')
                         active.append(tag)
                     else:
-                        # syntax tag -> open span with inline color style (or background for todo)
-                        color = _TAG_COLOR_MAP.get(tag)
-                        if tag == 'todo':
-                            out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
-                        elif color:
-                            out_parts.append(f'<span style="color:{color}">')
+                        # syntax tags
+                        if exportCssMode in ('inline-block', 'external'):
+                            # class-based
+                            if tag == 'todo':
+                                out_parts.append(f'<span class="se-{tag}">')
+                            else:
+                                out_parts.append(f'<span class="se-{tag}">')
                         else:
-                            out_parts.append('<span>')
+                            # inline style attribute as before
+                            if tag == 'todo':
+                                out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
+                            else:
+                                color = _TAG_COLOR_MAP.get(tag)
+                                if color:
+                                    out_parts.append(f'<span style="color:{color}">')
+                                else:
+                                    out_parts.append('<span>')
                         active.append(tag)
 
             next_pos = positions[i + 1]
             if next_pos <= pos:
                 continue
             seg = content[pos:next_pos]
-            # escape any HTML in the segment
             seg_escaped = html.escape(seg)
             out_parts.append(seg_escaped)
 
@@ -244,12 +286,20 @@ def _convert_buffer_to_html_fragment():
         while active:
             t = active.pop()
             if t in ('bold', 'italic', 'underline'):
-                if t == 'bold':
-                    out_parts.append('</strong>')
-                elif t == 'italic':
-                    out_parts.append('</em>')
-                elif t == 'underline':
-                    out_parts.append('</u>')
+                if exportCssMode in ('inline-block', 'external'):
+                    if t == 'bold':
+                        out_parts.append('</strong>')
+                    elif t == 'italic':
+                        out_parts.append('</em>')
+                    elif t == 'underline':
+                        out_parts.append('</u>')
+                else:
+                    if t == 'bold':
+                        out_parts.append('</strong>')
+                    elif t == 'italic':
+                        out_parts.append('</em>')
+                    elif t == 'underline':
+                        out_parts.append('</u>')
             else:
                 out_parts.append('</span>')
 
@@ -271,9 +321,9 @@ else:
 
 # MRU helper module (keeps GUI file code focused)
 try:
-    import recent_files as _rf_mod
+    import functions as _rf_mod
 except Exception:
-    import recent_files as _rf_mod  # fallback if running as script
+    import functions as _rf_mod  # fallback if running as script
 
 RECENT_MAX = getattr(_rf_mod, 'RECENT_MAX', 10)
 
@@ -300,11 +350,49 @@ def clear_recent_files():
 def open_recent_file(path: str):
     """Open a recent file (called from recent menu)."""
     try:
-        with open(path, 'r', errors='replace') as fh:
+        with open(path, 'r', errors='replace', encoding='utf-8') as fh:
             raw = fh.read()
-            content, meta = _extract_header_and_meta(raw)
+
+        # First try SIMPLEEDIT metadata (preferred)
+        content, meta = _extract_header_and_meta(raw)
+        if meta:
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', content)
+            statusBar['text'] = f"'{path}' opened successfully!"
+            root.fileName = path
+            try:
+                if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
+                    Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+            except Exception:
+                pass
+
+            add_recent_file(path)
+            if meta:
+                root.after(0, lambda: _apply_formatting_from_meta(meta))
+
+            if updateSyntaxHighlighting.get():
+                root.after(0, highlightPythonInit)
+            return
+
+        # No SIMPLEEDIT meta — if file is .md/.html attempt HTML-aware parsing to reconstruct tags
+        ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
+        if ext in ('md', 'html', 'htm'):
+            plain, tags_meta = _parse_html_and_apply(raw)
+            textArea.delete('1.0', 'end')
+            textArea.insert('1.0', plain)
+            statusBar['text'] = f"'{path}' opened (HTML/MD parsed)!"
+            root.fileName = path
+            add_recent_file(path)
+            if tags_meta and tags_meta.get('tags'):
+                root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
+            if updateSyntaxHighlighting.get():
+                root.after(0, highlightPythonInit)
+            refresh_recent_menu()
+            return
+
+        # Fallback: no meta and not md/html - insert raw content
+        textArea.delete('1.0', 'end')
+        textArea.insert('1.0', raw)
         statusBar['text'] = f"'{path}' opened successfully!"
         root.fileName = path
         try:
@@ -314,9 +402,7 @@ def open_recent_file(path: str):
             pass
 
         add_recent_file(path)
-        if meta:
-            root.after(0, lambda: _apply_formatting_from_meta(meta))
-
+        refresh_recent_menu()
         if updateSyntaxHighlighting.get():
             root.after(0, highlightPythonInit)
     except Exception as e:
@@ -1728,12 +1814,11 @@ def _convert_buffer_to_html_fragment():
 
 
 def save_as_markdown():
-    """Save buffer as .md or .html. Output contains visible HTML spans for syntax
-    and formatting so the saved file renders with highlighting. Metadata header is not required.
-
-    Improvements:
-    - Wrap fragment in a block element that sets background, text color and preserves whitespace.
-    - For .html produce a full document as before.
+    """
+    Save as .md or .html honoring exportCssMode:
+      - inline-element: current per-element inline `style="color:..."`
+      - inline-block: prepend <style>...</style> (generated by _generate_css) into .md or embed in <head> for .html
+      - external: write a .css file next to saved file (or to exportCssPath) and include <link> (for .html)
     """
     fileName = filedialog.asksaveasfilename(
         initialdir=os.path.expanduser("~"),
@@ -1751,36 +1836,81 @@ def save_as_markdown():
 
     try:
         fragment = _convert_buffer_to_html_fragment()
-        # Build a wrapper block that enforces monospace font, background, text color and preserves whitespace
-        wrapper_style = (
-            f"background:{backgroundColor};"
-            f"color:{fontColor};"
-            f"font-family:{fontName},monospace;"
-            "white-space:pre-wrap;"
-            "padding:8px;"
-        )
-        wrapped_fragment = f'<div style="{wrapper_style}">{fragment}</div>'
+
+        # Prepare wrapper that always preserves whitespace and base styling (but for inline-block/external actual colors come from CSS)
+        wrapper_attrs = []
+        if exportCssMode == 'inline-element':
+            # keep previous inline wrapper style for background/text/font
+            wrapper_style = (
+                f"background:{backgroundColor};"
+                f"color:{fontColor};"
+                f"font-family:{fontName},monospace;"
+                "white-space:pre-wrap;"
+                "padding:8px;"
+            )
+            wrapped_fragment = f'<div style="{wrapper_style}">{fragment}</div>'
+        else:
+            # class-based wrapper; CSS provides colors
+            wrapped_fragment = f'<div class="simpleedit-export">{fragment}</div>'
 
         if fileName.lower().endswith('.html'):
-            # wrap in minimal HTML document with inline styles for monospace font
+            if exportCssMode == 'external':
+                # determine css path: prefer explicit exportCssPath or same-name .css next to file
+                css_path = exportCssPath or os.path.splitext(fileName)[0] + '.css'
+                # write css file
+                try:
+                    with open(css_path, 'w', encoding='utf-8') as cssf:
+                        cssf.write(_generate_css())
+                except Exception:
+                    pass
+                # compute relative link href (use basename if in same directory)
+                href = os.path.relpath(css_path, os.path.dirname(fileName))
+                head_includes = f'<link rel="stylesheet" href="{href}">'
+            elif exportCssMode == 'inline-block':
+                css_text = _generate_css()
+                head_includes = f'<style>\n{css_text}\n</style>'
+            else:
+                head_includes = ''
+
             html_doc = (
                 '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
                 '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
                 '<title>SimpleEdit Export</title>\n'
+                f'{head_includes}\n'
                 '</head>\n<body>\n{body}\n</body>\n</html>\n'
             ).format(body=wrapped_fragment)
             with open(fileName, 'w', errors='replace', encoding='utf-8') as f:
                 f.write(html_doc)
+
         else:
-            # .md - write wrapped fragment (raw HTML allowed in Markdown). This ensures colors and whitespace are preserved.
+            # .md: Markdown engines vary, but raw HTML is allowed in many viewers.
+            if exportCssMode == 'external':
+                css_path = exportCssPath or os.path.splitext(fileName)[0] + '.css'
+                try:
+                    with open(css_path, 'w', encoding='utf-8') as cssf:
+                        cssf.write(_generate_css())
+                except Exception:
+                    pass
+                # add link tag at top (may or may not be respected by renderer)
+                md_prefix = f'<link rel="stylesheet" href="{os.path.basename(css_path)}">\n\n'
+                md_body = md_prefix + wrapped_fragment
+            elif exportCssMode == 'inline-block':
+                css_text = _generate_css()
+                md_prefix = f'<style>\n{css_text}\n</style>\n\n'
+                md_body = md_prefix + wrapped_fragment
+            else:
+                md_body = wrapped_fragment
+
             with open(fileName, 'w', errors='replace', encoding='utf-8') as f:
-                f.write(wrapped_fragment)
+                f.write(md_body)
+
         statusBar['text'] = f"'{fileName}' saved successfully!"
         root.fileName = fileName
         add_recent_file(fileName)
         refresh_recent_menu()
     except Exception as e:
         messagebox.showerror("Error", str(e))
+
 
 # --- Parse saved HTML fragments or full HTML docs back into plain text + tags ---
 def _parse_html_and_apply(raw):
@@ -2526,16 +2656,12 @@ def create_config_window():
     top.title("Settings")
     top.resizable(False, False)
 
-    # outer container with padding for nicer spacing
     container = ttk.Frame(top, padding=12)
     container.grid(row=0, column=0, sticky='nsew')
-
-    # Grid configuration for neat alignment
     container.columnconfigure(0, weight=0)
     container.columnconfigure(1, weight=1)
     container.columnconfigure(2, weight=0)
 
-    # Helper to create label + entry + optional swatch button
     def mk_row(label_text, row, initial='', width=24):
         ttk.Label(container, text=label_text).grid(row=row, column=0, sticky='e', padx=(0,8), pady=6)
         ent = ttk.Entry(container, width=width)
@@ -2552,35 +2678,52 @@ def create_config_window():
     undoCheckVar = IntVar(value=config.getboolean("Section1", "undoSetting"))
     undoCheck = ttk.Checkbutton(container, text="Enable undo", variable=undoCheckVar)
     undoCheck.grid(row=5, column=1, sticky='w', pady=6)
-# --- additional settings: syntax highlighting + model auto-load ---
+
     syntaxCheckVar = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
     syntaxCheck = ttk.Checkbutton(container, text="Enable syntax highlighting", variable=syntaxCheckVar)
     syntaxCheck.grid(row=5, column=1, sticky='w', pady=6)
 
-    # shift rows for AI fields down by 1 to accommodate new checkbox rows
     aiMaxContextField = mk_row("Max AI Context", 6, config.get("Section1", "aiMaxContext"))
     temperatureField = mk_row("AI Temperature", 7, config.get("Section1", "temperature"))
     top_kField = mk_row("AI top_k", 8, config.get("Section1", "top_k"))
     seedField = mk_row("AI seed", 9, config.get("Section1", "seed"))
 
-    # auto-load AI options
     loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
     loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
-    # save-formatting option
     saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
     ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=12, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=10, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=11, column=1, sticky='w', pady=6)
 
-    # update swatches (keep existing swatch code unchanged)
+    # CSS export controls
+    css_mode = config.get("Section1", "exportCssMode", fallback="inline-element")
+    cssModeVar = StringVar(value=css_mode)
+    ttk.Label(container, text="Export CSS mode").grid(row=13, column=0, sticky='e', padx=(0,8), pady=6)
+    css_frame = ttk.Frame(container)
+    css_frame.grid(row=13, column=1, sticky='w')
+    ttk.Radiobutton(css_frame, text="Inline styles (per-element)", variable=cssModeVar, value='inline-element').pack(anchor='w')
+    ttk.Radiobutton(css_frame, text="Inline CSS block (<style>)", variable=cssModeVar, value='inline-block').pack(anchor='w')
+    ttk.Radiobutton(css_frame, text="External CSS file", variable=cssModeVar, value='external').pack(anchor='w')
+
+    cssPathField = mk_row("External CSS path", 14, config.get("Section1", "exportCssPath", fallback=""))
+    def choose_css_path():
+        p = filedialog.asksaveasfilename(initialdir=os.path.expanduser("~"),
+                                         title="Choose CSS file path",
+                                         defaultextension='.css',
+                                         filetypes=(("CSS files","*.css"),("All files","*.*")))
+        if p:
+            cssPathField.delete(0, END)
+            cssPathField.insert(0, p)
+
+    ttk.Button(container, text="Browse CSS path...", command=choose_css_path).grid(row=14, column=2, padx=6)
+
     sw_font = Label(container, width=3, relief='sunken', bg=config.get("Section1", "fontColor"))
     sw_font.grid(row=2, column=2, padx=(8,0))
     sw_bg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "backgroundColor"))
     sw_bg.grid(row=3, column=2, padx=(8,0))
     sw_cursor = Label(container, width=3, relief='sunken', bg=config.get("Section1", "cursorColor"))
     sw_cursor.grid(row=4, column=2, padx=(8,0))
-    
-    # color chooser callbacks update both entry and swatch
+
     def choose_font_color():
         c = colorchooser.askcolor(title="Font Color", initialcolor=fontColorChoice.get())
         hexc = get_hex_color(c)
@@ -2605,7 +2748,6 @@ def create_config_window():
             cursorColorField.insert(0, hexc)
             sw_cursor.config(bg=hexc)
 
-    # chooser buttons (visually grouped)
     btn_frame = ttk.Frame(container)
     btn_frame.grid(row=10, column=0, columnspan=3, pady=(8,0), sticky='ew')
     btn_frame.columnconfigure(0, weight=1)
@@ -2613,7 +2755,6 @@ def create_config_window():
     ttk.Button(btn_frame, text='Choose Background', command=choose_background_color).grid(row=0, column=1, padx=4, sticky='w')
     ttk.Button(btn_frame, text='Choose Cursor Color', command=choose_cursor_color).grid(row=0, column=2, padx=4, sticky='w')
 
-    # Save/Refresh/Close buttons at the bottom with spacing
     action_frame = ttk.Frame(top, padding=(12,8))
     action_frame.grid(row=1, column=0, sticky='ew')
     action_frame.columnconfigure(0, weight=1)
@@ -2638,6 +2779,8 @@ def create_config_window():
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
         config.set("Section1", "loadAIOnNew", str(bool(loadAIOnNewVar.get())))
         config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
+        config.set("Section1", "exportCssMode", cssModeVar.get())
+        config.set("Section1", "exportCssPath", cssPathField.get())
 
         try:
             with open(INI_PATH, 'w') as configfile:
@@ -2645,16 +2788,13 @@ def create_config_window():
         except Exception:
             pass
 
-        # reload runtime values that non-AI settings depend on
         nonlocal_values_reload()
 
-        # apply syntax highlighting toggle immediately
         try:
             updateSyntaxHighlighting.set(1 if syntaxCheckVar.get() else 0)
             if syntaxCheckVar.get():
                 highlightPythonInit()
             else:
-                # clear tags
                 for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
                           'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
                     textArea.tag_remove(t, "1.0", "end")
@@ -2662,7 +2802,6 @@ def create_config_window():
         except Exception:
             pass
 
-        # update runtime auto-load flags
         global loadAIOnOpen, loadAIOnNew
         try:
             loadAIOnOpen = bool(loadAIOnOpenVar.get())
@@ -2693,16 +2832,17 @@ def create_config_window():
         temperatureField.delete(0, END)
         temperatureField.insert(0, config.get("Section1", "temperature"))
 
-        # refresh the new checkboxes
         try:
             syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
             loadAIOnOpenVar.set(config.getboolean("Section1", "loadAIOnOpen", fallback=False))
             loadAIOnNewVar.set(config.getboolean("Section1", "loadAIOnNew", fallback=False))
             saveFormattingVar.set(config.getboolean("Section1", "saveFormattingInFile", fallback=False))
+            cssModeVar.set(config.get("Section1", "exportCssMode", fallback="inline-element"))
+            cssPathField.delete(0, END)
+            cssPathField.insert(0, config.get("Section1", "exportCssPath", fallback=""))
         except Exception:
             pass
 
-        # update swatches to match refreshed values
         try:
             sw_font.config(bg=config.get("Section1", "fontColor"))
             sw_bg.config(bg=config.get("Section1", "backgroundColor"))
@@ -2714,15 +2854,13 @@ def create_config_window():
     ttk.Button(action_frame, text="Refresh from file", command=refresh_from_file).grid(row=0, column=2, padx=6)
     ttk.Button(action_frame, text="Close", command=top.destroy).grid(row=0, column=3, padx=6)
 
-    # initial focus & center the dialog
     fontNameField.focus_set()
     center_window(top)
     refresh_from_file()
 
 
 def nonlocal_values_reload():
-    """Reloads runtime variables from config and applies them to the editor."""
-    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed
+    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath
     fontName = config.get("Section1", "fontName")
     fontSize = int(config.get("Section1", "fontSize"))
     fontColor = config.get("Section1", "fontColor")
@@ -2737,8 +2875,11 @@ def nonlocal_values_reload():
     loadAIOnNew = config.getboolean("Section1", "loadAIOnNew", fallback=False)
     saveFormattingInFile = config.getboolean("Section1", "saveFormattingInFile", fallback=False)
 
-    textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
+    # load css export settings
+    exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
+    exportCssPath = config.get("Section1", "exportCssPath", fallback="")
 
+    textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
 
 def setting_modal():
     create_config_window()
