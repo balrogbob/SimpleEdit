@@ -23,6 +23,7 @@ from threading import Thread
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from tkinter import ttk
+import shutil, sys, os
 
 # Optional ML dependencies (wrapped so editor still runs without them)
 try:
@@ -168,10 +169,19 @@ if _ML_AVAILABLE:
         model.load_state_dict(state_dict)
         model.eval()
         model.to('cpu')
-        try:
-            model = torch.compile(model, mode="reduce-overhead")
-        except Exception:
-            pass
+        original_model = model
+        if sys.platform == "win32" and shutil.which("cl") is None:
+            # avoid Inductor which needs MSVC; use eager backend instead
+            try:
+                model = torch.compile(model, backend="eager", mode="reduce-overhead")
+            except Exception:
+                # fallback to uncompiled model
+                model = original_model
+        else:
+            try:
+                model = torch.compile(model, mode="reduce-overhead")
+            except Exception:
+                model = original_model
 
         enc = tiktoken.get_encoding("gpt2")
         encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
@@ -248,62 +258,153 @@ menuBar.add_cascade(label="Symbols", menu=symbolsMenu)
 symbolsMenu.add_command(label="Manage Symbols...", command=lambda: open_symbols_manager())
 
 def open_symbols_manager():
-    """Small dialog to view/remove persisted vars/defs."""
+    """Small dialog to view/edit/remove/swap persisted vars/defs."""
     global persisted_vars, persisted_defs
 
     dlg = Toplevel(root)
     dlg.title("Manage Symbols")
+    dlg.transient(root)
     dlg.grab_set()
-    dlg.geometry("360x300")
+    dlg.resizable(False, False)
 
-    Label(dlg, text="Persisted Variables").pack(anchor='w', padx=8, pady=(8, 0))
-    vars_lb = Listbox(dlg, selectmode=SINGLE, height=8)
-    vars_lb.pack(fill=X, padx=8)
-    for v in sorted(persisted_vars):
-        vars_lb.insert(END, v)
+    container = ttk.Frame(dlg, padding=10)
+    container.grid(row=0, column=0, sticky='nsew')
 
-    Label(dlg, text="Persisted Definitions (defs/classes)").pack(anchor='w', padx=8, pady=(8, 0))
-    defs_lb = Listbox(dlg, selectmode=SINGLE, height=6)
-    defs_lb.pack(fill=X, padx=8)
-    for d in sorted(persisted_defs):
-        defs_lb.insert(END, d)
+    # Vars column
+    ttk.Label(container, text="Persisted Variables").grid(row=0, column=0, sticky='w')
+    vars_frame = ttk.Frame(container)
+    vars_frame.grid(row=1, column=0, padx=(0, 8), sticky='nsew')
+    vars_lb = Listbox(vars_frame, selectmode=SINGLE, height=10, exportselection=False)
+    vars_scroll = ttk.Scrollbar(vars_frame, orient=VERTICAL, command=vars_lb.yview)
+    vars_lb.configure(yscrollcommand=vars_scroll.set)
+    vars_lb.grid(row=0, column=0, sticky='nsew')
+    vars_scroll.grid(row=0, column=1, sticky='ns')
+    vars_frame.columnconfigure(0, weight=1)
 
-    btn_frame = Frame(dlg)
-    btn_frame.pack(fill=X, pady=8, padx=8)
+    # Defs column
+    ttk.Label(container, text="Persisted Definitions (defs/classes)").grid(row=0, column=1, sticky='w')
+    defs_frame = ttk.Frame(container)
+    defs_frame.grid(row=1, column=1, sticky='nsew')
+    defs_lb = Listbox(defs_frame, selectmode=SINGLE, height=10, exportselection=False)
+    defs_scroll = ttk.Scrollbar(defs_frame, orient=VERTICAL, command=defs_lb.yview)
+    defs_lb.configure(yscrollcommand=defs_scroll.set)
+    defs_lb.grid(row=0, column=0, sticky='nsew')
+    defs_scroll.grid(row=0, column=1, sticky='ns')
+    defs_frame.columnconfigure(0, weight=1)
 
-    def remove_selected_var():
-        sel = vars_lb.curselection()
+    # populate lists
+    def refresh_lists():
+        vars_lb.delete(0, END)
+        defs_lb.delete(0, END)
+        for v in sorted(persisted_vars):
+            vars_lb.insert(END, v)
+        for d in sorted(persisted_defs):
+            defs_lb.insert(END, d)
+        _save_symbol_buffers(persisted_vars, persisted_defs)
+
+    refresh_lists()
+
+    # utilities
+    ID_RE = re.compile(r'^[A-Za-z_]\w*$')
+
+    def _get_sel(lb):
+        sel = lb.curselection()
         if not sel:
+            return None, None
+        idx = sel[0]
+        return idx, lb.get(idx)
+
+    def do_edit(lb, src_set):
+        idx, name = _get_sel(lb)
+        if not name:
             return
-        name = vars_lb.get(sel[0])
+        prompt = f"Edit identifier (current: {name})"
+        new = simpledialog.askstring("Edit symbol", prompt, initialvalue=name, parent=dlg)
+        if not new or new.strip() == "" or new == name:
+            return
+        new = new.strip()
+        if not ID_RE.match(new):
+            messagebox.showerror("Invalid name", "Name must be a valid Python identifier.", parent=dlg)
+            return
+        # don't allow duplicates across both buffers
+        if new in persisted_vars or new in persisted_defs:
+            messagebox.showerror("Duplicate", "That identifier already exists.", parent=dlg)
+            return
+        # perform rename
+        try:
+            src_set.discard(name)
+            src_set.add(new)
+        except Exception:
+            return
+        refresh_lists()
+        highlightPythonInitT()
+
+    def do_swap_from_vars():
+        idx, name = _get_sel(vars_lb)
+        if not name:
+            return
         persisted_vars.discard(name)
-        vars_lb.delete(sel[0])
-        _save_symbol_buffers(persisted_vars, persisted_defs)
+        persisted_defs.add(name)
+        refresh_lists()
         highlightPythonInitT()
 
-    def remove_selected_def():
-        sel = defs_lb.curselection()
-        if not sel:
+    def do_swap_from_defs():
+        idx, name = _get_sel(defs_lb)
+        if not name:
             return
-        name = defs_lb.get(sel[0])
         persisted_defs.discard(name)
-        defs_lb.delete(sel[0])
-        _save_symbol_buffers(persisted_vars, persisted_defs)
+        persisted_vars.add(name)
+        refresh_lists()
         highlightPythonInitT()
 
-    def clear_all():
-        if messagebox.askyesno("Confirm", "Clear ALL persisted symbols?"):
+    def do_delete(lb, src_set):
+        idx, name = _get_sel(lb)
+        if not name:
+            return
+        if not messagebox.askyesno("Confirm", f"Delete '{name}'?", parent=dlg):
+            return
+        src_set.discard(name)
+        refresh_lists()
+        highlightPythonInitT()
+
+    def do_clear_all():
+        if messagebox.askyesno("Confirm", "Clear ALL persisted symbols?", parent=dlg):
             persisted_vars.clear()
             persisted_defs.clear()
-            vars_lb.delete(0, END)
-            defs_lb.delete(0, END)
-            _save_symbol_buffers(persisted_vars, persisted_defs)
+            refresh_lists()
             highlightPythonInitT()
 
-    Button(btn_frame, text="Remove Var", command=remove_selected_var).pack(side=LEFT, padx=4)
-    Button(btn_frame, text="Remove Def", command=remove_selected_def).pack(side=LEFT, padx=4)
-    Button(btn_frame, text="Clear All", command=clear_all).pack(side=LEFT, padx=4)
-    Button(btn_frame, text="Close", command=dlg.destroy).pack(side=RIGHT, padx=4)
+    # action buttons for vars
+    btns_vars = ttk.Frame(container)
+    btns_vars.grid(row=2, column=0, pady=(8, 0), sticky='ew')
+    ttk.Button(btns_vars, text="Edit", command=lambda: do_edit(vars_lb, persisted_vars)).pack(side=LEFT, padx=4)
+    ttk.Button(btns_vars, text="Swap → Defs", command=do_swap_from_vars).pack(side=LEFT, padx=4)
+    ttk.Button(btns_vars, text="Delete", command=lambda: do_delete(vars_lb, persisted_vars)).pack(side=LEFT, padx=4)
+
+    # action buttons for defs
+    btns_defs = ttk.Frame(container)
+    btns_defs.grid(row=2, column=1, pady=(8, 0), sticky='ew')
+    ttk.Button(btns_defs, text="Edit", command=lambda: do_edit(defs_lb, persisted_defs)).pack(side=LEFT, padx=4)
+    ttk.Button(btns_defs, text="Swap → Vars", command=do_swap_from_defs).pack(side=LEFT, padx=4)
+    ttk.Button(btns_defs, text="Delete", command=lambda: do_delete(defs_lb, persisted_defs)).pack(side=LEFT, padx=4)
+
+    # bottom actions
+    action_frame = ttk.Frame(container)
+    action_frame.grid(row=3, column=0, columnspan=2, pady=(12, 0), sticky='ew')
+    ttk.Button(action_frame, text="Clear All", command=do_clear_all).pack(side=LEFT, padx=4)
+    ttk.Button(action_frame, text="Close", command=dlg.destroy).pack(side=RIGHT, padx=4)
+
+    # double-click to edit
+    vars_lb.bind("<Double-Button-1>", lambda e: do_edit(vars_lb, persisted_vars))
+    defs_lb.bind("<Double-Button-1>", lambda e: do_edit(defs_lb, persisted_defs))
+
+    # keyboard shortcuts
+    dlg.bind('<Delete>', lambda e: (do_delete(vars_lb, persisted_vars) if vars_lb.curselection() else do_delete(defs_lb, persisted_defs)))
+    dlg.bind('<Escape>', lambda e: dlg.destroy())
+
+    # ensure dialog centered
+    dlg.update_idletasks()
+    center_window(dlg)
 
 
 # toolbar
@@ -1406,23 +1507,84 @@ def python_ai_autocomplete():
         if content == '':
             skipstrip = True
             content = '<|endoftext|>'
+
         start_ids = encode(content)
-        x = torch.tensor(start_ids, dtype=torch.long, device='cpu')[None, :]
+        # prepare tensor on CPU
+        idx = torch.tensor(start_ids, dtype=torch.long, device='cpu')[None, :]
+
+        # ensure UI is prepared: delete selection and set insert at start on main thread
+        prep_done = threading.Event()
+
+        def ui_prep():
+            try:
+                #textArea.delete(start, end)
+                textArea.mark_set('insert', end)
+                textArea.tag_remove("sel", '1.0', 'end')
+            finally:
+                prep_done.set()
+
+        root.after(0, ui_prep)
+        prep_done.wait()
+
+        generated_ids = []
+
+        # generation loop: sample one token at a time and stream it to the UI
         with torch.inference_mode():
-            y = model.generate(x, maxTokens, temperature=temperature, top_k=top_k)
-            decoded = decode(y[0].tolist())
-            if not skipstrip:
-                decoded = re.sub(r'<\|\s*endoftext\s*\|>', '\n', decoded)
-            else:
-                decoded = re.sub(r'<\|\s*endoftext\s*\|>', '', decoded)
-            textArea.mark_set('insert', f'{end}')
-            textArea.delete(start, end)
-            textArea.insert('insert', decoded)
-            textArea.tag_remove("sel", '1.0', 'end')
-            textArea.see(INSERT)
-            statusBar['text'] = "AI: insertion complete."
+            for _ in range(maxTokens):
+                # crop context if needed
+                idx_cond = idx if idx.size(1) <= model.config.block_size else idx[:, -model.config.block_size:]
+                logits, _ = model(idx_cond)
+                logits = logits[:, -1, :] / temperature
+                if top_k is not None:
+                    v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
+                    logits[logits < v[:, [-1]]] = -float('Inf')
+                probs = torch.nn.functional.softmax(logits, dim=-1)
+                next_id = torch.multinomial(probs, num_samples=1)
+                idx = torch.cat((idx, next_id), dim=1)
+
+                token_id = int(next_id[0, 0].item())
+                generated_ids.append(token_id)
+
+                # decode only the newly sampled token to a string fragment
+                try:
+                    piece = decode([token_id])
+                except Exception:
+                    piece = ''
+
+                # map end-of-text token to newline or strip according to previous behaviour
+                if '<|endoftext|>' in piece:
+                    if not skipstrip:
+                        piece = piece.replace('<|endoftext|>', '\n')
+                    else:
+                        piece = piece.replace('<|endoftext|>', '')
+
+                # schedule UI insertion of this token fragment
+                def ui_insert(p=piece):
+                    try:
+                        textArea.insert('insert', p)
+                        textArea.see(INSERT)
+                        highlight_python_helper(p)
+                    except Exception:
+                        pass
+
+                root.after(0, ui_insert)
+
+                # small yield so UI can catch up on very fast loops (optional)
+                #time.sleep(0.005)
+
+        # final UI update + status
+        def ui_finish():
+            try:
+                statusBar['text'] = "AI: insertion complete."
+            except Exception:
+                pass
+
+        root.after(0, ui_finish)
     except Exception as e:
-        statusBar['text'] = f"AI error: {e}"
+        try:
+            statusBar['text'] = f"AI error: {e}"
+        except Exception:
+            pass
 
 
 # -------------------------
@@ -1458,10 +1620,10 @@ refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
-textArea.bind('<Return>', smart_newline)
+textArea.bind('<Return>', lambda e: (smart_newline, highlight_python_helper(e)))
 textArea.bind('<KeyRelease>', lambda e: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
-textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-textArea.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
+textArea.bind('<MouseWheel>', lambda e: (highlight_python_helper(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
 
