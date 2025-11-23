@@ -18,12 +18,17 @@ import re
 import configparser
 import random
 import time
+import html
+from html.parser import HTMLParser
+import json
+import base64
 from io import StringIO
 from threading import Thread
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from tkinter import ttk
 import shutil, sys, os
+
 
 # Optional ML dependencies (wrapped so editor still runs without them)
 try:
@@ -53,11 +58,207 @@ DEFAULT_CONFIG = {
         'temperature': '1.1',
         'top_k': '300',
         'seed': '1337',
-        'syntaxHighlighting': 'True',      # new: persist syntax highlighting toggle
-        'loadAIOnOpen': 'False',           # new: load AI when opening a file
-        'loadAIOnNew': 'False',            # new: load AI when creating a new file
+        'syntaxHighlighting': 'True',
+        'loadAIOnOpen': 'False',
+        'loadAIOnNew': 'False',
+        'saveFormattingInFile': 'False',   # new: persist whether to embed formatting header
     }
 }
+
+_TAG_COLOR_MAP = {
+    'number': '#FDFD6A',
+    'selfs': '#FFFF00',
+    'variable': '#8A2BE2',
+    'decorator': '#66CDAA',
+    'class_name': '#FFB86B',
+    'constant': '#FF79C6',
+    'attribute': '#33CCFF',
+    'builtin': '#9CDCFE',
+    'def': '#FFA500',
+    'keyword': '#FF0000',
+    'string': '#C9CA6B',
+    'operator': '#AAAAAA',
+    'comment': '#75715E',
+    'todo': '#FFFFFF',  # todo uses white text on red background - background handled specially
+}
+# reverse map for parsing spans back to tag names (normalized to lower hex)
+_COLOR_TO_TAG = {v.lower(): k for k, v in _TAG_COLOR_MAP.items()}
+
+# --- HTML parser to extract plain text and tag ranges from simple HTML fragments ---
+class _SimpleHTMLToTagged(HTMLParser):
+    """Parses a fragment of HTML and returns plain text plus tag ranges for
+    simple tags: <b>/<strong>, <i>/<em>, <u>, and <span style="color:...">.
+    Nested tags are supported and ranges are produced in absolute character offsets.
+    """
+    def __init__(self):
+        super().__init__()
+        self.out = []
+        self.pos = 0
+        self.stack = []  # list of (internal_tag_name, start_pos)
+        self.ranges = {}  # tag -> [[start,end], ...]
+        self._span_color_pending = None
+
+    def handle_starttag(self, tag, attrs):
+        tag = tag.lower()
+        attrd = dict(attrs)
+        if tag in ('b', 'strong'):
+            self.stack.append(('bold', self.pos))
+        elif tag in ('i', 'em'):
+            self.stack.append(('italic', self.pos))
+        elif tag == 'u':
+            self.stack.append(('underline', self.pos))
+        elif tag == 'span':
+            style = attrd.get('style', '') or attrd.get('class', '')
+            # find color in style string
+            m = re.search(r'color\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
+            bg = None
+            if m:
+                color = m.group(1).lower()
+                # normalize 3-digit hex to 6-digit
+                if re.match(r'^#[0-9a-f]{3}$', color):
+                    color = '#' + ''.join([c*2 for c in color[1:]])
+                # look up tag by color
+                tagname = _COLOR_TO_TAG.get(color)
+                if tagname:
+                    self.stack.append((tagname, self.pos))
+                    return
+            # special-check for todo background (red background with white text)
+            m2 = re.search(r'background(?:-color)?\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
+            if m2:
+                bgcol = m2.group(1).lower()
+                if bgcol in ('#b22222', 'b22222', 'red'):
+                    self.stack.append(('todo', self.pos))
+                    return
+            # unknown span -> push a sentinel so it can be popped later without creating a tag
+            self.stack.append((None, self.pos))
+
+    def handle_endtag(self, tag):
+        tag = tag.lower()
+        # pop the most recent matching type on stack (search backwards)
+        if not self.stack:
+            return
+        # We pop the last entry, regardless of tag name, to keep things simple and robust.
+        name, start = self.stack.pop()
+        if not name:
+            return
+        end = self.pos
+        if end > start:
+            self.ranges.setdefault(name, []).append([start, end])
+
+    def handle_data(self, data):
+        if not data:
+            return
+        self.out.append(data)
+        self.pos += len(data)
+
+    def get_result(self):
+        return ''.join(self.out), self.ranges
+
+# --- Convert buffer to HTML fragment (used for .md and .html outputs) ---
+def _convert_buffer_to_html_fragment():
+    """Produce an HTML fragment representing the buffer: syntax highlighting
+    rendered as <span style="color:..."> and formatting as <strong>/<em>/<u>.
+    Fragment is safe to embed directly into Markdown (.md) as raw HTML or into
+    a full HTML document (.html).
+    """
+    try:
+        content = textArea.get('1.0', 'end-1c')
+        if not content:
+            return ''
+
+        # gather all tag ranges (formatting + syntax)
+        tags_by_name = _collect_all_tag_ranges()  # returns dict tag -> [[s,e],...]
+
+        # build events and walk linear segments (end events before start events)
+        events = []
+        for tag, ranges in tags_by_name.items():
+            for s, e in ranges:
+                events.append((s, 'start', tag))
+                events.append((e, 'end', tag))
+        if not events:
+            # no tags -> just escape HTML and return text with newlines preserved as <br>
+            return html.escape(content).replace('\n', '\n')
+
+        events_by_pos = {}
+        for pos, kind, tag in events:
+            events_by_pos.setdefault(pos, []).append((kind, tag))
+        # ensure start and end boundaries included
+        positions = sorted(set(list(events_by_pos.keys()) + [0, len(content)]))
+        for pos in events_by_pos:
+            # ensure 'end' sorts before 'start'
+            events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
+
+        out_parts = []
+        active = []  # maintain stack of active tags to produce nested HTML
+        for i in range(len(positions) - 1):
+            pos = positions[i]
+            for kind, tag in events_by_pos.get(pos, []):
+                if kind == 'end':
+                    # close last occurrence of tag in active stack (search right-to-left)
+                    for j in range(len(active) - 1, -1, -1):
+                        if active[j] == tag:
+                            # close tags in reverse order until that tag is closed
+                            for k in range(len(active) - 1, j - 1, -1):
+                                t = active.pop()
+                                if t in ('bold', 'italic', 'underline'):
+                                    if t == 'bold':
+                                        out_parts.append('</strong>')
+                                    elif t == 'italic':
+                                        out_parts.append('</em>')
+                                    elif t == 'underline':
+                                        out_parts.append('</u>')
+                                else:
+                                    # syntax tags: close span
+                                    out_parts.append('</span>')
+                            break
+                elif kind == 'start':
+                    # start tag: open HTML wrapper and push to active
+                    if tag in ('bold', 'italic', 'underline'):
+                        if tag == 'bold':
+                            out_parts.append('<strong>')
+                        elif tag == 'italic':
+                            out_parts.append('<em>')
+                        elif tag == 'underline':
+                            out_parts.append('<u>')
+                        active.append(tag)
+                    else:
+                        # syntax tag -> open span with inline color style (or background for todo)
+                        color = _TAG_COLOR_MAP.get(tag)
+                        if tag == 'todo':
+                            out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
+                        elif color:
+                            out_parts.append(f'<span style="color:{color}">')
+                        else:
+                            out_parts.append('<span>')
+                        active.append(tag)
+
+            next_pos = positions[i + 1]
+            if next_pos <= pos:
+                continue
+            seg = content[pos:next_pos]
+            # escape any HTML in the segment
+            seg_escaped = html.escape(seg)
+            out_parts.append(seg_escaped)
+
+        # close any remaining open tags
+        while active:
+            t = active.pop()
+            if t in ('bold', 'italic', 'underline'):
+                if t == 'bold':
+                    out_parts.append('</strong>')
+                elif t == 'italic':
+                    out_parts.append('</em>')
+                elif t == 'underline':
+                    out_parts.append('</u>')
+            else:
+                out_parts.append('</span>')
+
+        return ''.join(out_parts)
+    except Exception:
+        try:
+            return html.escape(textArea.get('1.0', 'end-1c'))
+        except Exception:
+            return ''
 
 INI_PATH = 'config.ini'
 config = configparser.ConfigParser()
@@ -100,16 +301,127 @@ def open_recent_file(path: str):
     """Open a recent file (called from recent menu)."""
     try:
         with open(path, 'r', errors='replace') as fh:
+            raw = fh.read()
+            content, meta = _extract_header_and_meta(raw)
             textArea.delete('1.0', 'end')
-            textArea.insert('1.0', fh.read())
+            textArea.insert('1.0', content)
         statusBar['text'] = f"'{path}' opened successfully!"
         root.fileName = path
+        try:
+            if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
+                Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+        except Exception:
+            pass
+
         add_recent_file(path)
+        if meta:
+            root.after(0, lambda: _apply_formatting_from_meta(meta))
+
         if updateSyntaxHighlighting.get():
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
+def _collect_all_tag_ranges():
+    """Collect ranges for both formatting and syntax tags as absolute offsets."""
+    tags_to_save = (
+        # formatting tags
+        'bold', 'italic', 'underline', 'all',
+        'underlineitalic', 'boldunderline', 'bolditalic',
+        # syntax/highlight tags
+        'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+        'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'
+    )
+    data = {}
+    try:
+        for tag in tags_to_save:
+            ranges = textArea.tag_ranges(tag)
+            if not ranges:
+                continue
+            arr = []
+            for i in range(0, len(ranges), 2):
+                s = ranges[i]
+                e = ranges[i + 1]
+                # compute char offsets relative to buffer start
+                start = len(textArea.get('1.0', s))
+                end = len(textArea.get('1.0', e))
+                if end > start:
+                    arr.append([start, end])
+            if arr:
+                data[tag] = arr
+    except Exception:
+        pass
+    return data
+
+
+def _serialize_tags(tags_dict):
+    """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""
+    try:
+        if not tags_dict:
+            return ''
+        meta = {'version': 1, 'tags': tags_dict}
+        b64 = base64.b64encode(json.dumps(meta).encode('utf-8')).decode('ascii')
+        return "# ---SIMPLEEDIT-META-BEGIN---\n# " + b64 + "\n# ---SIMPLEEDIT-META-END---\n\n"
+    except Exception:
+        return ''
+
+
+def _parse_simple_markdown(md_text):
+    """
+    Very small markdown parser to extract bold/italic/underline markers and return plain text
+    plus a tags dict compatible with _apply_formatting_from_meta (i.e. {tag: [[start,end], ...]}).
+    Supports: ***bolditalic***, **bold**, *italic*, and <u>underline</u>.
+    This is intentionally simple and not a full markdown implementation.
+    """
+    tags = {'bold': [], 'italic': [], 'underline': [], 'bolditalic': []}
+    plain_parts = []
+    last = 0
+    out_index = 0
+
+    # pattern captures groups: g1=***text***, g2=**text**, g3=*text*, g4=<u>text</u>
+    pattern = re.compile(r'\*\*\*([^\*]+?)\*\*\*|\*\*([^\*]+?)\*\*|\*([^\*]+?)\*|<u>(.*?)</u>', re.DOTALL)
+    for m in pattern.finditer(md_text):
+        start, end = m.span()
+        # append intermediate plain text
+        seg = md_text[last:start]
+        plain_parts.append(seg)
+        out_index += len(seg)
+        # choose which group matched and its content
+        content = None
+        tag_name = None
+        if m.group(1) is not None:
+            content = m.group(1)
+            tag_name = 'bolditalic'
+        elif m.group(2) is not None:
+            content = m.group(2)
+            tag_name = 'bold'
+        elif m.group(3) is not None:
+            content = m.group(3)
+            tag_name = 'italic'
+        elif m.group(4) is not None:
+            content = m.group(4)
+            tag_name = 'underline'
+        else:
+            content = md_text[start:end]
+            tag_name = None
+
+        if content is None:
+            content = ''
+        # append content and record tag range
+        plain_parts.append(content)
+        if tag_name:
+            tags.setdefault(tag_name, []).append([out_index, out_index + len(content)])
+        out_index += len(content)
+        last = end
+
+    # append tail
+    tail = md_text[last:]
+    plain_parts.append(tail)
+    plain_text = ''.join(plain_parts)
+
+    # remove empty tag lists
+    tags = {k: v for k, v in tags.items() if v}
+    return plain_text, tags
 
 def refresh_recent_menu():
     """Rebuild the `recentMenu` items from persisted MRU list."""
@@ -408,11 +720,12 @@ editMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="File", menu=fileMenu)
 fileMenu.add_command(label='New', command=lambda: newFile())
 fileMenu.add_separator()
-fileMenu.add_command(label='Open', command=lambda: open_file())
+fileMenu.add_command(label='Open', command=lambda: open_file_threaded())
 fileMenu.add_cascade(label="Open Recent", menu=recentMenu)
 fileMenu.add_separator()
-fileMenu.add_command(label='Save', command=lambda: saveFileAsThreaded())
-fileMenu.add_command(label='Save As', command=lambda: saveFileAsThreaded2())
+fileMenu.add_command(label='Save', command=lambda: save_file())
+fileMenu.add_command(label='Save As', command=lambda: save_file_as())
+fileMenu.add_command(label='Save as Markdown', command=lambda: save_as_markdown())
 fileMenu.add_separator()
 fileMenu.add_command(label='Exit', command=root.destroy)
 
@@ -727,6 +1040,83 @@ def _save_symbol_buffers(vars_set, defs_set):
             config.write(f)
     except Exception:
         pass
+
+def _serialize_formatting():
+    """Return header string (commented base64 JSON) for current non-syntax tags, or '' if no formatting."""
+    try:
+        tags_to_save = ('bold', 'italic', 'underline', 'all',
+                        'underlineitalic', 'boldunderline', 'bolditalic')
+        data = {}
+        for tag in tags_to_save:
+            ranges = textArea.tag_ranges(tag)
+            if not ranges:
+                continue
+            arr = []
+            for i in range(0, len(ranges), 2):
+                s = ranges[i]
+                e = ranges[i + 1]
+                # compute char offsets relative to buffer start
+                start = len(textArea.get('1.0', s))
+                end = len(textArea.get('1.0', e))
+                if end > start:
+                    arr.append([start, end])
+            if arr:
+                data[tag] = arr
+        if not data:
+            return ''
+        meta = {'version': 1, 'tags': data}
+        b64 = base64.b64encode(json.dumps(meta).encode('utf-8')).decode('ascii')
+        return "# ---SIMPLEEDIT-META-BEGIN---\n# " + b64 + "\n# ---SIMPLEEDIT-META-END---\n\n"
+    except Exception:
+        return ''
+
+
+def _apply_formatting_from_meta(meta):
+    """Apply saved tag ranges (meta is dict with key 'tags') on the UI thread."""
+    try:
+        tags = meta.get('tags', {}) if isinstance(meta, dict) else {}
+        # We need to ensure tags exist; tag_add will silently fail if indices out of range
+        for tag, ranges in tags.items():
+            for start, end in ranges:
+                try:
+                    textArea.tag_add(tag, f"1.0 + {int(start)}c", f"1.0 + {int(end)}c")
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _extract_header_and_meta(raw):
+    """
+    If raw begins with the SIMPLEEDIT header return (content, meta) where content
+    is the visible file without header and meta is the parsed dict; otherwise return (raw, None).
+    """
+    try:
+        if not raw.startswith("# ---SIMPLEEDIT-META-BEGIN---"):
+            return raw, None
+        lines = raw.splitlines(True)
+        i = 0
+        if lines[0].strip() != "# ---SIMPLEEDIT-META-BEGIN---":
+            return raw, None
+        i = 1
+        b64_parts = []
+        while i < len(lines) and lines[i].strip() != "# ---SIMPLEEDIT-META-END---":
+            line = lines[i]
+            if line.startswith('#'):
+                b64_parts.append(line[1:].strip())
+            i += 1
+        if i >= len(lines):
+            return raw, None
+        # content starts after the END marker line
+        content = ''.join(lines[i + 1:])
+        b64 = ''.join(b64_parts)
+        try:
+            meta = json.loads(base64.b64decode(b64).decode('utf-8'))
+            return content, meta
+        except Exception:
+            return content, None
+    except Exception:
+        return raw, None
 
 def _apply_full_tags(actions, new_vars, new_defs):
     """Apply tag actions on the main/UI thread and persist discovered symbols."""
@@ -1055,37 +1445,42 @@ def get_size_of_textarea_lines():
 
 def save_file_as():
     # asks save-as if no filename is set
-    if not root.fileName:
-        fileName = filedialog.asksaveasfilename(initialdir=os.path.expanduser("~"), title="Select file",
-                                                filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
-        if not fileName:
-            return
-        root.fileName = fileName
-
-    fileName = root.fileName
-    try:
-        total_size = get_size_of_textarea_lines()
-        current_size = 0
-        with open(fileName, 'w', errors='replace') as f:
-            for line in textArea.get('1.0', 'end-1c').split('\n'):
-                f.write(line + '\n')
-                current_size += 1
-                progress = round((current_size / total_size) * 100, 2)
-                statusBar['text'] = f"Saving... {progress}% - {fileName}"
-        statusBar['text'] = f"Saved: {fileName}"
-        add_recent_file(fileName)
-        refresh_recent_menu()
-    except Exception as e:
-        messagebox.showerror("Error", str(e))
+    fileName = filedialog.asksaveasfilename(
+        initialdir=os.path.expanduser("~"),
+        title="Save as SimpleEdit Text (.set), Markdown (.md) or other",
+        defaultextension='.set',
+        filetypes=(
+            ("SimpleEdit Text files", "*.set"),
+            ("Markdown files", "*.md"),
+            ("Text files", "*.txt"),
+            ("Python Source files", "*.py"),
+            ("All files", "*.*"),
+        )
+    )
+    if not fileName:
+        return
+    root.fileName = fileName
+    # fall through to normal save
+    save_file()
 
 
 def save_file_as2():
-    fileName2 = filedialog.asksaveasfilename(initialdir=os.path.expanduser("~"), title="Select file",
-                                             filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+    fileName2 = filedialog.asksaveasfilename(
+        initialdir=os.path.expanduser("~"),
+        title="Save as SimpleEdit Text (.set), Markdown (.md) or other",
+        defaultextension='.set',
+        filetypes=(
+            ("SimpleEdit Text files", "*.set"),
+            ("Markdown files", "*.md"),
+            ("Text files", "*.txt"),
+            ("Python Source files", "*.py"),
+            ("All files", "*.*"),
+        )
+    )
     if not fileName2:
         return
     root.fileName = fileName2
-    save_file_as()
+    save_file()
 
 
 def save_file():
@@ -1093,8 +1488,16 @@ def save_file():
         save_file_as()
         return
     try:
-        with open(root.fileName, 'w') as f:
-            f.write(textArea.get('1.0', 'end-1c'))
+        content = textArea.get('1.0', 'end-1c')
+        # automatically embed formatting header for .set files,
+        # or if the user explicitly enabled the option in settings.
+        save_formatting = config.getboolean("Section1", "saveFormattingInFile", fallback=False) \
+                          or (isinstance(root.fileName, str) and root.fileName.lower().endswith('.set'))
+        header = _serialize_formatting() if save_formatting else ''
+        with open(root.fileName, 'w', errors='replace') as f:
+            if header:
+                f.write(header)
+            f.write(content)
         statusBar['text'] = f"'{root.fileName}' saved successfully!"
         add_recent_file(root.fileName)
         refresh_recent_menu()
@@ -1105,16 +1508,64 @@ def save_file():
 def open_file_threaded():
     # runs in thread
     try:
-        fileName = filedialog.askopenfilename(initialdir=os.path.expanduser("~"), title="Select file",
-                                              filetypes=(("Text files", "*.txt"), ("Python Source files", "*.py"), ("All files", "*.*")))
+        fileName = filedialog.askopenfilename(
+            initialdir=os.path.expanduser("~"),
+            title="Select file",
+            filetypes=(
+                ("SimpleEdit Text files", "*.set"),
+                ("Markdown files", "*.md"),
+                ("HTML files", "*.html"),
+                ("Text files", "*.txt"),
+                ("Python Source files", "*.py"),
+                ("All files", "*.*"),
+            )
+        )
         if not fileName:
             return
-        with open(fileName, 'r', errors='replace') as f:
+        with open(fileName, 'r', errors='replace', encoding='utf-8') as f:
+            raw = f.read()
+
+        # First try to extract SIMPLEEDIT meta (preferred)
+        content, meta = _extract_header_and_meta(raw)
+        if meta:
             textArea.delete('1.0', 'end')
-            textArea.insert('1.0', f.read())
+            textArea.insert('1.0', content)
+            statusBar['text'] = f"'{fileName}' opened successfully!"
+            root.fileName = fileName
+            add_recent_file(fileName)
+            refresh_recent_menu()
+            root.after(0, lambda: _apply_formatting_from_meta(meta))
+            try:
+                if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
+                    Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+            except Exception:
+                pass
+            if updateSyntaxHighlighting.get():
+                root.after(0, highlightPythonInit)
+            return
+
+        # If no meta and file is .md or .html attempt HTML-aware parsing to reconstruct tags
+        ext = fileName.lower().split('.')[-1]
+        if ext in ('md', 'html', 'htm'):
+            plain, tags_meta = _parse_html_and_apply(raw)
+            textArea.delete('1.0', 'end')
+            textArea.insert('1.0', plain)
+            root.fileName = fileName
+            statusBar['text'] = f"'{fileName}' opened (HTML/MD parsed)!"
+            add_recent_file(fileName)
+            refresh_recent_menu()
+            if tags_meta and tags_meta.get('tags'):
+                root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
+            # still run normal syntax-highlighting pass to refresh persisted symbol highlights
+            if updateSyntaxHighlighting.get():
+                root.after(0, highlightPythonInit)
+            return
+
+        # Fallback: no meta and not md/html - insert raw
+        textArea.delete('1.0', 'end')
+        textArea.insert('1.0', raw)
         statusBar['text'] = f"'{fileName}' opened successfully!"
         root.fileName = fileName
-        # if configured, start loading the AI model (don't auto-start autocomplete)
         try:
             if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
                 Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
@@ -1127,17 +1578,228 @@ def open_file_threaded():
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
+def _collect_formatting_ranges():
+    """Return dict mapping formatting tag -> list of (start_offset, end_offset)."""
+    tags_to_check = ('bold', 'italic', 'underline', 'all',
+                     'underlineitalic', 'boldunderline', 'bolditalic')
+    out = {}
+    for tag in tags_to_check:
+        ranges = textArea.tag_ranges(tag)
+        arr = []
+        for i in range(0, len(ranges), 2):
+            s = ranges[i]
+            e = ranges[i + 1]
+            start = len(textArea.get('1.0', s))
+            end = len(textArea.get('1.0', e))
+            if end > start:
+                arr.append((start, end))
+        out[tag] = arr
+    return out
 
-def open_file():
-    Thread(target=open_file_threaded, daemon=True).start()
+
+def _wrap_segment_by_tags(seg_text: str, active_tags: set):
+    """Wrap a text segment according to active tag set into Markdown/HTML."""
+    # Determine boolean flags considering explicit combo tags and 'all'
+    has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
+    has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
+    has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
+
+    inner = seg_text
+    # Prefer Markdown bold+italic triple-star where supported
+    if has_bold and has_italic:
+        inner = f"***{inner}***"
+    elif has_bold:
+        inner = f"**{inner}**"
+    elif has_italic:
+        inner = f"*{inner}*"
+
+    if has_underline:
+        # Markdown doesn't have native underline; use HTML <u> for compatibility
+        inner = f"<u>{inner}</u>"
+
+    return inner
 
 
-def saveFileAsThreaded():
-    Thread(target=save_file_as, daemon=True).start()
+# Modified functions: ensure exported HTML/MD include background/font/text color and preserve whitespace.
+def _convert_buffer_to_html_fragment():
+    """Produce an HTML fragment representing the buffer: syntax highlighting
+    rendered as <span style="color:..."> and formatting as <strong>/<em>/<u>.
+    Fragment is safe to embed directly into Markdown (.md) as raw HTML or into
+    a full HTML document (.html).
+    """
+    try:
+        content = textArea.get('1.0', 'end-1c')
+        if not content:
+            return ''
+
+        # gather all tag ranges (formatting + syntax)
+        tags_by_name = _collect_all_tag_ranges()  # returns dict tag -> [[s,e],...]
+
+        # build events and walk linear segments (end events before start events)
+        events = []
+        for tag, ranges in tags_by_name.items():
+            for s, e in ranges:
+                events.append((s, 'start', tag))
+                events.append((e, 'end', tag))
+        if not events:
+            # no tags -> just escape HTML. We'll let the caller wrap in an element that preserves whitespace.
+            return html.escape(content)
+
+        events_by_pos = {}
+        for pos, kind, tag in events:
+            events_by_pos.setdefault(pos, []).append((kind, tag))
+        # ensure start and end boundaries included
+        positions = sorted(set(list(events_by_pos.keys()) + [0, len(content)]))
+        for pos in events_by_pos:
+            # ensure 'end' sorts before 'start'
+            events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
+
+        out_parts = []
+        active = []  # maintain stack of active tags to produce nested HTML
+        for i in range(len(positions) - 1):
+            pos = positions[i]
+            for kind, tag in events_by_pos.get(pos, []):
+                if kind == 'end':
+                    # close last occurrence of tag in active stack (search right-to-left)
+                    for j in range(len(active) - 1, -1, -1):
+                        if active[j] == tag:
+                            # close tags in reverse order until that tag is closed
+                            for k in range(len(active) - 1, j - 1, -1):
+                                t = active.pop()
+                                if t in ('bold', 'italic', 'underline'):
+                                    if t == 'bold':
+                                        out_parts.append('</strong>')
+                                    elif t == 'italic':
+                                        out_parts.append('</em>')
+                                    elif t == 'underline':
+                                        out_parts.append('</u>')
+                                else:
+                                    # syntax tags: close span
+                                    out_parts.append('</span>')
+                            break
+                elif kind == 'start':
+                    # start tag: open HTML wrapper and push to active
+                    if tag in ('bold', 'italic', 'underline'):
+                        if tag == 'bold':
+                            out_parts.append('<strong>')
+                        elif tag == 'italic':
+                            out_parts.append('<em>')
+                        elif tag == 'underline':
+                            out_parts.append('<u>')
+                        active.append(tag)
+                    else:
+                        # syntax tag -> open span with inline color style (or background for todo)
+                        color = _TAG_COLOR_MAP.get(tag)
+                        if tag == 'todo':
+                            out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
+                        elif color:
+                            out_parts.append(f'<span style="color:{color}">')
+                        else:
+                            out_parts.append('<span>')
+                        active.append(tag)
+
+            next_pos = positions[i + 1]
+            if next_pos <= pos:
+                continue
+            seg = content[pos:next_pos]
+            # escape any HTML in the segment but keep newlines intact (they'll be honored by wrapper with pre-wrap)
+            seg_escaped = html.escape(seg)
+            out_parts.append(seg_escaped)
+
+        # close any remaining open tags
+        while active:
+            t = active.pop()
+            if t in ('bold', 'italic', 'underline'):
+                if t == 'bold':
+                    out_parts.append('</strong>')
+                elif t == 'italic':
+                    out_parts.append('</em>')
+                elif t == 'underline':
+                    out_parts.append('</u>')
+            else:
+                out_parts.append('</span>')
+
+        return ''.join(out_parts)
+    except Exception:
+        try:
+            return html.escape(textArea.get('1.0', 'end-1c'))
+        except Exception:
+            return ''
 
 
-def saveFileAsThreaded2():
-    Thread(target=save_file_as2, daemon=True).start()
+def save_as_markdown():
+    """Save buffer as .md or .html. Output contains visible HTML spans for syntax
+    and formatting so the saved file renders with highlighting. Metadata header is not required.
+
+    Improvements:
+    - Wrap fragment in a block element that sets background, text color and preserves whitespace.
+    - For .html produce a full document as before.
+    """
+    fileName = filedialog.asksaveasfilename(
+        initialdir=os.path.expanduser("~"),
+        title="Save as Markdown (.md) or HTML (.html) (preserves visible highlighting)",
+        defaultextension='.md',
+        filetypes=(
+            ("Markdown files", "*.md"),
+            ("HTML files", "*.html"),
+            ("Text files", "*.txt"),
+            ("All files", "*.*"),
+        )
+    )
+    if not fileName:
+        return
+
+    try:
+        fragment = _convert_buffer_to_html_fragment()
+        # Build a wrapper block that enforces monospace font, background, text color and preserves whitespace
+        wrapper_style = (
+            f"background:{backgroundColor};"
+            f"color:{fontColor};"
+            f"font-family:{fontName},monospace;"
+            "white-space:pre-wrap;"
+            "padding:8px;"
+        )
+        wrapped_fragment = f'<div style="{wrapper_style}">{fragment}</div>'
+
+        if fileName.lower().endswith('.html'):
+            # wrap in minimal HTML document with inline styles for monospace font
+            html_doc = (
+                '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">\n'
+                '<title>SimpleEdit Export</title>\n'
+                '</head>\n<body>\n{body}\n</body>\n</html>\n'
+            ).format(body=wrapped_fragment)
+            with open(fileName, 'w', errors='replace', encoding='utf-8') as f:
+                f.write(html_doc)
+        else:
+            # .md - write wrapped fragment (raw HTML allowed in Markdown). This ensures colors and whitespace are preserved.
+            with open(fileName, 'w', errors='replace', encoding='utf-8') as f:
+                f.write(wrapped_fragment)
+        statusBar['text'] = f"'{fileName}' saved successfully!"
+        root.fileName = fileName
+        add_recent_file(fileName)
+        refresh_recent_menu()
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+# --- Parse saved HTML fragments or full HTML docs back into plain text + tags ---
+def _parse_html_and_apply(raw):
+    """
+    Parse raw HTML fragment or document and extract plain text and tag ranges.
+    Returns (plain_text, tags_dict) where tags_dict matches _apply_formatting_from_meta format.
+    """
+    try:
+        # If full document, try to extract body contents heuristically
+        m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
+        fragment = m.group(1) if m else raw
+
+        parser = _SimpleHTMLToTagged()
+        parser.feed(fragment)
+        plain, ranges = parser.get_result()
+        # convert ranges (already [[s,e],...]) into meta shape
+        return plain, {'tags': ranges}
+    except Exception:
+        return raw, {}
 
 
 # -------------------------
@@ -1814,10 +2476,12 @@ def python_ai_autocomplete():
 # toolbar buttons (single definitions)
 btn1 = Button(toolBar, text='New', command=lambda: newFile())
 btn1.pack(side=LEFT, padx=2, pady=2)
-btn2 = Button(toolBar, text='Open', command=open_file)
+btn2 = Button(toolBar, text='Open', command=open_file_threaded)
 btn2.pack(side=LEFT, padx=2, pady=2)
-btn3 = Button(toolBar, text='Save', command=saveFileAsThreaded)
+btn3 = Button(toolBar, text='Save', command=save_file_as)
 btn3.pack(side=LEFT, padx=2, pady=2)
+btnSaveMD = Button(toolBar, text='Save MD', command=save_as_markdown)
+btnSaveMD.pack(side=LEFT, padx=2, pady=2)
 formatButton1 = Button(toolBar, text='Bold', command=format_bold)
 formatButton1.pack(side=LEFT, padx=2, pady=2)
 formatButton2 = Button(toolBar, text='Italic', command=format_italic)
@@ -1850,7 +2514,7 @@ textArea.bind('<KeyRelease>', lambda e: (highlight_python_helper(e), highlight_c
 textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
 textArea.bind('<MouseWheel>', lambda e: (highlight_python_helper(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
-root.bind('<Control-Key-s>', lambda event: saveFileAsThreaded())
+root.bind('<Control-Key-s>', lambda event: save_file())
 
 # -------------------------
 # Settings modal
@@ -1902,6 +2566,9 @@ def create_config_window():
     # auto-load AI options
     loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
     loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
+    # save-formatting option
+    saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
+    ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=12, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=10, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=11, column=1, sticky='w', pady=6)
 
@@ -1970,6 +2637,7 @@ def create_config_window():
         config.set("Section1", "syntaxHighlighting", str(bool(syntaxCheckVar.get())))
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
         config.set("Section1", "loadAIOnNew", str(bool(loadAIOnNewVar.get())))
+        config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
 
         try:
             with open(INI_PATH, 'w') as configfile:
@@ -2030,6 +2698,7 @@ def create_config_window():
             syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
             loadAIOnOpenVar.set(config.getboolean("Section1", "loadAIOnOpen", fallback=False))
             loadAIOnNewVar.set(config.getboolean("Section1", "loadAIOnNew", fallback=False))
+            saveFormattingVar.set(config.getboolean("Section1", "saveFormattingInFile", fallback=False))
         except Exception:
             pass
 
@@ -2066,6 +2735,7 @@ def nonlocal_values_reload():
     temperature = float(config.get("Section1", "temperature"))
     loadAIOnOpen = config.getboolean("Section1", "loadAIOnOpen", fallback=False)
     loadAIOnNew = config.getboolean("Section1", "loadAIOnNew", fallback=False)
+    saveFormattingInFile = config.getboolean("Section1", "saveFormattingInFile", fallback=False)
 
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
 
