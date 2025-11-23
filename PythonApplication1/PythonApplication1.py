@@ -33,7 +33,7 @@ try:
     _ML_AVAILABLE = True
 except Exception:
     _ML_AVAILABLE = False
-
+_AI_BUTTON_DEFAULT_TEXT = "AI Autocomplete (Experimental)"
 __author__ = 'Joshua Richards'
 __license__ = 'MIT'
 __version__ = '0.0.2'
@@ -53,6 +53,9 @@ DEFAULT_CONFIG = {
         'temperature': '1.1',
         'top_k': '300',
         'seed': '1337',
+        'syntaxHighlighting': 'True',      # new: persist syntax highlighting toggle
+        'loadAIOnOpen': 'False',           # new: load AI when opening a file
+        'loadAIOnNew': 'False',            # new: load AI when creating a new file
     }
 }
 
@@ -145,50 +148,222 @@ seed = int(config.get('Section1', 'seed'))
 random.seed(seed)
 if _ML_AVAILABLE:
     torch.manual_seed(seed + random.randint(0, 9999))
+loadAIOnOpen = config.getboolean('Section1', 'loadAIOnOpen', fallback=False)
+loadAIOnNew = config.getboolean('Section1', 'loadAIOnNew', fallback=False)
 
 # -------------------------
-# Optional model init
-# -------------------------
+# Optional model init (lazy-loaded on user request)
 model = None
+original_model = None
 encode = lambda s: []
 decode = lambda l: ""
+_model_loading = False
+_model_loaded = False
 
-if _ML_AVAILABLE:
+def unload_model():
+    """Unload the AI model and update UI. Visible only when a model is loaded."""
+    global model, original_model, encode, decode, _model_loaded, _model_loading
     try:
-        init_from = 'resume'
-        out_dir = 'out'
-        ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-        checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
-        gptconf = GPTConfig(**checkpoint['model_args'])
-        model = GPT(gptconf)
-        state_dict = checkpoint['model']
-        unwanted_prefix = '_orig_mod.'
-        for k in list(state_dict.keys()):
-            if k.startswith(unwanted_prefix):
-                state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-        model.load_state_dict(state_dict)
-        model.eval()
-        model.to('cpu')
-        original_model = model
-        if sys.platform == "win32" and shutil.which("cl") is None:
-            # avoid Inductor which needs MSVC; use eager backend instead
-            try:
-                model = torch.compile(model, backend="eager", mode="reduce-overhead")
-            except Exception:
-                # fallback to uncompiled model
-                model = original_model
-        else:
-            try:
-                model = torch.compile(model, mode="reduce-overhead")
-            except Exception:
-                model = original_model
-
-        enc = tiktoken.get_encoding("gpt2")
-        encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
-        decode = lambda l: enc.decode(l)
-    except Exception:
-        # model not available — leave model as None to disable AI feature gracefully
+        if not _model_loaded:
+            return
+        # Clear references so Python can GC model memory
         model = None
+        original_model = None
+        encode = lambda s: []
+        decode = lambda l: ""
+        _model_loaded = False
+        _model_loading = False
+
+        # UI updates must run on main thread
+        def ui_updates():
+            try:
+                statusBar['text'] = "AI model unloaded."
+            except Exception:
+                pass
+            try:
+                buttonAI.config(text=_AI_BUTTON_DEFAULT_TEXT)
+            except Exception:
+                pass
+            try:
+                # hide unload button
+                buttonUnload.pack_forget()
+            except Exception:
+                pass
+            try:
+                # clear params label
+                paramsLabel.config(text="")
+            except Exception:
+                pass
+
+        root.after(0, ui_updates)
+    except Exception:
+        pass
+
+
+def _start_model_load(start_autocomplete: bool = False):
+    """Load model in a background thread and show a progress popup.
+    If start_autocomplete is True, start `python_ai_autocomplete` after load."""
+    global model, original_model, encode, decode, _model_loading, _model_loaded
+
+    if _model_loaded or _model_loading:
+        return
+
+    dlg, pb, status = show_progress_popup("Loading AI model", determinate=True)
+    status['text'] = "Initializing..."
+
+    def worker():
+        # Ensure assignments update module-level variables
+        global model, original_model, encode, decode, _model_loading, _model_loaded
+        nonlocal dlg, pb, status
+        try:
+            _model_loading = True
+            root.after(0, lambda: status.config(text="Loading checkpoint..."))
+            root.after(0, lambda: pb.config(value=10))
+            try:
+                init_from = 'resume'
+                out_dir = 'out'
+                ckpt_path = os.path.join(out_dir, 'ckpt.pt')
+                checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+            except Exception as ex:
+                raise RuntimeError(f"Failed to load checkpoint: {ex}")
+
+            root.after(0, lambda: pb.config(value=30))
+            root.after(0, lambda: status.config(text="Constructing model..."))
+            try:
+                gptconf = GPTConfig(**checkpoint['model_args'])
+                model_local = GPT(gptconf)
+                state_dict = checkpoint['model']
+                unwanted_prefix = '_orig_mod.'
+                for k in list(state_dict.keys()):
+                    if k.startswith(unwanted_prefix):
+                        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+                model_local.load_state_dict(state_dict)
+                model_local.eval()
+                model_local.to('cpu')
+            except Exception as ex:
+                raise RuntimeError(f"Failed to construct/load model state: {ex}")
+
+            root.after(0, lambda: pb.config(value=60))
+            root.after(0, lambda: status.config(text="Compiling model (may take a moment)..."))
+            try:
+                # preserve original for fallback
+                original_model = model_local
+                if sys.platform == "win32" and shutil.which("cl") is None:
+                    try:
+                        compiled = torch.compile(model_local, backend="eager", mode="reduce-overhead")
+                    except Exception:
+                        compiled = model_local
+                else:
+                    try:
+                        compiled = torch.compile(model_local, mode="reduce-overhead")
+                    except Exception:
+                        compiled = model_local
+                model = compiled
+            except Exception:
+                # if compile fails, keep the eager model
+                model = model_local
+
+            root.after(0, lambda: pb.config(value=80))
+            root.after(0, lambda: status.config(text="Initializing tokenizer..."))
+            try:
+                enc = tiktoken.get_encoding("gpt2")
+                encode = lambda s: enc.encode(s, allowed_special={"<|endoftext|>"})
+                decode = lambda l: enc.decode(l)
+            except Exception:
+                encode = lambda s: []
+                decode = lambda l: ""
+
+            _model_loaded = True
+            root.after(0, lambda: statusBar.config(text="AI model loaded."))
+            root.after(0, lambda: pb.config(value=100))
+
+            # update UI: compute initial context token count on main thread (safe access to textArea)
+            def set_loaded_ui():
+                try:
+                    # determine selection / context same as autocomplete does
+                    try:
+                        ranges = textArea.tag_ranges("sel")
+                        if ranges:
+                            start, end = ranges[0], ranges[1]
+                        else:
+                            start = textArea.index(f'insert-{aiMaxContext}c')
+                            end = textArea.index('insert')
+                    except Exception:
+                        start = textArea.index(f'insert-{aiMaxContext}c')
+                        end = textArea.index('insert')
+                    try:
+                        content = textArea.get(start, end)
+                        n = len(encode(content)) if encode else 0
+                    except Exception:
+                        n = 0
+                    try:
+                        buttonAI.config(text=f"AI Autocomplete - ctx: {n}")
+                    except Exception:
+                        pass
+                    try:
+                        # show unload button (only when model is loaded)
+                        buttonUnload.pack(side=LEFT, padx=2, pady=2)
+                    except Exception:
+                        pass
+                    try:
+                        # update params label
+                        paramsLabel.config(text=_get_model_param_text())
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            root.after(0, set_loaded_ui)
+
+        except Exception as e:
+            model = None
+            original_model = None
+            _model_loaded = False
+            root.after(0, lambda: statusBar.config(text=f"AI load error: {e}"))
+        finally:
+            _model_loading = False
+            try:
+                close_progress_popup(dlg, pb)
+            except Exception:
+                pass
+
+            # if requested, automatically begin autocomplete after load
+            if _model_loaded and start_autocomplete:
+                try:
+                    Thread(target=python_ai_autocomplete, daemon=True).start()
+                except Exception:
+                    pass
+
+    Thread(target=worker, daemon=True).start()
+
+
+
+def on_ai_button_click():
+    """Handler bound to the AI toolbar button.
+    If model is loaded -> start autocomplete. If not loaded -> load it (showing progress)."""
+    global _model_loaded, _model_loading
+
+    if not _ML_AVAILABLE:
+        try:
+            statusBar['text'] = "AI libraries not available."
+        except Exception:
+            pass
+        return
+
+    if _model_loaded:
+        # Already loaded: run autocomplete in background to keep UI responsive
+        Thread(target=python_ai_autocomplete, daemon=True).start()
+        return
+
+    if _model_loading:
+        try:
+            statusBar['text'] = "Model is already loading..."
+        except Exception:
+            pass
+        return
+
+    # Start load and immediately begin autocomplete after load completes
+    _start_model_load(start_autocomplete=True)
 
 # -------------------------
 # Helper utilities
@@ -252,10 +427,28 @@ editMenu.add_command(label='Find/Replace', command=lambda: open_find_replace())
 editMenu.add_command(label='Go To Line', command=lambda: go_to_line(), accelerator='Ctrl+G')
 root.bind('<Control-g>', lambda e: go_to_line())
 
+# Helper to return a nicely formatted parameter count string for the loaded model
+def _get_model_param_text():
+    try:
+        # prefer the original_model (uncompiled) if available for accurate counting
+        m = original_model if 'original_model' in globals() and original_model is not None else model
+        if m is None:
+            return ""
+        if hasattr(m, 'get_num_params'):
+            n = int(m.get_num_params(non_embedding=True))
+        else:
+            n = sum(p.numel() for p in m.parameters())
+        if n <= 0:
+            return ""
+        return f"Params: {n/1e6:.2f}M"
+    except Exception:
+        return ""
+
 # --- Symbols menu & manager -------------------------------------------------
 symbolsMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="Symbols", menu=symbolsMenu)
 symbolsMenu.add_command(label="Manage Symbols...", command=lambda: open_symbols_manager())
+
 
 def open_symbols_manager():
     """Small dialog to view/edit/remove/swap persisted vars/defs."""
@@ -427,6 +620,10 @@ statusFrame.pack(side=BOTTOM, fill=X)
 
 statusBar = Label(statusFrame, text="Ready", bd=1, relief=SUNKEN, anchor=W)
 statusBar.pack(side=LEFT, fill=X, expand=True)
+
+# Right-aligned params label (hidden/empty until model is loaded)
+paramsLabel = Label(statusFrame, text="", bd=1, relief=SUNKEN, anchor=E)
+paramsLabel.pack(side=RIGHT, padx=6)
 
 # placeholder for refresh button (created below near bindings so function names exist)
 refreshSyntaxButton = None
@@ -917,6 +1114,12 @@ def open_file_threaded():
             textArea.insert('1.0', f.read())
         statusBar['text'] = f"'{fileName}' opened successfully!"
         root.fileName = fileName
+        # if configured, start loading the AI model (don't auto-start autocomplete)
+        try:
+            if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
+                Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+        except Exception:
+            pass
         add_recent_file(fileName)
         refresh_recent_menu()
         if updateSyntaxHighlighting.get():
@@ -940,7 +1143,8 @@ def saveFileAsThreaded2():
 # -------------------------
 # Highlighting
 # -------------------------
-updateSyntaxHighlighting = IntVar(value=1)
+# Highlighting toggle (initialized from config)
+updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
 
 
 def match_case_like_this(start, end):
@@ -1436,6 +1640,13 @@ def update_status_bar(event=None):
     except Exception:
         pass
 
+    # update params display if model is loaded (kept separate so line/col remains primary)
+    try:
+        if _model_loaded:
+            paramsLabel.config(text=_get_model_param_text())
+    except Exception:
+        pass
+
 
 def highlight_current_line(event=None):
     try:
@@ -1491,12 +1702,19 @@ def smart_newline(event):
 # AI autocomplete (optional)
 # -------------------------
 def python_ai_autocomplete():
+    global buttonAI
     if model is None:
         statusBar['text'] = "AI model not available."
         return
+
     try:
         try:
-            start, end = textArea.tag_ranges("sel")
+            ranges = textArea.tag_ranges("sel")
+            if ranges:
+                start, end = ranges[0], ranges[1]
+            else:
+                start = textArea.index(f'insert-{aiMaxContext}c')
+                end = textArea.index('insert')
         except Exception:
             start = textArea.index(f'insert-{aiMaxContext}c')
             end = textArea.index('insert')
@@ -1512,12 +1730,17 @@ def python_ai_autocomplete():
         # prepare tensor on CPU
         idx = torch.tensor(start_ids, dtype=torch.long, device='cpu')[None, :]
 
+        # update button to show current context length (UI thread)
+        try:
+            root.after(0, lambda n=int(idx.size(1)): buttonAI.config(text=f"AI Autocomplete - ctx: {n}"))
+        except Exception:
+            pass
+
         # ensure UI is prepared: delete selection and set insert at start on main thread
         prep_done = threading.Event()
 
         def ui_prep():
             try:
-                #textArea.delete(start, end)
                 textArea.mark_set('insert', end)
                 textArea.tag_remove("sel", '1.0', 'end')
             finally:
@@ -1542,6 +1765,12 @@ def python_ai_autocomplete():
                 next_id = torch.multinomial(probs, num_samples=1)
                 idx = torch.cat((idx, next_id), dim=1)
 
+                # update button with new context length (UI thread)
+                try:
+                    root.after(0, lambda n=int(idx.size(1)): buttonAI.config(text=f"AI Autocomplete - ctx: {n}"))
+                except Exception:
+                    pass
+
                 token_id = int(next_id[0, 0].item())
                 generated_ids.append(token_id)
 
@@ -1564,22 +1793,14 @@ def python_ai_autocomplete():
                         textArea.insert('insert', p)
                         textArea.see(INSERT)
                         highlight_python_helper(p)
+                        update_status_bar()
                     except Exception:
                         pass
 
                 root.after(0, ui_insert)
 
-                # small yield so UI can catch up on very fast loops (optional)
-                #time.sleep(0.005)
-
         # final UI update + status
-        def ui_finish():
-            try:
-                statusBar['text'] = "AI: insertion complete."
-            except Exception:
-                pass
-
-        root.after(0, ui_finish)
+        root.after(0, lambda: statusBar.config(text="AI: insertion complete."))
     except Exception as e:
         try:
             statusBar['text'] = f"AI error: {e}"
@@ -1605,11 +1826,15 @@ formatButton3 = Button(toolBar, text='Underline', command=format_underline)
 formatButton3.pack(side=LEFT, padx=2, pady=2)
 formatButton4 = Button(toolBar, text='Remove Formatting', command=remove_all_formatting)
 formatButton4.pack(side=LEFT, padx=2, pady=2)
-if _ML_AVAILABLE and model is not None:
-    buttonAI = Button(toolBar, text='AI Autocomplete (Experimental)', command=lambda: Thread(target=python_ai_autocomplete, daemon=True).start())
+if _ML_AVAILABLE:
+    buttonAI = Button(toolBar, text=_AI_BUTTON_DEFAULT_TEXT, command=lambda: Thread(target=on_ai_button_click, daemon=True).start())
+    # create unload button but don't show it until model is loaded
+    buttonUnload = Button(toolBar, text='Unload AI', command=unload_model)
 else:
     buttonAI = Button(toolBar, text='AI Unavailable', state='disabled')
+    buttonUnload = Button(toolBar, text='Unload AI', state='disabled')
 buttonAI.pack(side=LEFT, padx=2, pady=2)
+
 formatButton5 = Button(toolBar, text='Settings', command=lambda: setting_modal())
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
 
@@ -1663,20 +1888,31 @@ def create_config_window():
     undoCheckVar = IntVar(value=config.getboolean("Section1", "undoSetting"))
     undoCheck = ttk.Checkbutton(container, text="Enable undo", variable=undoCheckVar)
     undoCheck.grid(row=5, column=1, sticky='w', pady=6)
+# --- additional settings: syntax highlighting + model auto-load ---
+    syntaxCheckVar = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
+    syntaxCheck = ttk.Checkbutton(container, text="Enable syntax highlighting", variable=syntaxCheckVar)
+    syntaxCheck.grid(row=5, column=1, sticky='w', pady=6)
 
+    # shift rows for AI fields down by 1 to accommodate new checkbox rows
     aiMaxContextField = mk_row("Max AI Context", 6, config.get("Section1", "aiMaxContext"))
     temperatureField = mk_row("AI Temperature", 7, config.get("Section1", "temperature"))
     top_kField = mk_row("AI top_k", 8, config.get("Section1", "top_k"))
     seedField = mk_row("AI seed", 9, config.get("Section1", "seed"))
 
-    # color swatches (small visual previews)
+    # auto-load AI options
+    loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
+    loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
+    ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=10, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=11, column=1, sticky='w', pady=6)
+
+    # update swatches (keep existing swatch code unchanged)
     sw_font = Label(container, width=3, relief='sunken', bg=config.get("Section1", "fontColor"))
     sw_font.grid(row=2, column=2, padx=(8,0))
     sw_bg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "backgroundColor"))
     sw_bg.grid(row=3, column=2, padx=(8,0))
     sw_cursor = Label(container, width=3, relief='sunken', bg=config.get("Section1", "cursorColor"))
     sw_cursor.grid(row=4, column=2, padx=(8,0))
-
+    
     # color chooser callbacks update both entry and swatch
     def choose_font_color():
         c = colorchooser.askcolor(title="Font Color", initialcolor=fontColorChoice.get())
@@ -1730,13 +1966,42 @@ def create_config_window():
         config.set("Section1", "top_k", top_kField.get())
         config.set("Section1", "seed", seedField.get())
 
+        # persist new options
+        config.set("Section1", "syntaxHighlighting", str(bool(syntaxCheckVar.get())))
+        config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
+        config.set("Section1", "loadAIOnNew", str(bool(loadAIOnNewVar.get())))
+
         try:
             with open(INI_PATH, 'w') as configfile:
                 config.write(configfile)
         except Exception:
             pass
 
+        # reload runtime values that non-AI settings depend on
         nonlocal_values_reload()
+
+        # apply syntax highlighting toggle immediately
+        try:
+            updateSyntaxHighlighting.set(1 if syntaxCheckVar.get() else 0)
+            if syntaxCheckVar.get():
+                highlightPythonInit()
+            else:
+                # clear tags
+                for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                          'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
+                    textArea.tag_remove(t, "1.0", "end")
+                statusBar['text'] = "Syntax highlighting disabled."
+        except Exception:
+            pass
+
+        # update runtime auto-load flags
+        global loadAIOnOpen, loadAIOnNew
+        try:
+            loadAIOnOpen = bool(loadAIOnOpenVar.get())
+            loadAIOnNew = bool(loadAIOnNewVar.get())
+        except Exception:
+            pass
+
         top.destroy()
 
     def refresh_from_file():
@@ -1759,6 +2024,14 @@ def create_config_window():
         seedField.insert(0, config.get("Section1", "seed"))
         temperatureField.delete(0, END)
         temperatureField.insert(0, config.get("Section1", "temperature"))
+
+        # refresh the new checkboxes
+        try:
+            syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
+            loadAIOnOpenVar.set(config.getboolean("Section1", "loadAIOnOpen", fallback=False))
+            loadAIOnNewVar.set(config.getboolean("Section1", "loadAIOnNew", fallback=False))
+        except Exception:
+            pass
 
         # update swatches to match refreshed values
         try:
@@ -1791,6 +2064,8 @@ def nonlocal_values_reload():
     seed = int(config.get("Section1", "seed"))
     top_k = int(config.get("Section1", "top_k"))
     temperature = float(config.get("Section1", "temperature"))
+    loadAIOnOpen = config.getboolean("Section1", "loadAIOnOpen", fallback=False)
+    loadAIOnNew = config.getboolean("Section1", "loadAIOnNew", fallback=False)
 
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
 
@@ -1812,6 +2087,11 @@ def ready_update():
 def newFile():
     textArea.delete('1.0', 'end')
     statusBar['text'] = "New Document!"
+    try:
+        if _ML_AVAILABLE and loadAIOnNew and not _model_loaded and not _model_loading:
+            Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+    except Exception:
+        pass
     Thread(target=ready_update, daemon=True).start()
 
 
