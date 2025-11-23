@@ -26,6 +26,7 @@
     <Compile Include="beep.py" />
     <Compile Include="model.py" />
     <Compile Include="PythonApplication1.py" />
+    <Compile Include="recent_files.py" />
   </ItemGroup>
   <ItemGroup>
     <Interpreter Include="env\">
