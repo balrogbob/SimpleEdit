@@ -1152,7 +1152,7 @@ def _serialize_formatting():
             return ''
         meta = {'version': 1, 'tags': data}
         b64 = base64.b64encode(json.dumps(meta).encode('utf-8')).decode('ascii')
-        return "# ---SIMPLEEDIT-META-BEGIN---\n# " + b64 + "\n# ---SIMPLEEDIT-META-END---\n\n"
+        return "# ---SIMPLEEDIT-META-BEGIN---\n# " + b64 + "\n# ---SIMPLEEDIT-META-END---\n"
     except Exception:
         return ''
 
