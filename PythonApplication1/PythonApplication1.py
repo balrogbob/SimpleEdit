@@ -116,6 +116,18 @@ def open_recent_file(path: str):
         # No SIMPLEEDIT meta — if file is .md/.html attempt HTML-aware parsing to reconstruct tags
         ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
         if ext in ('md', 'html', 'htm'):
+            # if user requested "open as source", skip HTML/MD parsing and load raw content
+            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', raw)
+                statusBar['text'] = f"'{path}' opened (raw source)!"
+                root.fileName = path
+                add_recent_file(path)
+                if updateSyntaxHighlighting.get():
+                    root.after(0, highlightPythonInit)
+                refresh_recent_menu()
+                return
+
             plain, tags_meta = _parse_html_and_apply(raw)
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', plain)
@@ -1451,6 +1463,41 @@ def _apply_formatting_from_meta(meta):
     except Exception:
         pass
 
+def safe_highlight_event(event=None):
+    """
+    Centralized event handler used by input/scroll/click bindings.
+
+    - Runs the local syntax highlighter only when `updateSyntaxHighlighting` is enabled.
+    - Always performs lightweight UI updates (current-line highlight, line numbers,
+      status bar and trailing-whitespace) so the editor remains responsive.
+    """
+    try:
+        # only run the (potentially expensive) syntax pass when enabled
+        if updateSyntaxHighlighting.get():
+            try:
+                highlight_python_helper(event)
+            except Exception:
+                pass
+
+        # lightweight UI updates always run
+        try:
+            highlight_current_line()
+        except Exception:
+            pass
+        try:
+            redraw_line_numbers()
+        except Exception:
+            pass
+        try:
+            update_status_bar()
+        except Exception:
+            pass
+        try:
+            show_trailing_whitespace()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _extract_header_and_meta(raw):
     """
@@ -1913,6 +1960,18 @@ def open_file_threaded():
         # If no meta and file is .md or .html attempt HTML-aware parsing to reconstruct tags
         ext = fileName.lower().split('.')[-1]
         if ext in ('md', 'html', 'htm'):
+            # respect "open as source" setting: show raw source if enabled
+            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', raw)
+                root.fileName = fileName
+                statusBar['text'] = f"'{fileName}' opened (raw source)!"
+                add_recent_file(fileName)
+                refresh_recent_menu()
+                if updateSyntaxHighlighting.get():
+                    root.after(0, highlightPythonInit)
+                return
+
             plain, tags_meta = _parse_html_and_apply(raw)
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', plain)
@@ -1943,6 +2002,30 @@ def open_file_threaded():
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
+
+def _on_status_syntax_toggle():
+    """Persist the syntax highlighting toggle immediately and apply change."""
+    try:
+        # persist change to config immediately
+        config.set("Section1", "syntaxHighlighting", str(bool(updateSyntaxHighlighting.get())))
+        with open(INI_PATH, 'w') as cfgf:
+            config.write(cfgf)
+    except Exception:
+        pass
+
+    try:
+        if updateSyntaxHighlighting.get():
+            # enable -> run a full initial highlight
+            highlightPythonInit()
+            statusBar['text'] = "Syntax highlighting enabled."
+        else:
+            # disable -> clear tags and update status
+            for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                      'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
+                textArea.tag_remove(t, "1.0", "end")
+            statusBar['text'] = "Syntax highlighting disabled."
+    except Exception:
+        pass
 
 def _collect_formatting_ranges():
     """Return dict mapping formatting tag -> list of (start_offset, end_offset)."""
@@ -2720,13 +2803,22 @@ formatButton6.pack(side=RIGHT, padx=2, pady=2)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
 refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
 
+syntaxToggleCheckbox = ttk.Checkbutton(
+    statusFrame,
+    text='Syntax',
+    variable=updateSyntaxHighlighting,
+    command=_on_status_syntax_toggle
+)
+# pack to the left of the refresh button (pack order: refresh first, then checkbox -> checkbox sits left)
+syntaxToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
+
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
-textArea.bind('<Return>', lambda e: (smart_newline, highlight_python_helper(e)))
-textArea.bind('<KeyRelease>', lambda e: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
-textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-textArea.bind('<MouseWheel>', lambda e: (highlight_python_helper(e), redraw_line_numbers(), show_trailing_whitespace()))
+textArea.bind('<Return>', lambda e: (smart_newline, safe_highlight_event(e)))
+textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
+textArea.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: save_file())
 
@@ -2766,6 +2858,10 @@ def create_config_window():
     syntaxCheckVar = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
     syntaxCheck = ttk.Checkbutton(container, text="Enable syntax highlighting", variable=syntaxCheckVar)
     syntaxCheck.grid(row=5, column=1, sticky='w', pady=6)
+
+    # New: open HTML/MD as source (do not parse) — still parse SIMPLEEDIT headers
+    openAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
+    ttk.Checkbutton(container, text="Open HTML/MD as source (do not parse)", variable=openAsSourceVar).grid(row=5, column=1, sticky='e', pady=6, padx=(0,8))
 
     aiMaxContextField = mk_row("Max AI Context", 6, config.get("Section1", "aiMaxContext"))
     temperatureField = mk_row("AI Temperature", 7, config.get("Section1", "temperature"))
@@ -2865,6 +2961,8 @@ def create_config_window():
         config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
         config.set("Section1", "exportCssMode", cssModeVar.get())
         config.set("Section1", "exportCssPath", cssPathField.get())
+        # persist new open-as-source option
+        config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
 
         try:
             with open(INI_PATH, 'w') as configfile:
@@ -2924,6 +3022,8 @@ def create_config_window():
             cssModeVar.set(config.get("Section1", "exportCssMode", fallback="inline-element"))
             cssPathField.delete(0, END)
             cssPathField.insert(0, config.get("Section1", "exportCssPath", fallback=""))
+            # refresh open-as-source checkbox from config
+            openAsSourceVar.set(config.getboolean("Section1", "openHtmlAsSource", fallback=False))
         except Exception:
             pass
 
@@ -2944,7 +3044,7 @@ def create_config_window():
 
 
 def nonlocal_values_reload():
-    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath
+    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath, openHtmlAsSource
     fontName = config.get("Section1", "fontName")
     fontSize = int(config.get("Section1", "fontSize"))
     fontColor = config.get("Section1", "fontColor")
@@ -2962,6 +3062,9 @@ def nonlocal_values_reload():
     # load css export settings
     exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
+
+    # load open-as-source setting
+    openHtmlAsSource = config.getboolean("Section1", "openHtmlAsSource", fallback=False)
 
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
     # reapply any saved/edited syntax overrides
@@ -2982,6 +3085,7 @@ stop_event = threading.Event()
 
 def ready_update():
     root.after(1000, lambda: statusBar.config(text="Ready"))
+
 
 
 def newFile():
