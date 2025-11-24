@@ -666,10 +666,9 @@ lineNumbersCanvas = None
 
 
 def init_line_numbers():
+    # no-op placeholder: canvases are created per-tab in create_editor_tab
     global lineNumbersCanvas
-    if lineNumbersCanvas is None:
-        lineNumbersCanvas = Canvas(root, width=40, bg='black', highlightthickness=0)
-        lineNumbersCanvas.pack(side=LEFT, fill=Y)
+    lineNumbersCanvas = None
 
 # status bar area (now a frame so we can place a button at lower-right)
 statusFrame = Frame(root)
@@ -685,48 +684,170 @@ paramsLabel.pack(side=RIGHT, padx=6)
 # placeholder for refresh button (created below near bindings so function names exist)
 refreshSyntaxButton = None
 
+# Text area
 init_line_numbers()
 
-# Text area
-textArea = Text(root, insertbackground=cursorColor, undo=undoSetting)
-textArea.pack(side=LEFT, fill=BOTH, expand=True)
+
+
+pairs = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
+
+def _iter_text_widgets():
+    """Yield all Text widgets in open editor tabs."""
+    out = []
+    try:
+        for tab_id in editorNotebook.tabs():
+            try:
+                frame = root.nametowidget(tab_id)
+            except Exception:
+                continue
+            for child in frame.winfo_children():
+                if isinstance(child, Text):
+                    out.append(child)
+                    break
+    except Exception:
+        pass
+    return out
+
+def _apply_tag_configs_to_widget(tw):
+    """Apply the same tag configuration used previously on a per-widget basis."""
+    try:
+        tw.tag_config("number", foreground="#FDFD6A")
+        tw.tag_config("selfs", foreground="yellow")
+        tw.tag_config("variable", foreground="#8A2BE2")
+        tw.tag_config("decorator", foreground="#66CDAA")
+        tw.tag_config("class_name", foreground="#FFB86B")
+        tw.tag_config("constant", foreground="#FF79C6")
+        tw.tag_config("attribute", foreground="#33ccff")
+        tw.tag_config("builtin", foreground="#9CDCFE")
+        tw.tag_config("def", foreground="orange")
+        tw.tag_config("keyword", foreground="red")
+        tw.tag_config("string", foreground="#C9CA6B")
+        tw.tag_config("operator", foreground="#AAAAAA")
+        tw.tag_config("comment", foreground="#75715E")
+        tw.tag_config("todo", foreground="#ffffff", background="#B22222")
+        tw.tag_config("bold", font=(fontName, fontSize, "bold"))
+        tw.tag_config("italic", font=(fontName, fontSize, "italic"))
+        tw.tag_config("underline", font=(fontName, fontSize, "underline"))
+        tw.tag_config("all", font=(fontName, fontSize, "bold", "italic", "underline"))
+        tw.tag_config("underlineitalic", font=(fontName, fontSize, "italic", "underline"))
+        tw.tag_config("boldunderline", font=(fontName, fontSize, "bold", "underline"))
+        tw.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
+        tw.tag_config("currentLine", background="#222222")
+        tw.tag_config("trailingWhitespace", background="#331111")
+        tw.tag_config("find_match", background="#444444", foreground='white')
+    except Exception:
+        pass
+def auto_pair(event):
+    ch = event.char
+    if ch in pairs:
+        sel = textArea.tag_ranges('sel')
+        if sel:
+            start, end = sel
+            inside = textArea.get(start, end)
+            textArea.delete(start, end)
+            textArea.insert(start, ch + inside + pairs[ch])
+            textArea.mark_set('insert', f"{start}+{len(ch) + len(inside)}c")
+        else:
+            textArea.insert('insert', ch + pairs[ch])
+            textArea.mark_set('insert', 'insert-1c')
+        return 'break'
+def _configure_text_widget(tw):
+    """Configure an individual Text widget to match editor defaults and bindings."""
+    try:
+        tw.config(insertbackground=cursorColor, undo=undoSetting, bg=backgroundColor, fg=fontColor, font=(fontName, fontSize))
+    except Exception:
+        pass
+
+    # event bindings (same behavior as before) -- bound per-widget
+    for k in ['(', '[', '{', '"', "'"]:
+        tw.bind(k, auto_pair)
+    tw.bind('<Return>', lambda e: smart_newline(e))
+    tw.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+    tw.bind('<Button-1>', lambda e: tw.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
+    tw.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+    tw.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+
+def create_editor_tab(title='Untitled', content='', filename=''):
+    """Create a new tab containing a Text widget and return (text_widget, frame)."""
+    frame = Frame(editorNotebook)
+    frame.pack(fill=BOTH, expand=True)
+
+    # per-tab line numbers canvas (left)
+    ln_canvas = Canvas(frame, width=40, bg='black', highlightthickness=0)
+    ln_canvas.pack(side=LEFT, fill=Y)
+    frame.lineNumbersCanvas = ln_canvas
+
+    # text area for this tab (center)
+    tx = Text(frame)
+    tx.pack(side=LEFT, fill=BOTH, expand=True)
+
+    # per-tab scrollbar (right)
+    scr = Scrollbar(frame, command=tx.yview)
+    tx.configure(yscrollcommand=scr.set)
+    scr.pack(side=RIGHT, fill=Y)
+
+    # apply per-widget configuration and insert content
+    _configure_text_widget(tx)
+    _apply_tag_configs_to_widget(tx)
+    tx.insert('1.0', content)
+
+    # metadata: keep filename per-tab on the frame object
+    frame.fileName = filename
+
+    editorNotebook.add(frame, text=title)
+    editorNotebook.select(frame)
+
+    # ensure global references update
+    _on_tab_changed(None)
+    return tx, frame
+
+def _on_tab_changed(event):
+    """Synchronize global state when the selected tab changes."""
+    try:
+        sel = editorNotebook.select()
+        if not sel:
+            return
+        frame = root.nametowidget(sel)
+        # find the Text widget inside the selected frame
+        child_text = None
+        for child in frame.winfo_children():
+            if isinstance(child, Text):
+                child_text = child
+                break
+        if child_text is None:
+            return
+        # update global reference used throughout the file
+        global textArea, lineNumbersCanvas
+        textArea = child_text
+
+        # use the frame's per-tab line-numbers canvas
+        lineNumbersCanvas = getattr(frame, 'lineNumbersCanvas', None)
+
+        # update root.fileName to reflect current tab
+        root.fileName = getattr(frame, 'fileName', '')
+
+        # refresh UI elements which depend on active textArea
+        highlight_current_line()
+        redraw_line_numbers()
+        update_status_bar()
+        show_trailing_whitespace()
+    except Exception:
+        pass
+
+# Editor notebook for tabbed editing (ensure this exists earlier where it was created)
+editorNotebook = ttk.Notebook(root)
+editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
+editorNotebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
+
+# create initial tab (replaces original single textArea creation)
+textArea, _initial_tab_frame = create_editor_tab('Untitled', '')
 textArea['bg'] = backgroundColor
 textArea['fg'] = fontColor
 textArea['font'] = (fontName, fontSize)
 
-# scrollbar
-scroll = Scrollbar(root, command=textArea.yview)
-textArea.configure(yscrollcommand=scroll.set)
-scroll.pack(side=RIGHT, fill=Y)
 
 
 
-# tag configs (extended)
-textArea.tag_config("number", foreground="#FDFD6A")
-textArea.tag_config("selfs", foreground="yellow")
-textArea.tag_config("variable", foreground="#8A2BE2")
-textArea.tag_config("decorator", foreground="#66CDAA")
-textArea.tag_config("class_name", foreground="#FFB86B")
-textArea.tag_config("constant", foreground="#FF79C6")
-textArea.tag_config("attribute", foreground="#33ccff")
-textArea.tag_config("builtin", foreground="#9CDCFE")
-textArea.tag_config("def", foreground="orange")
-textArea.tag_config("keyword", foreground="red")
-textArea.tag_config("string", foreground="#C9CA6B")
-textArea.tag_config("operator", foreground="#AAAAAA")
-textArea.tag_config("comment", foreground="#75715E")
-textArea.tag_config("todo", foreground="#ffffff", background="#B22222")
-textArea.tag_config("bold", font=(fontName, fontSize, "bold"))
-textArea.tag_config("italic", font=(fontName, fontSize, "italic"))
-textArea.tag_config("underline", font=(fontName, fontSize, "underline"))
-textArea.tag_config("all", font=(fontName, fontSize, "bold", "italic", "underline"))
-textArea.tag_config("underlineitalic", font=(fontName, fontSize, "italic", "underline"))
-textArea.tag_config("boldunderline", font=(fontName, fontSize, "bold", "underline"))
-textArea.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
-textArea.tag_config("currentLine", background="#222222")
-textArea.tag_config("trailingWhitespace", background="#331111")
-textArea.tag_config("find_match", background="#444444", foreground='white')
-# new variable tag
 
 
 # -------------------------
@@ -1186,54 +1307,64 @@ def open_syntax_editor():
     nb.add(tab_tags, text='Tags')
 
     row = 0
-    swatches = {}
+    swatches_fg = {}
+    swatches_bg = {}
     inputs_fg = {}
     inputs_bg = {}
+
+    # Small helper to build a clickable swatch bound to an entry
+    def build_clickable_swatch(parent, init_color, entry_widget):
+        sw = Label(parent, width=3, relief='sunken')
+        if is_valid_color(init_color):
+            sw.config(bg=init_color)
+        try:
+            sw.config(cursor="hand2")
+        except Exception:
+            pass
+
+        def on_click(e=None, ent=entry_widget, s=sw):
+            c = safe_askcolor(ent.get())
+            hexc = get_hex_color(c)
+            if hexc:
+                ent.delete(0, END)
+                ent.insert(0, hexc)
+                if is_valid_color(hexc):
+                    try:
+                        s.config(bg=hexc)
+                    except Exception:
+                        pass
+        sw.bind("<Button-1>", on_click)
+        return sw
+
+    # Header row (optional, simple hints)
+    ttk.Label(tab_tags, text="Tag").grid(row=row, column=0, sticky='w', padx=(0,8))
+    ttk.Label(tab_tags, text="FG").grid(row=row, column=1, sticky='w')
+    ttk.Label(tab_tags, text=" ").grid(row=row, column=2, sticky='w')  # swatch column
+    ttk.Label(tab_tags, text="BG").grid(row=row, column=3, sticky='w')
+    ttk.Label(tab_tags, text=" ").grid(row=row, column=4, sticky='w')  # swatch column
+    row += 1
+
     for tag, defaults in _DEFAULT_TAG_COLORS.items():
         ttk.Label(tab_tags, text=tag).grid(row=row, column=0, sticky='w', padx=(0,8), pady=4)
 
-        # FG entry + chooser
+        # FG entry + swatch (clickable)
         ent_fg = ttk.Entry(tab_tags, width=18)
         ent_fg.grid(row=row, column=1, sticky='w', pady=4)
         ent_val_fg = config.get('Syntax', f'tag.{tag}.fg', fallback=defaults.get('fg', ''))
         ent_fg.insert(0, ent_val_fg)
-        def make_choose_fg(e=ent_fg):
-            def choose_fg():
-                c = safe_askcolor(e.get())
-                hexc = get_hex_color(c)
-                if hexc:
-                    e.delete(0, END)
-                    e.insert(0, hexc)
-                    # don't change swatch bg for fg chooser; swatch reflects background color
-            return choose_fg
-        ttk.Button(tab_tags, text='Choose FG...', command=make_choose_fg()).grid(row=row, column=2, padx=6)
+        sw_fg = build_clickable_swatch(tab_tags, ent_val_fg, ent_fg)
+        sw_fg.grid(row=row, column=2, padx=(6,0))
 
-        # BG entry + chooser
+        # BG entry + swatch (clickable)
         ent_bg = ttk.Entry(tab_tags, width=18)
         ent_bg.grid(row=row, column=3, sticky='w', pady=4)
         ent_val_bg = config.get('Syntax', f'tag.{tag}.bg', fallback=defaults.get('bg', ''))
         ent_bg.insert(0, ent_val_bg)
-        def make_choose_bg(e=ent_bg, s_tag=tag):
-            def choose_bg():
-                c = safe_askcolor(e.get())
-                hexc = get_hex_color(c)
-                if hexc:
-                    e.delete(0, END)
-                    e.insert(0, hexc)
-                    sw = swatches.get(s_tag)
-                    if sw and is_valid_color(hexc):
-                        sw.config(bg=hexc)
-            return choose_bg
-        ttk.Button(tab_tags, text='Choose BG...', command=make_choose_bg()).grid(row=row, column=4, padx=6)
+        sw_bg = build_clickable_swatch(tab_tags, ent_val_bg, ent_bg)
+        sw_bg.grid(row=row, column=4, padx=(6,0))
 
-        # swatch shows background (preferred), fall back to fg or leave default if invalid
-        sw = Label(tab_tags, width=3, relief='sunken')
-        sw_color = ent_val_bg or defaults.get('bg') or ent_val_fg or defaults.get('fg', '')
-        if is_valid_color(sw_color):
-            sw.config(bg=sw_color)
-        sw.grid(row=row, column=5, padx=(8,0))
-
-        swatches[tag] = sw
+        swatches_fg[tag] = sw_fg
+        swatches_bg[tag] = sw_bg
         inputs_fg[tag] = ent_fg
         inputs_bg[tag] = ent_bg
         row += 1
@@ -1300,18 +1431,21 @@ def open_syntax_editor():
                 inputs_bg[tag].delete(0, END)
                 if bg_val:
                     inputs_bg[tag].insert(0, bg_val)
-                # update swatch
-                sw_color = bg_val or fg_val or ''
-                if is_valid_color(sw_color):
-                    try:
-                        swatches[tag].config(bg=sw_color)
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        swatches[tag].config(bg=tab_tags.cget('background'))
-                    except Exception:
-                        pass
+                # update swatches independently
+                try:
+                    if is_valid_color(fg_val):
+                        swatches_fg[tag].config(bg=fg_val)
+                    else:
+                        swatches_fg[tag].config(bg=tab_tags.cget('background'))
+                except Exception:
+                    pass
+                try:
+                    if is_valid_color(bg_val):
+                        swatches_bg[tag].config(bg=bg_val)
+                    else:
+                        swatches_bg[tag].config(bg=tab_tags.cget('background'))
+                except Exception:
+                    pass
             # lists
             kw_ent.delete(0, END)
             kw_ent.insert(0, cp.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS)))
@@ -1473,19 +1607,23 @@ def open_syntax_editor():
             inputs_bg[tag].delete(0, END)
             if defaults.get('bg'):
                 inputs_bg[tag].insert(0, defaults.get('bg'))
-            # swatch: prefer default bg then fg; only apply if valid
-            sw_color = defaults.get('bg') or defaults.get('fg') or ''
-            if is_valid_color(sw_color):
-                try:
-                    swatches[tag].config(bg=sw_color)
-                except Exception:
-                    pass
-            else:
-                # clear any explicit bg if invalid (let system default show)
-                try:
-                    swatches[tag].config(bg=tab_tags.cget('background'))
-                except Exception:
-                    pass
+            # update swatches independently
+            try:
+                df = defaults.get('fg') or ''
+                if is_valid_color(df):
+                    swatches_fg[tag].config(bg=df)
+                else:
+                    swatches_fg[tag].config(bg=tab_tags.cget('background'))
+            except Exception:
+                pass
+            try:
+                db = defaults.get('bg') or ''
+                if is_valid_color(db):
+                    swatches_bg[tag].config(bg=db)
+                else:
+                    swatches_bg[tag].config(bg=tab_tags.cget('background'))
+            except Exception:
+                pass
         kw_ent.delete(0, END)
         kw_ent.insert(0, ','.join(KEYWORDS))
         bk_ent.delete(0, END)
@@ -2016,6 +2154,15 @@ def save_file():
         statusBar['text'] = f"'{root.fileName}' saved successfully!"
         add_recent_file(root.fileName)
         refresh_recent_menu()
+
+        # persist the filename into the current tab's metadata so future tab operations use it
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                frame.fileName = root.fileName
+        except Exception:
+            pass
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
@@ -2689,23 +2836,7 @@ def show_trailing_whitespace():
         pass
 
 
-pairs = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
 
-
-def auto_pair(event):
-    ch = event.char
-    if ch in pairs:
-        sel = textArea.tag_ranges('sel')
-        if sel:
-            start, end = sel
-            inside = textArea.get(start, end)
-            textArea.delete(start, end)
-            textArea.insert(start, ch + inside + pairs[ch])
-            textArea.mark_set('insert', f"{start}+{len(ch) + len(inside)}c")
-        else:
-            textArea.insert('insert', ch + pairs[ch])
-            textArea.mark_set('insert', 'insert-1c')
-        return 'break'
 
 
 def redraw_line_numbers(event=None):
@@ -2958,7 +3089,7 @@ def python_ai_autocomplete():
 # toolbar buttons (single definitions)
 btn1 = Button(toolBar, text='New', command=lambda: newFile())
 btn1.pack(side=LEFT, padx=2, pady=2)
-btn2 = Button(toolBar, text='Open', command=lambda: open_file_threaded)
+btn2 = Button(toolBar, text='Open', command=lambda: open_file_threaded())
 btn2.pack(side=LEFT, padx=2, pady=2)
 btn3 = Button(toolBar, text='Save', command=lambda: save_file_as())
 btn3.pack(side=LEFT, padx=2, pady=2)
@@ -3020,13 +3151,14 @@ fullScanToggleCheckbox = ttk.Checkbutton(
 )
 fullScanToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
 
+
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
 textArea.bind('<Return>', lambda e: (smart_newline, safe_highlight_event(e)))
 textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
 textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-textArea.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
+textArea.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: save_file())
 
@@ -3305,13 +3437,19 @@ def ready_update():
 
 
 def newFile():
-    textArea.delete('1.0', 'end')
-    statusBar['text'] = "New Document!"
+    # create a new untitled tab instead of clearing the current buffer
     try:
+        create_editor_tab('Untitled', content='', filename='')
+        statusBar['text'] = "New Document (tab)!"
         if _ML_AVAILABLE and loadAIOnNew and not _model_loaded and not _model_loading:
             Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
     except Exception:
-        pass
+        # fallback to old behavior if something goes wrong
+        try:
+            textArea.delete('1.0', 'end')
+            statusBar['text'] = "New Document!"
+        except Exception:
+            pass
     Thread(target=ready_update, daemon=True).start()
 
 # populate recent menu
