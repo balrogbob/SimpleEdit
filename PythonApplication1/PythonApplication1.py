@@ -92,7 +92,25 @@ def open_recent_file(path: str):
         with open(path, 'r', errors='replace', encoding='utf-8') as fh:
             raw = fh.read()
 
-        # No SIMPLEEDIT meta — if file is .md/.html attempt HTML-aware parsing to reconstruct tags
+        # First try to extract SIMPLEEDIT meta (preferred)
+        content, meta = _extract_header_and_meta(raw)
+        if meta:
+            textArea.delete('1.0', 'end')
+            textArea.insert('1.0', content)
+            statusBar['text'] = f"'{path}' opened successfully!"
+            root.fileName = path
+            add_recent_file(path)
+            refresh_recent_menu()
+            root.after(0, lambda: _apply_formatting_from_meta(meta))
+            try:
+                if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
+                    Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
+            except Exception:
+                pass
+            if updateSyntaxHighlighting.get():
+                root.after(0, highlightPythonInit)
+            return        
+        
         ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
         if ext in ('md', 'html', 'htm'):
             # optional autodetect -> apply a matching syntax preset before parsing if enabled
@@ -2197,6 +2215,7 @@ def _parse_html_and_apply(raw):
 # -------------------------
 # Highlighting toggle (initialized from config)
 updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
+fullScanEnabled = IntVar(value=config.getboolean("Section1", "fullScanEnabled", fallback=True))
 
 
 def match_case_like_this(start, end):
@@ -2433,13 +2452,22 @@ def close_progress_popup(dlg, pb=None):
 
 
 def highlightPythonInit():
-    """Trigger a non-blocking initial syntax scan on load (snapshot + background worker)."""
+    """Trigger initial syntax scan on load. Full or quick depending on fullScanEnabled."""
     if not updateSyntaxHighlighting.get():
-        # clear tags (include new tags)
         for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
                   'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
             textArea.tag_remove(t, "1.0", "end")
         statusBar['text'] = "Syntax highlighting disabled."
+        return
+
+    # Quick mode: skip background worker + symbol discovery
+    if not fullScanEnabled.get():
+        statusBar['text'] = "Quick syntax highlight..."
+        try:
+            highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+        except Exception:
+            pass
+        statusBar['text'] = "Ready"
         return
 
     statusBar['text'] = "Processing initial syntax..."
@@ -2450,16 +2478,12 @@ def highlightPythonInit():
     except Exception:
         content_snapshot = ""
 
-    # show progress popup (starts indeterminate)
     dlg, pb, status = show_progress_popup("Initial syntax highlighting")
     status['text'] = "Scanning..."
 
-    # progress callback MUST be safe to call from worker thread.
     def progress_cb(pct, msg=""):
-        # schedule UI update on main thread
         def ui():
             try:
-                # switch to determinate on first meaningful update
                 if pb['mode'] != 'determinate':
                     pb.config(mode='determinate', maximum=100)
                 pb['value'] = max(0, min(100, int(pct)))
@@ -2471,11 +2495,9 @@ def highlightPythonInit():
 
     def worker():
         actions, new_vars, new_defs = _bg_full_scan_and_collect(content_snapshot, progress_callback=progress_cb)
-        # schedule application of tags on UI thread and finish-up steps
         def apply_and_finish():
             try:
                 _apply_full_tags(actions, new_vars, new_defs)
-                # Full content scan to discover new symbols (persist them)
                 full = textArea.get("1.0", "end-1c")
                 new_vars2 = {m.group(1) for m in VAR_ASSIGN_RE.finditer(full)}
                 try:
@@ -2490,15 +2512,85 @@ def highlightPythonInit():
                 if new_defs2:
                     persisted_defs.update(new_defs2)
                 _save_symbol_buffers(persisted_vars, persisted_defs)
-
-                # force full-buffer scan and tagging
                 highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
                 statusBar['text'] = "Ready"
             finally:
                 close_progress_popup(dlg, pb)
-
         try:
             root.after(0, apply_and_finish)
+        except Exception:
+            close_progress_popup(dlg, pb)
+
+    Thread(target=worker, daemon=True).start()
+
+# REPLACE existing refresh_full_syntax() with updated version
+def refresh_full_syntax():
+    """Manual refresh for syntax highlighting respecting fullScanEnabled."""
+    if not updateSyntaxHighlighting.get():
+        for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                  'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
+            textArea.tag_remove(t, "1.0", "end")
+        statusBar['text'] = "Syntax highlighting disabled."
+        return
+
+    # Quick mode path
+    if not fullScanEnabled.get():
+        statusBar['text'] = "Quick refresh..."
+        try:
+            highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+        except Exception:
+            pass
+        statusBar['text'] = "Ready"
+        return
+
+    statusBar['text'] = "Refreshing syntax..."
+    root.update_idletasks()
+
+    try:
+        content_snapshot = textArea.get("1.0", "end-1c")
+    except Exception:
+        content_snapshot = ""
+
+    dlg, pb, status = show_progress_popup("Refreshing syntax")
+    status['text'] = "Scanning..."
+
+    def progress_cb(pct, msg=""):
+        def ui():
+            try:
+                if pb['mode'] != 'determinate':
+                    pb.config(mode='determinate', maximum=100)
+                pb['value'] = max(0, min(100, int(pct)))
+                status['text'] = msg or f"{pb['value']}%"
+                dlg.update_idletasks()
+            except Exception:
+                pass
+        root.after(0, ui)
+
+    def worker():
+        actions, new_vars, new_defs = _bg_full_scan_and_collect(content_snapshot, progress_callback=progress_cb)
+        def apply_and_close():
+            try:
+                _apply_full_tags(actions, new_vars, new_defs)
+                full = textArea.get("1.0", "end-1c")
+                new_vars2 = {m.group(1) for m in VAR_ASSIGN_RE.finditer(full)}
+                try:
+                    DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
+                except Exception:
+                    DEF_RE = None
+                new_defs2 = set()
+                if DEF_RE:
+                    new_defs2 = {m.group(1) for m in DEF_RE.finditer(full)}
+                if new_vars2:
+                    persisted_vars.update(new_vars2)
+                if new_defs2:
+                    persisted_defs.update(new_defs2)
+                _save_symbol_buffers(persisted_vars, persisted_defs)
+                highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+                statusBar['text'] = "Ready"
+            finally:
+                close_progress_popup(dlg, pb)
+        try:
+            root.after(0, apply_and_close)
         except Exception:
             close_progress_popup(dlg, pb)
 
@@ -2906,6 +2998,27 @@ syntaxToggleCheckbox = ttk.Checkbutton(
 )
 # pack to the left of the refresh button (pack order: refresh first, then checkbox -> checkbox sits left)
 syntaxToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
+
+def _on_full_scan_toggle():
+    """Persist full-scan toggle and update status text (does not trigger a scan itself)."""
+    try:
+        config.set("Section1", "fullScanEnabled", str(bool(fullScanEnabled.get())))
+        with open(INI_PATH, 'w') as cfgf:
+            config.write(cfgf)
+    except Exception:
+        pass
+    try:
+        statusBar['text'] = "Full scan enabled." if fullScanEnabled.get() else "Quick (local) highlighting mode."
+    except Exception:
+        pass
+
+fullScanToggleCheckbox = ttk.Checkbutton(
+    statusFrame,
+    text='Full Scan',
+    variable=fullScanEnabled,
+    command=_on_full_scan_toggle
+)
+fullScanToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
 
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
