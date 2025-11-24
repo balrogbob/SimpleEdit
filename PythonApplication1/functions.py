@@ -151,72 +151,136 @@ def clear_recent_files(config, ini_path: str, on_update: Optional[Callable[[], N
 # --- HTML parser to extract plain text and tag ranges from simple HTML fragments ---
 class _SimpleHTMLToTagged(HTMLParser):
     """Parses a fragment of HTML and returns plain text plus tag ranges for
-    simple tags: <b>/<strong>, <i>/<em>, <u>, and <span style="color:...">.
+    simple tags: <b>/<strong>, <i>/<em>, <u>, <span style="color:...">,
+    legacy <font color="..."> and presentational <marquee>.
+
     Nested tags are supported and ranges are produced in absolute character offsets.
+    For arbitrary color values this synthesizes per-color tag names in the form
+    'font_rrggbb' (hex without leading '#') so the UI can apply that color later.
     """
     def __init__(self):
         super().__init__()
         self.out = []
         self.pos = 0
-        self.stack = []  # list of (internal_tag_name, start_pos)
+        self.stack = []  # list of (internal_tag_name or None, start_pos)
         self.ranges = {}  # tag -> [[start,end], ...]
         self._span_color_pending = None
 
+    def _normalize_color_to_hex(self, col: str) -> str | None:
+        if not col:
+            return None
+        c = col.strip().lower()
+        # strip quotes
+        c = re.sub(r"^['\"]|['\"]$", "", c)
+        # named map (small common set)
+        NAMED = {'red': '#ff0000', 'black': '#000000', 'white': '#ffffff', 'blue': '#0000ff', 'green': '#008000', 'yellow': '#ffff00', 'orange': '#ffa500'}
+        if c in NAMED:
+            c = NAMED[c]
+        # expand short hex #rgb -> #rrggbb
+        m = re.match(r'^#([0-9a-f]{3})$', c)
+        if m:
+            s = m.group(1)
+            c = '#' + ''.join([ch*2 for ch in s])
+        # accept full hex
+        if re.match(r'^#[0-9a-f]{6}$', c):
+            return c  # '#rrggbb'
+        return None
+
     def handle_starttag(self, tag, attrs):
-        tag = tag.lower()
-        attrd = dict(attrs)
-        if tag in ('b', 'strong'):
-            self.stack.append(('bold', self.pos))
-        elif tag in ('i', 'em'):
-            self.stack.append(('italic', self.pos))
-        elif tag == 'u':
-            self.stack.append(('underline', self.pos))
-        elif tag == 'span':
-            style = attrd.get('style', '') or attrd.get('class', '')
-            # find color in style string
-            m = re.search(r'color\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
-            bg = None
-            if m:
-                color = m.group(1).lower()
-                # normalize 3-digit hex to 6-digit
-                if re.match(r'^#[0-9a-f]{3}$', color):
-                    color = '#' + ''.join([c*2 for c in color[1:]])
-                # look up tag by color
-                tagname = _COLOR_TO_TAG.get(color)
-                if tagname:
+        try:
+            tag = (tag or '').lower()
+            attrd = dict(attrs or {})
+
+            if tag in ('b', 'strong'):
+                self.stack.append(('bold', self.pos))
+                return
+
+            # presentational element: small -> reduce font size
+            if tag == 'small':
+                self.stack.append(('small', self.pos))
+                return
+
+            if tag in ('i', 'em'):
+                self.stack.append(('italic', self.pos))
+                return
+
+            if tag == 'u':
+                self.stack.append(('underline', self.pos))
+                return
+
+            # legacy <font color="..."> -> synthesize per-color tag
+            if tag == 'font':
+                color = (attrd.get('color') or attrd.get('colour') or '').strip()
+                hexcol = self._normalize_color_to_hex(color)
+                if hexcol:
+                    tagname = f"font_{hexcol.lstrip('#')}"
                     self.stack.append((tagname, self.pos))
                     return
-            # special-check for todo background (red background with white text)
-            m2 = re.search(r'background(?:-color)?\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
-            if m2:
-                bgcol = m2.group(1).lower()
-                if bgcol in ('#b22222', 'b22222', 'red'):
-                    self.stack.append(('todo', self.pos))
-                    return
-            # unknown span -> push a sentinel so it can be popped later without creating a tag
+                # unknown -> sentinel
+                self.stack.append((None, self.pos))
+                return
+
+            # presentational element: marquee -> dedicated tag
+            if tag == 'marquee':
+                self.stack.append(('marquee', self.pos))
+                return
+
+            if tag == 'span':
+                style = (attrd.get('style') or '') or attrd.get('class', '')
+                if style:
+                    m = re.search(r'color\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
+                    if m:
+                        hexcol = self._normalize_color_to_hex(m.group(1))
+                        if hexcol:
+                            tagname = f"font_{hexcol.lstrip('#')}"
+                            self.stack.append((tagname, self.pos))
+                            return
+                    # todo background heuristic
+                    m2 = re.search(r'background(?:-color)?\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
+                    if m2:
+                        bg = m2.group(1).lower()
+                        if bg in ('#b22222', 'b22222', 'red'):
+                            self.stack.append(('todo', self.pos))
+                            return
+                # unknown span -> sentinel
+                self.stack.append((None, self.pos))
+                return
+
+            # other tags -> sentinel so endtags pop cleanly
             self.stack.append((None, self.pos))
+        except Exception:
+            try:
+                self.stack.append((None, self.pos))
+            except Exception:
+                pass
 
     def handle_endtag(self, tag):
-        tag = tag.lower()
-        # pop the most recent matching type on stack (search backwards)
-        if not self.stack:
-            return
-        # We pop the last entry, regardless of tag name, to keep things simple and robust.
-        name, start = self.stack.pop()
-        if not name:
-            return
-        end = self.pos
-        if end > start:
-            self.ranges.setdefault(name, []).append([start, end])
+        try:
+            if not self.stack:
+                return
+            name, start = self.stack.pop()
+            if not name:
+                return
+            end = self.pos
+            if end > start:
+                self.ranges.setdefault(name, []).append([start, end])
+        except Exception:
+            pass
 
     def handle_data(self, data):
-        if not data:
-            return
-        self.out.append(data)
-        self.pos += len(data)
+        try:
+            if not data:
+                return
+            self.out.append(data)
+            self.pos += len(data)
+        except Exception:
+            pass
 
     def get_result(self):
-        return ''.join(self.out), self.ranges
+        try:
+            return ''.join(self.out), self.ranges
+        except Exception:
+            return ''.join(self.out), self.ranges
 
 def _serialize_tags(tags_dict):
     """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""
@@ -293,6 +357,7 @@ def _collect_all_tag_ranges(textArea):
         # formatting tags
         'bold', 'italic', 'underline', 'all',
         'underlineitalic', 'boldunderline', 'bolditalic',
+        'small',
         # syntax/highlight tags
         'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
         'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'
@@ -464,6 +529,7 @@ def _generate_css():
         parts.append(".se-bold{ font-weight: bold; }")
         parts.append(".se-italic{ font-style: italic; }")
         parts.append(".se-underline{ text-decoration: underline; }")
+        parts.append(".se-small{ font-size: 0.85em; }")
         return "\n".join(parts)
     except Exception:
         return ""

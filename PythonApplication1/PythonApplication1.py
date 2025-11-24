@@ -85,9 +85,8 @@ def clear_recent_files():
     return funcs.clear_recent_files(config, INI_PATH,
                                       on_update=lambda: refresh_recent_menu())
 
-
-def open_recent_file(path: str):
-    """Open a recent file (called from recent menu)."""
+def _open_path(path: str, open_in_new_tab: bool = True):
+    """Core logic to open `path` either in a new tab or in the current tab."""
     try:
         with open(path, 'r', errors='replace', encoding='utf-8') as fh:
             raw = fh.read()
@@ -95,8 +94,22 @@ def open_recent_file(path: str):
         # First try to extract SIMPLEEDIT meta (preferred)
         content, meta = _extract_header_and_meta(raw)
         if meta:
-            textArea.delete('1.0', 'end')
-            textArea.insert('1.0', content)
+            if open_in_new_tab:
+                tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", content, filename=path)
+                _apply_tag_configs_to_widget(tx)
+            else:
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', content)
+                # update current frame metadata
+                try:
+                    sel = editorNotebook.select()
+                    if sel:
+                        frame = root.nametowidget(sel)
+                        frame.fileName = path
+                except Exception:
+                    pass
+                _apply_tag_configs_to_widget(textArea)
+
             statusBar['text'] = f"'{path}' opened successfully!"
             root.fileName = path
             add_recent_file(path)
@@ -109,8 +122,8 @@ def open_recent_file(path: str):
                 pass
             if updateSyntaxHighlighting.get():
                 root.after(0, highlightPythonInit)
-            return        
-        
+            return
+
         ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
         if ext in ('md', 'html', 'htm'):
             # optional autodetect -> apply a matching syntax preset before parsing if enabled
@@ -124,34 +137,50 @@ def open_recent_file(path: str):
             except Exception:
                 pass
 
-            # if user requested "open as source", skip HTML/MD parsing and load raw content
+            # respect "open as source" setting
             if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
-                textArea.delete('1.0', 'end')
-                textArea.insert('1.0', raw)
+                if open_in_new_tab:
+                    tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
+                    _apply_tag_configs_to_widget(tx)
+                else:
+                    textArea.delete('1.0', 'end')
+                    textArea.insert('1.0', raw)
+                    _apply_tag_configs_to_widget(textArea)
                 statusBar['text'] = f"'{path}' opened (raw source)!"
                 root.fileName = path
                 add_recent_file(path)
+                refresh_recent_menu()
                 if updateSyntaxHighlighting.get():
                     root.after(0, highlightPythonInit)
-                refresh_recent_menu()
                 return
 
             plain, tags_meta = _parse_html_and_apply(raw)
-            textArea.delete('1.0', 'end')
-            textArea.insert('1.0', plain)
+            if open_in_new_tab:
+                tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", plain, filename=path)
+                _apply_tag_configs_to_widget(tx)
+            else:
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', plain)
+                _apply_tag_configs_to_widget(textArea)
             statusBar['text'] = f"'{path}' opened (HTML/MD parsed)!"
             root.fileName = path
             add_recent_file(path)
+            refresh_recent_menu()
             if tags_meta and tags_meta.get('tags'):
                 root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
             if updateSyntaxHighlighting.get():
                 root.after(0, highlightPythonInit)
-            refresh_recent_menu()
             return
 
-        # Fallback: no meta and not md/html - insert raw content
-        textArea.delete('1.0', 'end')
-        textArea.insert('1.0', raw)
+        # Fallback: raw
+        if open_in_new_tab:
+            tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
+            _apply_tag_configs_to_widget(tx)
+        else:
+            textArea.delete('1.0', 'end')
+            textArea.insert('1.0', raw)
+            _apply_tag_configs_to_widget(textArea)
+
         statusBar['text'] = f"'{path}' opened successfully!"
         root.fileName = path
         try:
@@ -164,6 +193,79 @@ def open_recent_file(path: str):
         refresh_recent_menu()
         if updateSyntaxHighlighting.get():
             root.after(0, highlightPythonInit)
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
+
+
+def _ask_open_choice(path: str):
+    """Modal: ask user whether to open a recent item in current or new tab, optional 'remember' checkbox."""
+    try:
+        dlg = Toplevel(root)
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.title("Open recent file")
+        container = ttk.Frame(dlg, padding=12)
+        container.grid(row=0, column=0, sticky='nsew')
+        container.columnconfigure(0, weight=1)
+        container.columnconfigure(1, weight=1)
+
+        ttk.Label(container, text=f"Open '{os.path.basename(path)}'").grid(row=0, column=0, columnspan=2, sticky='w', pady=(0,8))
+
+        choice_var = IntVar(value=1 if config.get("Section1", "recentOpenDefault", fallback="new") == "new" else 0)
+        ttk.Radiobutton(container, text="Open in current tab", variable=choice_var, value=0).grid(row=1, column=0, sticky='w')
+        ttk.Radiobutton(container, text="Open in new tab", variable=choice_var, value=1).grid(row=1, column=1, sticky='w')
+
+        remember_var = IntVar(value=0)
+        ttk.Checkbutton(container, text="Remember this choice (don't prompt again)", variable=remember_var).grid(row=2, column=0, columnspan=2, sticky='w', pady=(8,0))
+
+        status = ttk.Label(container, text="")
+        status.grid(row=3, column=0, columnspan=2, sticky='w', pady=(8,0))
+
+        def do_cancel():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def do_open():
+            open_in_new = bool(choice_var.get())
+            # if remember -> persist default and disable prompting
+            if remember_var.get():
+                try:
+                    config.set("Section1", "recentOpenDefault", "new" if open_in_new else "current")
+                    config.set("Section1", "promptOnRecentOpen", "False")
+                    with open(INI_PATH, 'w') as f:
+                        config.write(f)
+                except Exception:
+                    pass
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+            _open_path(path, open_in_new_tab=open_in_new)
+
+        btns = ttk.Frame(container)
+        btns.grid(row=4, column=0, columnspan=2, sticky='e', pady=(8,0))
+        ttk.Button(btns, text="Open", command=do_open).pack(side=RIGHT, padx=(6,0))
+        ttk.Button(btns, text="Cancel", command=do_cancel).pack(side=RIGHT)
+        dlg.update_idletasks()
+        center_window(dlg)
+    except Exception:
+        pass
+
+def open_recent_file(path: str):
+    """Open a recent file (called from recent menu). Prompts user unless preference set."""
+    try:
+        # If user disabled prompting, use stored default
+        if not config.getboolean("Section1", "promptOnRecentOpen", fallback=True):
+            use_new = config.get("Section1", "recentOpenDefault", fallback="new") == "new"
+            _open_path(path, open_in_new_tab=use_new)
+            return
+
+        # Otherwise show a small modal asking current/new with remember checkbox
+        _ask_open_choice(path)
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
@@ -196,6 +298,9 @@ fontColor = config.get('Section1', 'fontColor')
 backgroundColor = config.get('Section1', 'backgroundColor')
 undoSetting = config.getboolean('Section1', 'undoSetting')
 cursorColor = config.get('Section1', 'cursorColor')
+# line-number colors (user-configurable)
+lineNumberFg = config.get('Section1', 'lineNumberFg', fallback='#555555')
+lineNumberBg = config.get('Section1', 'lineNumberBg', fallback='#000000')
 aiMaxContext = int(config.get('Section1', 'aiMaxContext'))
 temperature = float(config.get('Section1', 'temperature'))
 top_k = int(config.get('Section1', 'top_k'))
@@ -449,6 +554,7 @@ def selection_or_all():
 # Tkinter UI - create root and widgets
 # -------------------------
 root = Tk()
+url_var = StringVar(value='')
 root.geometry("800x600")
 root.title('SimpleEdit')
 root.fileName = ""
@@ -464,7 +570,7 @@ editMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="File", menu=fileMenu)
 fileMenu.add_command(label='New', command=lambda: newFile())
 fileMenu.add_separator()
-fileMenu.add_command(label='Open', command=lambda: open_file_threaded())
+fileMenu.add_command(label='Open', command=lambda: open_file_action())
 fileMenu.add_cascade(label="Open Recent", menu=recentMenu)
 fileMenu.add_separator()
 fileMenu.add_command(label='Save', command=lambda: save_file())
@@ -483,6 +589,8 @@ editMenu.add_command(label='Redo', command=lambda: textArea.edit_redo(), acceler
 editMenu.add_command(label='Find/Replace', command=lambda: open_find_replace())
 editMenu.add_command(label='Go To Line', command=lambda: go_to_line(), accelerator='Ctrl+G')
 root.bind('<Control-g>', lambda e: go_to_line())
+
+
 
 # Helper to return a nicely formatted parameter count string for the loaded model
 def _get_model_param_text():
@@ -700,13 +808,19 @@ def _iter_text_widgets():
                 frame = root.nametowidget(tab_id)
             except Exception:
                 continue
-            for child in frame.winfo_children():
-                if isinstance(child, Text):
-                    out.append(child)
-                    break
+            ln = getattr(frame, 'lineNumbersCanvas', None)
+            if ln:
+                try:
+                    ln.config(bg=lineNumberBg)
+                except Exception:
+                    pass
+            # redraw numbers for this tab using the new fg color
+            try:
+                _draw_line_numbers_for(frame)
+            except Exception:
+                pass
     except Exception:
         pass
-    return out
 
 def _apply_tag_configs_to_widget(tw):
     """Apply the same tag configuration used previously on a per-widget basis."""
@@ -725,6 +839,10 @@ def _apply_tag_configs_to_widget(tw):
         tw.tag_config("operator", foreground="#AAAAAA")
         tw.tag_config("comment", foreground="#75715E")
         tw.tag_config("todo", foreground="#ffffff", background="#B22222")
+        try:
+            tw.tag_config("marquee", foreground="#FF4500")
+        except Exception:
+            pass
         tw.tag_config("bold", font=(fontName, fontSize, "bold"))
         tw.tag_config("italic", font=(fontName, fontSize, "italic"))
         tw.tag_config("underline", font=(fontName, fontSize, "underline"))
@@ -735,6 +853,31 @@ def _apply_tag_configs_to_widget(tw):
         tw.tag_config("currentLine", background="#222222")
         tw.tag_config("trailingWhitespace", background="#331111")
         tw.tag_config("find_match", background="#444444", foreground='white')
+        # small formatting: reduce font size relative to editor fontSize
+        try:
+            small_size = max(6, int(fontSize - 2))
+            tw.tag_config("small", font=(fontName, small_size))
+        except Exception:
+            pass
+        # mark: highlight background
+        try:
+            tw.tag_config("mark", background="#FFF177")
+        except Exception:
+            pass
+        # sub/sup: use a slightly smaller font
+        try:
+            subsz = max(6, int(fontSize - 2))
+            tw.tag_config("sub", font=(fontName, subsz))
+            tw.tag_config("sup", font=(fontName, subsz))
+        except Exception:
+            pass
+        # code/kbd: monospace inset
+        try:
+            mono_font = ("Courier New", max(6, int(fontSize - 1)))
+            tw.tag_config("code", font=mono_font, background="#F5F5F5")
+            tw.tag_config("kbd", font=mono_font, background="#F5F5F5")
+        except Exception:
+            pass
     except Exception:
         pass
 def auto_pair(event):
@@ -762,7 +905,7 @@ def _configure_text_widget(tw):
     for k in ['(', '[', '{', '"', "'"]:
         tw.bind(k, auto_pair)
     tw.bind('<Return>', lambda e: smart_newline(e))
-    tw.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+    tw.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
     tw.bind('<Button-1>', lambda e: tw.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
     tw.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
     tw.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
@@ -772,8 +915,14 @@ def create_editor_tab(title='Untitled', content='', filename=''):
     frame = Frame(editorNotebook)
     frame.pack(fill=BOTH, expand=True)
 
-    # per-tab line numbers canvas (left)
-    ln_canvas = Canvas(frame, width=40, bg='black', highlightthickness=0)
+    # initialize per-tab template-prompt flags so we don't repeatedly ask
+    frame._template_prompted_html = False
+    frame._template_prompted_py = False
+    frame._template_prompted_md = False
+    frame._template_prompted_json = False
+
+    # per-tab line numbers canvas (left) - use configured bg
+    ln_canvas = Canvas(frame, width=40, bg=lineNumberBg, highlightthickness=0)
     ln_canvas.pack(side=LEFT, fill=Y)
     frame.lineNumbersCanvas = ln_canvas
 
@@ -806,6 +955,12 @@ def _on_tab_changed(event):
     try:
         sel = editorNotebook.select()
         if not sel:
+            # clear URL when no selection
+            try:
+                if 'url_var' in globals():
+                    url_var.set('')
+            except Exception:
+                pass
             return
         frame = root.nametowidget(sel)
         # find the Text widget inside the selected frame
@@ -826,6 +981,31 @@ def _on_tab_changed(event):
         # update root.fileName to reflect current tab
         root.fileName = getattr(frame, 'fileName', '')
 
+        # Update toolbar URL field to reflect current tab (if toolbar exists)
+        try:
+            if 'url_var' in globals():
+                fn = getattr(frame, 'fileName', '') or ''
+                if fn:
+                    # If it's already a URL, show as-is. Otherwise show file://<abs>
+                    if re.match(r'^[a-zA-Z][a-zA-Z0-9+\-.]*://', fn):
+                        url_var.set(fn)
+                    else:
+                        try:
+                            p = os.path.abspath(fn)
+                            # Convert to a file:// URI (use forward slashes)
+                            p_posix = p.replace('\\', '/')
+                            if re.match(r'^[A-Za-z]:', p_posix):
+                                # Windows absolute path -> file:///C:/path
+                                url_var.set('file:///' + p_posix)
+                            else:
+                                url_var.set('file://' + p_posix)
+                        except Exception:
+                            url_var.set(fn)
+                else:
+                    url_var.set('')
+        except Exception:
+            pass
+
         # refresh UI elements which depend on active textArea
         highlight_current_line()
         redraw_line_numbers()
@@ -836,7 +1016,6 @@ def _on_tab_changed(event):
 
 # Editor notebook for tabbed editing (ensure this exists earlier where it was created)
 editorNotebook = ttk.Notebook(root)
-editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
 editorNotebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
 
 # create initial tab (replaces original single textArea creation)
@@ -847,7 +1026,63 @@ textArea['font'] = (fontName, fontSize)
 
 
 
+def _toggle_simple_tag(tag: str):
+    """Toggle a simple text tag for the current selection or whole buffer."""
+    try:
+        start, end = selection_or_all()
+        # If selection has the tag in the region, remove it; otherwise add it.
+        # Use tag_ranges to detect presence anywhere in the selected region.
+        ranges = textArea.tag_ranges(tag)
+        if ranges:
+            textArea.tag_remove(tag, start, end)
+        else:
+            textArea.tag_add(tag, start, end)
+    except Exception:
+        pass
 
+def format_strong():
+    """Apply/remove <strong> semantics -> 'bold' tag."""
+    toggle_tag_complex("bold")
+
+def format_em():
+    """Apply/remove <em> semantics -> 'italic' tag."""
+    toggle_tag_complex("italic")
+
+def format_small():
+    _toggle_simple_tag("small")
+
+def format_mark():
+    _toggle_simple_tag("mark")
+
+def format_code():
+    _toggle_simple_tag("code")
+
+def format_kbd():
+    _toggle_simple_tag("kbd")
+
+def format_sub():
+    _toggle_simple_tag("sub")
+
+def format_sup():
+    _toggle_simple_tag("sup")
+
+def format_marquee():
+    """Toggle marquee tag and start/stop animation when enabled."""
+    try:
+        start, end = selection_or_all()
+        ranges = textArea.tag_ranges("marquee")
+        if ranges:
+            # If any marquee exists in selection, remove for the selection
+            textArea.tag_remove("marquee", start, end)
+            _stop_marquee_loop()
+        else:
+            textArea.tag_add("marquee", start, end)
+            # ensure trailing space and start loop if visible
+            _ensure_marquee_trailing_space()
+            if _is_marquee_visible():
+                _start_marquee_loop()
+    except Exception:
+        pass
 
 
 # -------------------------
@@ -908,8 +1143,281 @@ _DEFAULT_TAG_COLORS = {
     "todo": {"fg": "#ffffff", "bg": "#B22222"},
     "currentLine": {"fg": "", "bg": "#222222"},
     "trailingWhitespace": {"fg": "", "bg": "#331111"},
-    "find_match": {"fg": "white", "bg": "#444444"}
+    "find_match": {"fg": "white", "bg": "#444444"},
+    "marquee": {"fg": "#FF4500", "bg": ""},
+    "mark": {"fg": "", "bg": "#FFF177"},
+    "code": {"fg": "#000000", "bg": "#F5F5F5"},
+    "kbd": {"fg": "#000000", "bg": "#F5F5F5"},
+    "sub": {"fg": "", "bg": ""},
+    "sup": {"fg": "", "bg": ""},
+    "small": {"fg": "", "bg": ""}
 }
+
+def open_url_action():
+    """Prompt for a URL, fetch it on a background thread and open parsed HTML in a tab."""
+    try:
+        dlg = Toplevel(root)
+        dlg.title("Open URL")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        container = ttk.Frame(dlg, padding=12)
+        container.grid(row=0, column=0, sticky='nsew')
+        container.columnconfigure(1, weight=1)
+
+        ttk.Label(container, text="URL:").grid(row=0, column=0, sticky='w', pady=(0,6))
+        url_var = StringVar(value='')
+        url_entry = ttk.Entry(container, textvariable=url_var, width=60)
+        url_entry.grid(row=0, column=1, sticky='ew', padx=(6,0), pady=(0,6))
+
+        new_tab_var = IntVar(value=1)
+        chk_newtab = ttk.Checkbutton(container, text="Open in new tab", variable=new_tab_var)
+        chk_newtab.grid(row=1, column=1, sticky='w', pady=(0,8))
+
+        status = ttk.Label(container, text="")
+        status.grid(row=2, column=0, columnspan=2, sticky='w')
+
+        def do_cancel():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def do_open():
+            u = url_var.get().strip()
+            if not u:
+                status.config(text="No URL provided.")
+                return
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+            def worker(url, open_in_new_tab):
+                try:
+                    # lazy import to avoid changing top-of-file imports
+                    import urllib.request as urr
+                    import urllib.parse as up
+                    # ensure scheme
+                    parsed = up.urlsplit(url)
+                    if not parsed.scheme:
+                        url2 = 'http://' + url
+                    else:
+                        url2 = url
+                    req = urr.Request(url2, headers={"User-Agent": "SimpleEdit/1.0"})
+                    with urr.urlopen(req, timeout=15) as resp:
+                        # attempt to get charset from headers; fallback to utf-8
+                        charset = None
+                        try:
+                            ct = resp.headers.get_content_charset()
+                            if ct:
+                                charset = ct
+                        except Exception:
+                            pass
+                        raw_bytes = resp.read()
+                        enc = charset or 'utf-8'
+                        try:
+                            raw = raw_bytes.decode(enc, errors='replace')
+                        except Exception:
+                            raw = raw_bytes.decode('utf-8', errors='replace')
+
+                    # reuse existing HTML parsing flow
+                    plain, tags_meta = _parse_html_and_apply(raw)
+
+                    def ui():
+                        try:
+                            title = up.urlsplit(url2).netloc or url2
+                            if open_in_new_tab:
+                                tx, fr = create_editor_tab(title, plain, filename=url2)
+                                tx.focus_set()
+                                _apply_tag_configs_to_widget(tx)
+                            else:
+                                textArea.delete('1.0', 'end')
+                                textArea.insert('1.0', plain)
+                                _apply_tag_configs_to_widget(textArea)
+                            statusBar['text'] = f"Opened URL: {url2}"
+                            add_recent_file(url2)
+                            refresh_recent_menu()
+                            if tags_meta and tags_meta.get('tags'):
+                                root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
+                            if updateSyntaxHighlighting.get():
+                                root.after(0, highlightPythonInit)
+                        except Exception as e:
+                            try:
+                                messagebox.showerror("Error", str(e))
+                            except Exception:
+                                pass
+
+                    root.after(0, ui)
+
+                except Exception as e:
+                    def ui_err():
+                        try:
+                            messagebox.showerror("Fetch error", f"Failed to fetch URL: {e}")
+                        except Exception:
+                            pass
+                    root.after(0, ui_err)
+
+            Thread(target=worker, args=(u, bool(new_tab_var.get())), daemon=True).start()
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.grid(row=3, column=0, columnspan=2, pady=(6,0), sticky='e')
+        ttk.Button(btn_frame, text="Open", command=do_open).pack(side=RIGHT, padx=(6,0))
+        ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side=RIGHT)
+
+        dlg.update_idletasks()
+        center_window(dlg)
+        url_entry.focus_set()
+    except Exception:
+        pass
+
+# Marquee animator: shifts text inside 'marquee' tag left once per second while visible.
+_marquee_after_id = None
+_marquee_running = False
+
+def _is_marquee_visible():
+    """Return True if any 'marquee' tag range intersects the visible viewport."""
+    try:
+        if not textArea:
+            return False
+        first_visible = textArea.index('@0,0')
+        last_visible = textArea.index(f'@0,{textArea.winfo_height()}')
+        first_line = int(first_visible.split('.')[0])
+        last_line = int(last_visible.split('.')[0])
+        ranges = textArea.tag_ranges('marquee')
+        if not ranges:
+            return False
+        for i in range(0, len(ranges), 2):
+            s = str(ranges[i])
+            e = str(ranges[i + 1])
+            s_line = int(s.split('.')[0])
+            e_line = int(e.split('.')[0])
+            if not (e_line < first_line or s_line > last_line):
+                return True
+        return False
+    except Exception:
+        return False
+
+def _marquee_schedule_tick():
+    global _marquee_after_id
+    try:
+        # schedule tick on main thread after 1000ms
+        _marquee_after_id = root.after(1000, _marquee_tick)
+    except Exception:
+        _marquee_after_id = None
+
+def _ensure_marquee_trailing_space():
+    """Ensure each marquee range ends with a space so rotation doesn't join first/last chars."""
+    try:
+        if not textArea:
+            return
+        ranges = list(textArea.tag_ranges('marquee'))
+        for i in range(0, len(ranges), 2):
+            s = str(ranges[i])
+            e = str(ranges[i + 1])
+            try:
+                content = textArea.get(s, e)
+            except Exception:
+                continue
+            if not content:
+                continue
+            # Add one trailing space if missing
+            if not content.endswith(' '):
+                try:
+                    # Insert space at the old end, then reapply marquee tag to include it
+                    textArea.insert(e, ' ')
+                    new_end = f"{s} + {len(content) + 1}c"
+                    # remove old tag span and add new extended span
+                    textArea.tag_remove('marquee', s, e)
+                    textArea.tag_add('marquee', s, new_end)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+def _start_marquee_loop():
+    """Start the marquee tick loop if not already running. Ensure trailing space first."""
+    global _marquee_running
+    try:
+        if _marquee_running:
+            return
+        if not textArea:
+            return
+        if not textArea.tag_ranges('marquee'):
+            return
+        # ensure a trailing space so rotation preserves separation
+        _ensure_marquee_trailing_space()
+        _marquee_running = True
+        _marquee_schedule_tick()
+    except Exception:
+        _marquee_running = False
+
+def _stop_marquee_loop():
+    """Stop the marquee tick loop."""
+    global _marquee_after_id, _marquee_running
+    try:
+        if _marquee_after_id:
+            try:
+                root.after_cancel(_marquee_after_id)
+            except Exception:
+                pass
+        _marquee_after_id = None
+    finally:
+        _marquee_running = False
+
+def _marquee_tick():
+    """One animation tick: rotate characters left for each marquee range, then reschedule or stop."""
+    global _marquee_after_id, _marquee_running
+    try:
+        if not _marquee_running:
+            return
+        # Ensure we operate on the active textArea and current marquee tag ranges
+        ranges = list(textArea.tag_ranges('marquee'))
+        if not ranges:
+            _stop_marquee_loop()
+            return
+
+        # Work on a snapshot of ranges; performing replacement of same-length content keeps indices stable.
+        for i in range(0, len(ranges), 2):
+            try:
+                s = str(ranges[i])
+                e = str(ranges[i + 1])
+                content = textArea.get(s, e)
+                if not content or len(content) <= 1:
+                    continue
+                # produce rotated string
+                new = content[1:] + content[0]
+                # preserve selection/cursor roughly: record selection indices if any
+                sel = textArea.tag_ranges('sel')
+                # replace region
+                textArea.delete(s, e)
+                textArea.insert(s, new)
+                # reapply marquee tag for the new text
+                textArea.tag_remove('marquee', s, f"{s} + {len(new)}c")
+                textArea.tag_add('marquee', s, f"{s} + {len(new)}c")
+                # restore selection roughly (best-effort)
+                if sel:
+                    try:
+                        textArea.tag_remove('sel', '1.0', 'end')
+                        # naive restore: if selection was within replaced region, place it at same absolute offsets
+                        # skip precise adjustment for simplicity
+                        textArea.tag_add('sel', sel[0], sel[1])
+                    except Exception:
+                        pass
+            except Exception:
+                # keep going with other ranges even if one fails
+                pass
+
+        # Continue only if marquee remains visible
+        if _is_marquee_visible():
+            _marquee_schedule_tick()
+        else:
+            _stop_marquee_loop()
+    except Exception:
+        _stop_marquee_loop()
 
 # default regex string map (patterns as strings; flags handled below)
 _DEFAULT_REGEXES = {
@@ -1259,6 +1767,7 @@ def export_syntax_preset(inputs_fg=None, inputs_bg=None, kw_ent=None, bk_ent=Non
             messagebox.showerror("Export Failed", str(e))
         except Exception:
             pass
+
 
 def open_syntax_editor():
     """Modal window to edit tag colors and regex/keyword lists; writes to config and reloads."""
@@ -1646,6 +2155,40 @@ def _load_symbol_buffers():
     defs_set = set(x for x in (d.strip() for d in defs_raw.split(',')) if x)
     return vars_set, defs_set
 
+# Add menu and toolbar entries (safe to run anywhere after fileMenu/toolBar exist)
+try:
+    # Insert "Open URL..." into File menu (position after Open)
+    try:
+        fileMenu.insert_command(3, label='Open URL...', command=lambda: open_url_action())
+    except Exception:
+        # if insert_command not supported simply add at end
+        fileMenu.add_command(label='Open URL...', command=lambda: open_url_action())
+except Exception:
+    pass
+
+def open_url_from_field():
+    """Handler for toolbar Open URL button: use URL field if present, otherwise show dialog."""
+    try:
+        u = url_var.get().strip() if 'url_var' in globals() else ''
+        if u:
+            fetch_and_open_url(u, open_in_new_tab=True)
+            return
+        # fallback to the dialog if the field is empty
+        open_url_action()
+    except Exception:
+        try:
+            open_url_action()
+        except Exception:
+            pass
+
+try:
+    # URL entry + toolbar button (quick open)
+    url_entry = Entry(toolBar, textvariable=url_var, width=40)
+    url_entry.pack(side=LEFT, padx=(6,2), pady=2)
+    btnOpenURL = Button(toolBar, text='Open URL', command=open_url_from_field)
+    btnOpenURL.pack(side=LEFT, padx=2, pady=2)
+except Exception:
+    pass
 
 def _save_symbol_buffers(vars_set, defs_set):
     if not config.has_section('Symbols'):
@@ -1662,7 +2205,8 @@ def _serialize_formatting():
     """Return header string (commented base64 JSON) for current non-syntax tags, or '' if no formatting."""
     try:
         tags_to_save = ('bold', 'italic', 'underline', 'all',
-                        'underlineitalic', 'boldunderline', 'bolditalic')
+                        'underlineitalic', 'boldunderline', 'bolditalic', 'small',
+                        'mark', 'code', 'kbd', 'sub', 'sup')        
         data = {}
         for tag in tags_to_save:
             ranges = textArea.tag_ranges(tag)
@@ -1687,12 +2231,224 @@ def _serialize_formatting():
     except Exception:
         return ''
 
+def _apply_template_to_widget(tw, kind: str):
+    """Replace widget content with a standard template for `kind` ('html'|'python'|'md'|'json')."""
+    try:
+        if kind == 'html':
+            tpl = (
+                "<!doctype html>\n"
+                "<html lang=\"en\">\n"
+                "<head>\n"
+                "  <meta charset=\"utf-8\">\n"
+                "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
+                "  <title>My 90's Style Page</title>\n"
+                "  <style>\n"
+                "    body { background:#f8f0d6; color:#000; font-family: 'Times New Roman', serif; }\n"
+                "    .nav { background:#ffcc00; padding:8px; }\n"
+                "    .content { margin:16px; }\n"
+                "  </style>\n"
+                "</head>\n"
+                "<body bgcolor=\"#ffe4b5\">\n"
+                "  <center>\n"
+                "    <h1>Welcome to My 90's Page</h1>\n"
+                "    <marquee behavior=\"scroll\" direction=\"left\">Bringing back the web of the 90's!</marquee>\n"
+                "    <p><font color=\"red\">This site uses some vintage HTML for demonstration:</font></p>\n"
+                "    <img src=\"https://via.placeholder.com/200\" alt=\"placeholder\" />\n"
+                "    <hr/>\n"
+                "    <table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">\n"
+                "      <tr><th>Feature</th><th>Example</th></tr>\n"
+                "      <tr><td>Marquee</td><td>&lt;marquee&gt;</td></tr>\n"
+                "      <tr><td>Font tag</td><td>&lt;font color=&quot;red&quot;&gt;old-school&lt;/font&gt;</td></tr>\n"
+                "    </table>\n"
+                "    <p>Links: <a href=\"https://example.com\">Example</a> | <a href=\"#\">Back to top</a></p>\n"
+                "    <hr/>\n"
+                "    <center>\n"
+                "      <small>Made with nostalgia &amp; HTML 4.01</small>\n"
+                "    </center>\n"
+                "  </center>\n"
+                "</body>\n"
+                "</html>\n"
+            )
+        elif kind == 'md' or kind == 'markdown':
+            tpl = (
+                "# Title\n\n"
+                "A short description paragraph.\n\n"
+                "## Features\n\n"
+                "- Feature one\n"
+                "- Feature two\n\n"
+                "### Example Code\n\n"
+                "```python\n"
+                "def hello():\n"
+                "    print('Hello, Markdown')\n"
+                "```\n\n"
+                "## Notes\n\n"
+                "Write your content here.\n"
+            )
+        elif kind == 'json':
+            tpl = (
+                "{\n"
+                '  "name": "example",\n'
+                '  "version": "1.0.0",\n'
+                '  "description": "A sample JSON document",\n'
+                '  "items": [\n'
+                '    { "id": 1, "name": "Item One" },\n'
+                '    { "id": 2, "name": "Item Two" }\n'
+                "  ]\n"
+                "}\n"
+            )
+        else:  # python (default)
+            tpl = (
+                "#!/usr/bin/env python3\n"
+                "# -*- coding: utf-8 -*-\n"
+                "\"\"\"\n"
+                "Module description.\n"
+                "\"\"\"\n\n"
+                "def main():\n"
+                "    pass\n\n\n"
+                "if __name__ == \"__main__\":\n"
+                "    main()\n"
+            )
+        tw.delete('1.0', 'end')
+        tw.insert('1.0', tpl)
+        try:
+            # ensure tags/configs applied to this widget after replacing text
+            _apply_tag_configs_to_widget(tw)
+            # best-effort re-highlight (Python/Markdown may benefit)
+            highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _ask_template_modal(kind: str, tw):
+    """Show modal asking whether to create a template for kind in widget `tw`."""
+    try:
+        dlg = Toplevel(root)
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.title("Create Template?")
+        container = ttk.Frame(dlg, padding=12)
+        container.grid(row=0, column=0, sticky='nsew')
+        msg = f"Hey — it looks like you're starting an {kind.upper()} file.\nWould you like me to create a standard {kind.upper()} template for this tab?"
+        ttk.Label(container, text=msg, justify='left').grid(row=0, column=0, columnspan=2, sticky='w', pady=(0,8))
+
+        remember_var = IntVar(value=0)
+        ttk.Checkbutton(container, text="Don't ask again for this tab", variable=remember_var).grid(row=1, column=0, columnspan=2, sticky='w')
+
+        def do_cancel():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def do_create():
+            try:
+                frame = tw.master
+                if remember_var.get():
+                    if kind == 'html':
+                        setattr(frame, '_template_prompted_html', True)
+                    else:
+                        setattr(frame, '_template_prompted_py', True)
+            except Exception:
+                pass
+            try:
+                _apply_template_to_widget(tw, kind)
+            finally:
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+        btns = ttk.Frame(container)
+        btns.grid(row=2, column=0, columnspan=2, sticky='e', pady=(8,0))
+        ttk.Button(btns, text="Yes", command=do_create).pack(side=RIGHT, padx=(6,0))
+        ttk.Button(btns, text="No", command=do_cancel).pack(side=RIGHT)
+        dlg.update_idletasks()
+        center_window(dlg)
+    except Exception:
+        pass
+
+
+def detect_header_and_prompt(event=None):
+    """Detect typed file-header hints (HTML DOCTYPE/HTML or Python shebang/triple-quote) and prompt for templates."""
+    try:
+        if not event or not hasattr(event, 'widget'):
+            return
+        tw = event.widget
+        if not isinstance(tw, Text):
+            return
+
+        # find parent frame (the tab frame)
+        frame = getattr(tw, 'master', None)
+        if frame is None:
+            return
+
+        # avoid repeated prompting per tab
+        if getattr(frame, '_template_prompted_html', False) and getattr(frame, '_template_prompted_py', False):
+            return
+
+        # inspect the start of buffer and the line around insert
+        try:
+            head = tw.get('1.0', '1.0 + 512c').lower()
+        except Exception:
+            head = ''
+        # HTML detection: <!doctype html or <html
+        if (not getattr(frame, '_template_prompted_html', False)) and ('<!doctype html' in head or '<html' in head):
+            # prompt user
+            _ask_template_modal('html', tw)
+            return
+
+        # Python detection: shebang at start or triple quote at top
+        if not getattr(frame, '_template_prompted_py', False):
+            stripped = head.lstrip()
+            if stripped.startswith('#!') or stripped.startswith('"""') or stripped.startswith("'''"):
+                _ask_template_modal('python', tw)
+                return
+    except Exception:
+        pass
 
 def _apply_formatting_from_meta(meta):
     """Apply saved tag ranges (meta is dict with key 'tags') on the UI thread."""
     try:
         tags = meta.get('tags', {}) if isinstance(meta, dict) else {}
-        # We need to ensure tags exist; tag_add will silently fail if indices out of range
+        for tag in list(tags.keys()):
+            try:
+                if tag.startswith("font_"):
+                    hexpart = tag.split("_", 1)[1]
+                    if re.match(r'^[0-9a-fA-F]{6}$', hexpart):
+                        color = f"#{hexpart.lower()}"
+                        # validate color via tkinter; fall back if invalid
+                        try:
+                            root.winfo_rgb(color)
+                            textArea.tag_config(tag, foreground=color)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        # Now apply tag ranges (absolute offsets)
+        # Ensure editor has sensible tag_config for known presentation tags before adding ranges
+        try:
+            for present in ('mark', 'code', 'kbd', 'sub', 'sup', 'small', 'marquee'):
+                if present in tags and not textArea.tag_cget(present, "font") and not textArea.tag_cget(present, "background"):
+                    # best-effort default config; _apply_tag_configs_to_widget will set full defaults for widgets
+                    try:
+                        if present == 'mark':
+                            textArea.tag_config(present, background="#FFF177")
+                        elif present in ('code', 'kbd'):
+                            textArea.tag_config(present, font=("Courier New", max(6, int(fontSize - 1))), background="#F5F5F5")
+                        elif present in ('sub', 'sup', 'small'):
+                            textArea.tag_config(present, font=(fontName, max(6, int(fontSize - 2))))
+                        elif present == 'marquee':
+                            textArea.tag_config('marquee', foreground="#FF4500")
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         for tag, ranges in tags.items():
             for start, end in ranges:
                 try:
@@ -2166,11 +2922,17 @@ def save_file():
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
-
-def open_file_threaded():
-    # runs in thread
+# Add this function near other file-open helpers (above or next to open_file_threaded)
+def open_file_action():
+    """File->Open entry point. Show custom modal when enabled, otherwise use native dialog."""
     try:
-        fileName = filedialog.askopenfilename(
+        use_modal = config.getboolean("Section1", "openDialogModal", fallback=True)
+        if use_modal:
+            open_file_threaded()
+            return
+
+        # native file picker path (no custom modal)
+        p = filedialog.askopenfilename(
             initialdir=os.path.expanduser("~"),
             title="Select file",
             filetypes=(
@@ -2182,84 +2944,124 @@ def open_file_threaded():
                 ("All files", "*.*"),
             )
         )
-        if not fileName:
-            return
-        with open(fileName, 'r', errors='replace', encoding='utf-8') as f:
-            raw = f.read()
-
-        # First try to extract SIMPLEEDIT meta (preferred)
-        content, meta = _extract_header_and_meta(raw)
-        if meta:
-            textArea.delete('1.0', 'end')
-            textArea.insert('1.0', content)
-            statusBar['text'] = f"'{fileName}' opened successfully!"
-            root.fileName = fileName
-            add_recent_file(fileName)
-            refresh_recent_menu()
-            root.after(0, lambda: _apply_formatting_from_meta(meta))
-            try:
-                if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
-                    Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
-            except Exception:
-                pass
-            if updateSyntaxHighlighting.get():
-                root.after(0, highlightPythonInit)
+        if not p:
             return
 
-        # If no meta and file is .md or .html attempt HTML-aware parsing to reconstruct tags
-        ext = fileName.lower().split('.')[-1]
-        if ext in ('md', 'html', 'htm'):
-            # optional autodetect -> apply a matching syntax preset before parsing if enabled
+        # read on background thread and marshal to UI (reuse _open_path on main thread)
+        def worker(path):
             try:
-                if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
-                    preset_path = detect_syntax_preset_from_content(raw)
-                    if preset_path:
-                        applied = apply_syntax_preset(preset_path)
-                        if applied:
-                            statusBar['text'] = "Applied syntax preset from autodetect."
-            except Exception:
-                pass
-
-            # respect "open as source" setting: show raw source if enabled
-            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
-                textArea.delete('1.0', 'end')
-                textArea.insert('1.0', raw)
-                root.fileName = fileName
-                statusBar['text'] = f"'{fileName}' opened (raw source)!"
-                add_recent_file(fileName)
-                refresh_recent_menu()
-                if updateSyntaxHighlighting.get():
-                    root.after(0, highlightPythonInit)
+                with open(path, 'r', errors='replace', encoding='utf-8') as fh:
+                    _ = fh.read()  # just verify readable; _open_path will re-read as needed on UI thread
+            except Exception as e:
+                root.after(0, lambda: messagebox.showerror("Error", str(e)))
                 return
+            root.after(0, lambda: _open_path(path, open_in_new_tab=True))
 
-            plain, tags_meta = _parse_html_and_apply(raw)
-            textArea.delete('1.0', 'end')
-            textArea.insert('1.0', plain)
-            root.fileName = fileName
-            statusBar['text'] = f"'{fileName}' opened (HTML/MD parsed)!"
-            add_recent_file(fileName)
-            refresh_recent_menu()
-            if tags_meta and tags_meta.get('tags'):
-                root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
-            # still run normal syntax-highlighting pass to refresh persisted symbol highlights
-            if updateSyntaxHighlighting.get():
-                root.after(0, highlightPythonInit)
-            return
+        Thread(target=worker, args=(p,), daemon=True).start()
+    except Exception as e:
+        messagebox.showerror("Error", str(e))
 
-        # Fallback: no meta and not md/html - insert raw
-        textArea.delete('1.0', 'end')
-        textArea.insert('1.0', raw)
-        statusBar['text'] = f"'{fileName}' opened successfully!"
-        root.fileName = fileName
-        try:
-            if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
-                Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
-        except Exception:
-            pass
-        add_recent_file(fileName)
-        refresh_recent_menu()
-        if updateSyntaxHighlighting.get():
-            root.after(0, highlightPythonInit)
+def open_file_threaded():
+    """Open file dialog with 'Open in new tab' checkbox; load file on background thread."""
+    try:
+        dlg = Toplevel(root)
+        dlg.title("Open File")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+
+        container = ttk.Frame(dlg, padding=12)
+        container.grid(row=0, column=0, sticky='nsew')
+        container.columnconfigure(1, weight=1)
+
+        ttk.Label(container, text="File:").grid(row=0, column=0, sticky='w', pady=(0,6))
+        path_var = StringVar(value='')
+        path_entry = ttk.Entry(container, textvariable=path_var, width=60)
+        path_entry.grid(row=0, column=1, sticky='ew', padx=(6,0), pady=(0,6))
+
+        def on_browse():
+            p = filedialog.askopenfilename(
+                initialdir=os.path.expanduser("~"),
+                title="Select file",
+                filetypes=(
+                    ("SimpleEdit Text files", "*.set"),
+                    ("Markdown files", "*.md"),
+                    ("HTML files", "*.html"),
+                    ("Text files", "*.txt"),
+                    ("Python Source files", "*.py"),
+                    ("All files", "*.*"),
+                )
+            )
+            if p:
+                path_var.set(p)
+
+        btn_browse = ttk.Button(container, text="Browse...", command=on_browse)
+        btn_browse.grid(row=0, column=2, padx=(6,0), pady=(0,6))
+
+        new_tab_var = IntVar(value=1)
+        chk_newtab = ttk.Checkbutton(container, text="Open in new tab", variable=new_tab_var)
+        chk_newtab.grid(row=1, column=1, sticky='w', pady=(0,8))
+
+        # New: remember checkbox (same purpose as the recent-files remember)
+        remember_var = IntVar(value=0)
+        chk_remember = ttk.Checkbutton(container, text="Remember this choice for recent files (don't prompt)", variable=remember_var)
+        chk_remember.grid(row=2, column=1, sticky='w', pady=(0,6))
+
+        status = ttk.Label(container, text="")
+        status.grid(row=3, column=0, columnspan=3, sticky='w')
+
+        def do_cancel():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        def do_open():
+            p = path_var.get().strip()
+            if not p:
+                status.config(text="No file selected.")
+                return
+            # persist remember choice if checked
+            if remember_var.get():
+                try:
+                    config.set("Section1", "openDialogDefault", "new" if new_tab_var.get() else "current")
+                    config.set("Section1", "openDialogModal", "False")
+                    config.set("Section1", "recentOpenDefault", "new" if new_tab_var.get() else "current")
+                    config.set("Section1", "promptOnRecentOpen", "False")
+                    with open(INI_PATH, 'w') as f:
+                        config.write(f)
+                except Exception:
+                    pass
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+            # background worker reads and processes the file (reuse existing worker code)
+            def worker(path, open_in_new_tab):
+                try:
+                    with open(path, 'r', errors='replace', encoding='utf-8') as fh:
+                        raw = fh.read()
+                except Exception as e:
+                    root.after(0, lambda: messagebox.showerror("Error", str(e)))
+                    return
+
+                # reuse the same core open logic but marshal UI updates to main thread via _open_path
+                root.after(0, lambda: _open_path(path, open_in_new_tab=open_in_new_tab))
+
+            Thread(target=worker, args=(p, bool(new_tab_var.get())), daemon=True).start()
+
+        btn_frame = ttk.Frame(container)
+        btn_frame.grid(row=4, column=0, columnspan=3, pady=(6,0), sticky='e')
+        ttk.Button(btn_frame, text="Open", command=do_open).pack(side=RIGHT, padx=(6,0))
+        ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side=RIGHT)
+
+        # center and show
+        dlg.update_idletasks()
+        center_window(dlg)
+        path_entry.focus_set()
     except Exception as e:
         messagebox.showerror("Error", str(e))
 
@@ -2290,7 +3092,8 @@ def _on_status_syntax_toggle():
 def _collect_formatting_ranges():
     """Return dict mapping formatting tag -> list of (start_offset, end_offset)."""
     tags_to_check = ('bold', 'italic', 'underline', 'all',
-                     'underlineitalic', 'boldunderline', 'bolditalic')
+                     'underlineitalic', 'boldunderline', 'bolditalic',
+                     'small', 'mark', 'code', 'kbd', 'sub', 'sup')
     out = {}
     for tag in tags_to_check:
         ranges = textArea.tag_ranges(tag)
@@ -2312,7 +3115,7 @@ def _wrap_segment_by_tags(seg_text: str, active_tags: set):
     has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
     has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
     has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
-
+    has_small = 'small' in active_tags
     inner = seg_text
     # Prefer Markdown bold+italic triple-star where supported
     if has_bold and has_italic:
@@ -2326,6 +3129,9 @@ def _wrap_segment_by_tags(seg_text: str, active_tags: set):
         # Markdown doesn't have native underline; use HTML <u> for compatibility
         inner = f"<u>{inner}</u>"
 
+    if has_small:
+        # wrap in <small> so exported HTML/MD keeps the visual reduction
+        inner = f"<small>{inner}</small>"
     return inner
 
 def save_as_markdown(textArea):
@@ -2334,6 +3140,78 @@ def save_as_markdown(textArea):
     root.fileName = fileName
     add_recent_file(fileName)
     refresh_recent_menu()
+
+def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
+    """Fetch `url` on a background thread and open parsed HTML in a tab (reusable helper)."""
+    def worker(url_in, open_tab):
+        try:
+            import urllib.request as urr
+            import urllib.parse as up
+            parsed = up.urlsplit(url_in)
+            if not parsed.scheme:
+                url2 = 'http://' + url_in
+            else:
+                url2 = url_in
+            req = urr.Request(url2, headers={"User-Agent": "SimpleEdit/1.0"})
+            with urr.urlopen(req, timeout=15) as resp:
+                charset = None
+                try:
+                    ct = resp.headers.get_content_charset()
+                    if ct:
+                        charset = ct
+                except Exception:
+                    pass
+                raw_bytes = resp.read()
+                enc = charset or 'utf-8'
+                try:
+                    raw = raw_bytes.decode(enc, errors='replace')
+                except Exception:
+                    raw = raw_bytes.decode('utf-8', errors='replace')
+
+            plain, tags_meta = _parse_html_and_apply(raw)
+
+            def ui():
+                try:
+                    title = up.urlsplit(url2).netloc or url2
+                    if open_tab:
+                        tx, fr = create_editor_tab(title, plain, filename=url2)
+                        tx.focus_set()
+                        _apply_tag_configs_to_widget(tx)
+                    else:
+                        textArea.delete('1.0', 'end')
+                        textArea.insert('1.0', plain)
+                        _apply_tag_configs_to_widget(textArea)
+                    statusBar['text'] = f"Opened URL: {url2}"
+                    add_recent_file(url2)
+                    refresh_recent_menu()
+                    if tags_meta and tags_meta.get('tags'):
+                        root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
+                    if updateSyntaxHighlighting.get():
+                        root.after(0, highlightPythonInit)
+                    # keep the toolbar field in sync with what we opened
+                    try:
+                        if 'url_var' in globals():
+                            url_var.set(url2)
+                    except Exception:
+                        pass
+                except Exception as e:
+                    try:
+                        messagebox.showerror("Error", str(e))
+                    except Exception:
+                        pass
+
+            root.after(0, ui)
+
+        except Exception as e:
+            def ui_err():
+                try:
+                    messagebox.showerror("Fetch error", f"Failed to fetch URL: {e}")
+                except Exception:
+                    pass
+            root.after(0, ui_err)
+
+    Thread(target=worker, args=(url, bool(open_in_new_tab)), daemon=True).start()
+
 
 
 
@@ -2527,7 +3405,14 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 s, e = m.span(1)
                 if not overlaps_protected(s, e):
                     textArea.tag_add("def", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
-
+        # after tagging work inside highlight_python_helper:
+        try:
+            if textArea.tag_ranges('marquee') and _is_marquee_visible():
+                _start_marquee_loop()
+            else:
+                _stop_marquee_loop()
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -2836,11 +3721,41 @@ def show_trailing_whitespace():
         pass
 
 
+def _draw_line_numbers_for(frame):
+    """Redraw line numbers for the given tab frame using the current settings."""
+    try:
+        ln = getattr(frame, 'lineNumbersCanvas', None)
+        if not ln:
+            return
+        # find the Text widget inside the frame
+        tw = None
+        for child in frame.winfo_children():
+            if isinstance(child, Text):
+                tw = child
+                break
+        if tw is None:
+            return
 
+        ln.delete('all')
+        i = tw.index('@0,0')
+        while True:
+            dline = tw.dlineinfo(i)
+            if dline is None:
+                break
+            y = dline[1]
+            line = i.split('.')[0]
+            try:
+                fill = lineNumberFg
+            except Exception:
+                fill = '#555555'
+            ln.create_text(2, y, anchor='nw', text=line, fill=fill)
+            i = tw.index(f'{i}+1line')
+    except Exception:
+        pass
 
 
 def redraw_line_numbers(event=None):
-    global lineNumbersCanvas
+    global lineNumbersCanvas, lineNumberFg
     if not lineNumbersCanvas:
         return
     lineNumbersCanvas.delete('all')
@@ -2851,7 +3766,11 @@ def redraw_line_numbers(event=None):
             break
         y = dline[1]
         line = i.split('.')[0]
-        lineNumbersCanvas.create_text(2, y, anchor='nw', text=line, fill='#555555')
+        try:
+            fill = lineNumberFg
+        except Exception:
+            fill = '#555555'
+        lineNumbersCanvas.create_text(2, y, anchor='nw', text=line, fill=fill)
         i = textArea.index(f'{i}+1line')
 
 
@@ -3087,9 +4006,15 @@ def python_ai_autocomplete():
 # Bindings & widget wiring
 # -------------------------
 # toolbar buttons (single definitions)
+topBarContainer = Frame(root)
+topBarContainer.pack(side=TOP, fill=X)
+
+# primary toolbar (left-aligned actions)
+toolBar = Frame(topBarContainer, bg='blue')
+toolBar.pack(side=TOP, fill=X)
 btn1 = Button(toolBar, text='New', command=lambda: newFile())
 btn1.pack(side=LEFT, padx=2, pady=2)
-btn2 = Button(toolBar, text='Open', command=lambda: open_file_threaded())
+btn2 = Button(toolBar, text='Open', command=lambda: open_file_action())
 btn2.pack(side=LEFT, padx=2, pady=2)
 btn3 = Button(toolBar, text='Save', command=lambda: save_file_as())
 btn3.pack(side=LEFT, padx=2, pady=2)
@@ -3116,6 +4041,30 @@ formatButton5 = Button(toolBar, text='Settings', command=lambda: setting_modal()
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
 formatButton6 = Button(toolBar, text='Edit Syntax', command=lambda: setting_syntax_modal())
 formatButton6.pack(side=RIGHT, padx=2, pady=2)
+
+presentToolBar = Frame(topBarContainer, bg=toolBar.cget('bg'))
+presentToolBar.pack(side=TOP, fill=X)
+editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
+# Presentational/tag buttons (map to HTML-like tags)
+btn_strong = Button(presentToolBar, text='Strong', command=format_strong)
+btn_strong.pack(side=LEFT, padx=2, pady=2)
+btn_em = Button(presentToolBar, text='Em', command=format_em)
+btn_em.pack(side=LEFT, padx=2, pady=2)
+
+btn_small = Button(presentToolBar, text='Small', command=format_small)
+btn_small.pack(side=LEFT, padx=2, pady=2)
+btn_mark = Button(presentToolBar, text='Mark', command=format_mark)
+btn_mark.pack(side=LEFT, padx=2, pady=2)
+btn_code = Button(presentToolBar, text='Code', command=format_code)
+btn_code.pack(side=LEFT, padx=2, pady=2)
+btn_kbd = Button(presentToolBar, text='Kbd', command=format_kbd)
+btn_kbd.pack(side=LEFT, padx=2, pady=2)
+btn_sub = Button(presentToolBar, text='Sub', command=format_sub)
+btn_sub.pack(side=LEFT, padx=2, pady=2)
+btn_sup = Button(presentToolBar, text='Sup', command=format_sup)
+btn_sup.pack(side=LEFT, padx=2, pady=2)
+btn_marquee = Button(presentToolBar, text='Marquee', command=format_marquee)
+btn_marquee.pack(side=LEFT, padx=2, pady=2)
 
 # create refresh button on status bar (lower-right)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
@@ -3156,7 +4105,7 @@ fullScanToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
 textArea.bind('<Return>', lambda e: (smart_newline, safe_highlight_event(e)))
-textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
 textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
 textArea.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
@@ -3210,6 +4159,8 @@ def create_config_window():
 
     loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
     loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
+    promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
+    recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")  # "new" or "current"
     saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
     ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=11, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=12, column=1, sticky='w', pady=6)
@@ -3217,6 +4168,11 @@ def create_config_window():
     # near other checkboxes in create_config_window()
     autoDetectVar = IntVar(value=config.getboolean("Section1", "autoDetectSyntax", fallback=True))
     ttk.Checkbutton(container, text="Autodetect syntax from file content", variable=autoDetectVar).grid(row=14, column=1, sticky='w', pady=6)
+    promptRecentOpenVar = IntVar(value=config.getboolean("Section1", "promptOnRecentOpen", fallback=True))
+    ttk.Checkbutton(container, text="Prompt when opening recent files", variable=promptRecentOpenVar).grid(row=16, column=1, sticky='w', pady=6)
+    # New: control whether File->Open shows the custom modal
+    promptOpenDialogVar = IntVar(value=config.getboolean("Section1", "openDialogModal", fallback=True))
+    ttk.Checkbutton(container, text="Use custom Open dialog for File → Open", variable=promptOpenDialogVar).grid(row=18, column=1, sticky='w', pady=6)
     # CSS export controls
     css_mode = config.get("Section1", "exportCssMode", fallback="inline-element")
     cssModeVar = StringVar(value=css_mode)
@@ -3257,6 +4213,45 @@ def create_config_window():
         sw_cursor.bind("<Button-1>", lambda e: choose_cursor_color())
     except Exception:
         pass
+
+        # Line numbers color controls
+    lineNumberFgField = mk_row("Line numbers FG", 19, config.get("Section1", "lineNumberFg", fallback="#555555"))
+    lineNumberBgField = mk_row("Line numbers BG", 20, config.get("Section1", "lineNumberBg", fallback="#000000"))
+
+    sw_ln_fg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "lineNumberFg", fallback="#555555"))
+    sw_ln_fg.grid(row=19, column=2, padx=(8,0))
+    sw_ln_bg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "lineNumberBg", fallback="#000000"))
+    sw_ln_bg.grid(row=20, column=2, padx=(8,0))
+
+    try:
+        sw_ln_fg.config(cursor="hand2")
+        sw_ln_bg.config(cursor="hand2")
+        sw_ln_fg.bind("<Button-1>", lambda e: choose_line_number_fg())
+        sw_ln_bg.bind("<Button-1>", lambda e: choose_line_number_bg())
+    except Exception:
+        pass
+
+    def choose_line_number_fg():
+        c = safe_askcolor(lineNumberFgField.get(), title="Line numbers FG")
+        hexc = get_hex_color(c)
+        if hexc:
+            lineNumberFgField.delete(0, END)
+            lineNumberFgField.insert(0, hexc)
+            try:
+                sw_ln_fg.config(bg=hexc)
+            except Exception:
+                pass
+
+    def choose_line_number_bg():
+        c = safe_askcolor(lineNumberBgField.get(), title="Line numbers BG")
+        hexc = get_hex_color(c)
+        if hexc:
+            lineNumberBgField.delete(0, END)
+            lineNumberBgField.insert(0, hexc)
+            try:
+                sw_ln_bg.config(bg=hexc)
+            except Exception:
+                pass
 
     def choose_font_color():
         c = safe_askcolor(fontColorChoice.get(), title="Font Color")
@@ -3299,8 +4294,10 @@ def create_config_window():
         config.set("Section1", "temperature", temperatureField.get())
         config.set("Section1", "top_k", top_kField.get())
         config.set("Section1", "seed", seedField.get())
-
-
+        # persist Open-dialog preference
+        config.set("Section1", "openDialogModal", str(bool(promptOpenDialogVar.get())))
+        config.set("Section1", "lineNumberFg", lineNumberFgField.get())
+        config.set("Section1", "lineNumberBg", lineNumberBgField.get())
         # persist new options
         config.set("Section1", "syntaxHighlighting", str(bool(syntaxCheckVar.get())))
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
@@ -3310,7 +4307,7 @@ def create_config_window():
         config.set("Section1", "exportCssPath", cssPathField.get())
         # persist new open-as-source option
         config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
-
+        config.set("Section1", "promptOnRecentOpen", str(bool(promptRecentOpenVar.get())))
         try:
             with open(INI_PATH, 'w') as configfile:
                 config.write(configfile)
@@ -3330,6 +4327,9 @@ def create_config_window():
                 statusBar['text'] = "Syntax highlighting disabled."
         except Exception:
             pass
+
+                # apply new line-number colors to all open tabs
+
 
         global loadAIOnOpen, loadAIOnNew
         try:
@@ -3360,6 +4360,11 @@ def create_config_window():
         seedField.insert(0, config.get("Section1", "seed"))
         temperatureField.delete(0, END)
         temperatureField.insert(0, config.get("Section1", "temperature"))
+            
+        lineNumberFgField.delete(0, END)
+        lineNumberFgField.insert(0, config.get("Section1", "lineNumberFg", fallback="#555555"))
+        lineNumberBgField.delete(0, END)
+        lineNumberBgField.insert(0, config.get("Section1", "lineNumberBg", fallback="#000000"))
 
         try:
             syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
@@ -3372,6 +4377,9 @@ def create_config_window():
             # refresh open-as-source checkbox from config
             openAsSourceVar.set(config.getboolean("Section1", "openHtmlAsSource", fallback=False))
             autoDetectVar.set(config.getboolean("Section1", "autoDetectSyntax", fallback=True))
+            promptRecentOpenVar.set(config.getboolean("Section1", "promptOnRecentOpen", fallback=True))
+            promptOpenDialogVar.set(config.getboolean("Section1", "openDialogModal", fallback=True))
+
         except Exception:
             pass
 
@@ -3379,6 +4387,9 @@ def create_config_window():
             sw_font.config(bg=config.get("Section1", "fontColor"))
             sw_bg.config(bg=config.get("Section1", "backgroundColor"))
             sw_cursor.config(bg=config.get("Section1", "cursorColor"))
+            sw_ln_fg.config(bg=config.get("Section1", "lineNumberFg", fallback="#555555"))
+            sw_ln_bg.config(bg=config.get("Section1", "lineNumberBg", fallback="#000000"))
+
         except Exception:
             pass
 
@@ -3392,7 +4403,7 @@ def create_config_window():
 
 
 def nonlocal_values_reload():
-    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath, openHtmlAsSource
+    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath, openHtmlAsSource, promptOnRecentOpen, recentOpenDefault
     fontName = config.get("Section1", "fontName")
     fontSize = int(config.get("Section1", "fontSize"))
     fontColor = config.get("Section1", "fontColor")
@@ -3406,7 +4417,9 @@ def nonlocal_values_reload():
     loadAIOnOpen = config.getboolean("Section1", "loadAIOnOpen", fallback=False)
     loadAIOnNew = config.getboolean("Section1", "loadAIOnNew", fallback=False)
     saveFormattingInFile = config.getboolean("Section1", "saveFormattingInFile", fallback=False)
-
+        # line number colors
+    lineNumberFg = config.get("Section1", "lineNumberFg", fallback="#555555")
+    lineNumberBg = config.get("Section1", "lineNumberBg", fallback="#000000")
     # load css export settings
     exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
@@ -3414,6 +4427,12 @@ def nonlocal_values_reload():
     # load open-as-source setting
     openHtmlAsSource = config.getboolean("Section1", "openHtmlAsSource", fallback=False)
 
+    # load recent-open settings
+    promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
+    recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")
+    # load open-dialog settings
+    openDialogModal = config.getboolean("Section1", "openDialogModal", fallback=True)
+    openDialogDefault = config.get("Section1", "openDialogDefault", fallback="new")
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
     # reapply any saved/edited syntax overrides
     try:
