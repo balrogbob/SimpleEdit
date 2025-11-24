@@ -709,7 +709,9 @@ textArea.tag_config("find_match", background="#444444", foreground='white')
 # new variable tag
 
 
-# precompiled regexes / keyword lists (module scope)
+# -------------------------
+# Precompiled regexes / keyword lists (module scope)
+# -------------------------
 KEYWORDS = [
     'if', 'else', 'while', 'for', 'return', 'def', 'from', 'import', 'class',
     'try', 'except', 'finally', 'with', 'as', 'lambda', 'in', 'is', 'not',
@@ -742,6 +744,391 @@ VAR_ANNOT_RE = re.compile(r'(?m)^[ \t]*([A-Za-z_]\w*)\s*:\s*([^=\n]+)(?:=.*)?$')
 FSTRING_RE = re.compile(r"(?:[fF][rRuU]?|[rR][fF]?)(\"\"\"[\s\S]*?\"\"\"|'''[\s\S]*?'''|\"[^\n\"]*\"|'[^\\n']*')", re.DOTALL)
 DUNDER_RE = re.compile(r'\b__\w+__\b')
 CLASS_BASES_RE = re.compile(r'(?m)^[ \t]*class\s+[A-Za-z_]\w*\s*\(([^)]*)\)')
+
+# -------------------------
+# Runtime-editable syntax defaults and loader
+# -------------------------
+# default tag color map (keeps same defaults as above)
+# default tag color map (explicit fg/bg for every tag)
+_DEFAULT_TAG_COLORS = {
+    "number": {"fg": "#FDFD6A", "bg": ""},
+    "selfs": {"fg": "yellow", "bg": ""},
+    "variable": {"fg": "#8A2BE2", "bg": ""},
+    "decorator": {"fg": "#66CDAA", "bg": ""},
+    "class_name": {"fg": "#FFB86B", "bg": ""},
+    "constant": {"fg": "#FF79C6", "bg": ""},
+    "attribute": {"fg": "#33ccff", "bg": ""},
+    "builtin": {"fg": "#9CDCFE", "bg": ""},
+    "def": {"fg": "orange", "bg": ""},
+    "keyword": {"fg": "red", "bg": ""},
+    "string": {"fg": "#C9CA6B", "bg": ""},
+    "operator": {"fg": "#AAAAAA", "bg": ""},
+    "comment": {"fg": "#75715E", "bg": ""},
+    "todo": {"fg": "#ffffff", "bg": "#B22222"},
+    "currentLine": {"fg": "", "bg": "#222222"},
+    "trailingWhitespace": {"fg": "", "bg": "#331111"},
+    "find_match": {"fg": "white", "bg": "#444444"}
+}
+
+# default regex string map (patterns as strings; flags handled below)
+_DEFAULT_REGEXES = {
+    "KEYWORDS": r'\b(' + r'|'.join(map(re.escape, KEYWORDS)) + r')\b',
+    "BUILTINS": r'\b(' + r'|'.join(map(re.escape, BUILTINS)) + r')\b',
+    "STRING_RE": r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|' + r"'[^'\n]*')",
+    "COMMENT_RE": r'#[^\n]*',
+    "NUMBER_RE": r'\b(?:0b[01_]+|0o[0-7_]+|0x[0-9A-Fa-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)(?:[jJ])?\b',
+    "DECORATOR_RE": r'(?m)^\s*@([A-Za-z_]\w*)',
+    "CLASS_RE": r'\bclass\s+([A-Za-z_]\w*)',
+    "VAR_ASSIGN_RE": r'(?m)^[ \t]*([A-Za-z_]\w*)\s*=',
+    "CONSTANT_RE": r'(?m)^[ \t]*([A-Z][_A-Z0-9]+)\s*=',
+    "ATTRIBUTE_RE": r'\.([A-Za-z_]\w*)',
+    "TODO_RE": r'#.*\b(TODO|FIXME|NOTE)\b',
+    "SELFS_RE": r'\b(?:[a-z])(?:[A-Z]?[a-z])*(?:[A-Z][a-z]*)|\b(self|root|after)\b',
+    "VAR_ANNOT_RE": r'(?m)^[ \t]*([A-Za-z_]\w*)\s*:\s*([^=\n]+)(?:=.*)?$',
+    "FSTRING_RE": r"(?:[fF][rRuU]?|[rR][fF]?)(\"\"\"[\s\S]*?\"\"\"|'''[\s\S]*?'''|\"[^\n\"]*\"|'[^\\n']*')",
+    "DUNDER_RE": r'\b__\w+__\b',
+    "CLASS_BASES_RE": r'(?m)^[ \t]*class\s+[A-Za-z_]\w*\s*\(([^)]*)\)'
+}
+
+def load_syntax_config():
+    """Load tag colors and regex overrides from config and apply them at runtime."""
+    global KEYWORDS, KEYWORD_RE, BUILTINS, BUILTIN_RE
+    global STRING_RE, COMMENT_RE, NUMBER_RE, DECORATOR_RE, CLASS_RE, VAR_ASSIGN_RE, CONSTANT_RE
+    global ATTRIBUTE_RE, TODO_RE, SELFS_RE, VAR_ANNOT_RE, FSTRING_RE, DUNDER_RE, CLASS_BASES_RE
+
+    try:
+        if not config.has_section('Syntax'):
+            return
+
+        # helper: validate a color string using tkinter (root.winfo_rgb raises on invalid)
+        def _valid_color(c):
+            if not c:
+                return False
+            try:
+                root.winfo_rgb(c)
+                return True
+            except Exception:
+                return False
+
+        # Apply tag colors (validate config values and defaults before applying)
+        for tag, defaults in _DEFAULT_TAG_COLORS.items():
+            fg_cfg = config.get('Syntax', f'tag.{tag}.fg', fallback=defaults.get('fg', '')).strip()
+            bg_cfg = config.get('Syntax', f'tag.{tag}.bg', fallback=defaults.get('bg', '')).strip()
+
+            kwargs = {}
+            if fg_cfg and _valid_color(fg_cfg):
+                kwargs['foreground'] = fg_cfg
+            if bg_cfg and _valid_color(bg_cfg):
+                kwargs['background'] = bg_cfg
+
+            # If config contained invalid colors, try to fall back to validated defaults
+            if not kwargs:
+                # attempt to use validated defaults if present
+                df = defaults.get('fg', '').strip()
+                db = defaults.get('bg', '').strip()
+                if df and _valid_color(df):
+                    kwargs['foreground'] = df
+                if db and _valid_color(db):
+                    kwargs['background'] = db
+
+            if kwargs:
+                try:
+                    textArea.tag_config(tag, **kwargs)
+                except Exception:
+                    pass
+
+        # Regexes and keyword lists
+        # KEYWORDS and BUILTINS stored as comma-separated lists for ease of editing
+        kw_csv = config.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS))
+        bk_csv = config.get('Syntax', 'builtins.csv', fallback=','.join(BUILTINS))
+        try:
+            KEYWORDS = [x.strip() for x in kw_csv.split(',') if x.strip()]
+            KEYWORD_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, KEYWORDS)) + r')\b') if KEYWORDS else re.compile(r'\b\b')
+        except Exception:
+            pass
+        try:
+            BUILTINS = [x.strip() for x in bk_csv.split(',') if x.strip()]
+            BUILTIN_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, BUILTINS)) + r')\b') if BUILTINS else re.compile(r'\b\b')
+        except Exception:
+            pass
+
+        # Generic regex patterns (store raw pattern strings)
+        for key, default_pattern in _DEFAULT_REGEXES.items():
+            cfg_key = f'regex.{key}'
+            pat = config.get('Syntax', cfg_key, fallback=default_pattern)
+            if not pat:
+                continue
+            try:
+                # flags: STRING_RE and FSTRING_RE need DOTALL; DECORATOR/VAR/CLASS use multiline anchors already encoded in pattern
+                if key in ('STRING_RE', 'FSTRING_RE'):
+                    compiled = re.compile(pat, re.DOTALL)
+                else:
+                    compiled = re.compile(pat)
+                # assign to appropriate global variable name(s)
+                if key == 'STRING_RE':
+                    STRING_RE = compiled
+                elif key == 'COMMENT_RE':
+                    COMMENT_RE = compiled
+                elif key == 'NUMBER_RE':
+                    NUMBER_RE = compiled
+                elif key == 'DECORATOR_RE':
+                    DECORATOR_RE = compiled
+                elif key == 'CLASS_RE':
+                    CLASS_RE = compiled
+                elif key == 'VAR_ASSIGN_RE':
+                    VAR_ASSIGN_RE = compiled
+                elif key == 'CONSTANT_RE':
+                    CONSTANT_RE = compiled
+                elif key == 'ATTRIBUTE_RE':
+                    ATTRIBUTE_RE = compiled
+                elif key == 'TODO_RE':
+                    TODO_RE = compiled
+                elif key == 'SELFS_RE':
+                    SELFS_RE = compiled
+                elif key == 'VAR_ANNOT_RE':
+                    VAR_ANNOT_RE = compiled
+                elif key == 'FSTRING_RE':
+                    FSTRING_RE = compiled
+                elif key == 'DUNDER_RE':
+                    DUNDER_RE = compiled
+                elif key == 'CLASS_BASES_RE':
+                    CLASS_BASES_RE = compiled
+                # KEYWORDS/BUILTINS handled above
+            except Exception:
+                # ignore bad patterns
+                pass
+
+        # After reloading syntax, refresh highlighting
+        try:
+            if updateSyntaxHighlighting.get():
+                highlightPythonInit()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def setting_syntax_modal():
+    """Wrapper for backward compatibility and toolbar/button binding."""
+
+    try:
+        load_syntax_config()
+    except Exception:
+        pass
+    open_syntax_editor()
+
+
+def is_valid_color(s):
+    """Return True if tkinter accepts the color string `s` (non-empty)."""
+    if not s:
+        return False
+    try:
+        # root exists at module scope; winfo_rgb raises on invalid color names/hex
+        root.winfo_rgb(s)
+        return True
+    except Exception:
+        return False
+
+def safe_askcolor(initial_str=None, **kwargs):
+    """Call colorchooser.askcolor but avoid passing empty/invalid initialcolor to Tk."""
+    init = (initial_str or '').strip()
+    if not init or not is_valid_color(init):
+        init = None
+    return colorchooser.askcolor(initialcolor=init, **kwargs)
+
+
+def open_syntax_editor():
+    """Modal window to edit tag colors and regex/keyword lists; writes to config and reloads."""
+    dlg = Toplevel(root)
+    dlg.transient(root)
+    dlg.grab_set()
+    dlg.title("Edit Syntax Highlighting")
+    dlg.resizable(False, False)
+
+    container = ttk.Frame(dlg, padding=10)
+    container.grid(row=0, column=0, sticky='nsew')
+    container.columnconfigure(0, weight=1)
+    container.columnconfigure(1, weight=1)
+
+    # Tabs for Tags and Regex/Lists
+    nb = ttk.Notebook(container)
+    nb.grid(row=0, column=0, columnspan=2, sticky='nsew')
+
+    # Tags tab
+    tab_tags = ttk.Frame(nb, padding=8)
+    nb.add(tab_tags, text='Tags')
+
+    row = 0
+    swatches = {}
+    inputs_fg = {}
+    inputs_bg = {}
+    for tag, defaults in _DEFAULT_TAG_COLORS.items():
+        ttk.Label(tab_tags, text=tag).grid(row=row, column=0, sticky='w', padx=(0,8), pady=4)
+
+        # FG entry + chooser
+        ent_fg = ttk.Entry(tab_tags, width=18)
+        ent_fg.grid(row=row, column=1, sticky='w', pady=4)
+        ent_val_fg = config.get('Syntax', f'tag.{tag}.fg', fallback=defaults.get('fg', ''))
+        ent_fg.insert(0, ent_val_fg)
+        def make_choose_fg(e=ent_fg):
+            def choose_fg():
+                c = safe_askcolor(e.get())
+                hexc = get_hex_color(c)
+                if hexc:
+                    e.delete(0, END)
+                    e.insert(0, hexc)
+                    # don't change swatch bg for fg chooser; swatch reflects background color
+            return choose_fg
+        ttk.Button(tab_tags, text='Choose FG...', command=make_choose_fg()).grid(row=row, column=2, padx=6)
+
+        # BG entry + chooser
+        ent_bg = ttk.Entry(tab_tags, width=18)
+        ent_bg.grid(row=row, column=3, sticky='w', pady=4)
+        ent_val_bg = config.get('Syntax', f'tag.{tag}.bg', fallback=defaults.get('bg', ''))
+        ent_bg.insert(0, ent_val_bg)
+        def make_choose_bg(e=ent_bg, s_tag=tag):
+            def choose_bg():
+                c = safe_askcolor(e.get())
+                hexc = get_hex_color(c)
+                if hexc:
+                   e.delete(0, END)
+                   e.insert(0, hexc)
+                   sw = swatches.get(s_tag)
+                   if sw and is_valid_color(hexc):
+                        sw.config(bg=hexc)
+            return choose_bg
+        ttk.Button(tab_tags, text='Choose BG...', command=make_choose_bg()).grid(row=row, column=4, padx=6)
+
+        # swatch shows background (preferred), fall back to fg or leave default if invalid
+        sw = Label(tab_tags, width=3, relief='sunken')
+        sw_color = ent_val_bg or defaults.get('bg') or ent_val_fg or defaults.get('fg', '')
+        if is_valid_color(sw_color):
+            sw.config(bg=sw_color)
+        sw.grid(row=row, column=5, padx=(8,0))
+
+        swatches[tag] = sw
+        inputs_fg[tag] = ent_fg
+        inputs_bg[tag] = ent_bg
+        row += 1
+
+    # Regex / lists tab
+    tab_regex = ttk.Frame(nb, padding=8)
+    nb.add(tab_regex, text='Regex & Lists')
+
+    r = 0
+    # Keywords (CSV)
+    ttk.Label(tab_regex, text="Keywords (comma-separated)").grid(row=r, column=0, sticky='w', pady=4)
+    kw_ent = ttk.Entry(tab_regex, width=60)
+    kw_ent.grid(row=r, column=1, pady=4)
+    kw_ent.insert(0, config.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS)))
+    r += 1
+    # Builtins
+    ttk.Label(tab_regex, text="Builtins (comma-separated)").grid(row=r, column=0, sticky='w', pady=4)
+    bk_ent = ttk.Entry(tab_regex, width=60)
+    bk_ent.grid(row=r, column=1, pady=4)
+    bk_ent.insert(0, config.get('Syntax', 'builtins.csv', fallback=','.join(BUILTINS)))
+    r += 1
+
+    # Generic regexes: show a few common ones in multi-line entries
+    regex_entries = {}
+    for key in ('STRING_RE', 'COMMENT_RE', 'NUMBER_RE', 'DECORATOR_RE', 'CLASS_RE', 'VAR_ASSIGN_RE', 'ATTRIBUTE_RE', 'TODO_RE'):
+        ttk.Label(tab_regex, text=key).grid(row=r, column=0, sticky='nw', pady=(6,0))
+        ent = Text(tab_regex, height=2, width=60)
+        ent.grid(row=r, column=1, pady=(6,0))
+        ent.insert('1.0', config.get('Syntax', f'regex.{key}', fallback=_DEFAULT_REGEXES.get(key, '')))
+        regex_entries[key] = ent
+        r += 1
+
+    # Buttons
+    btn_frame = ttk.Frame(container)
+    btn_frame.grid(row=1, column=0, columnspan=2, pady=(8,0), sticky='ew')
+    btn_frame.columnconfigure(0, weight=1)
+
+    def do_save():
+        if not config.has_section('Syntax'):
+            config.add_section('Syntax')
+        # tags: save both fg and bg
+        for tag in inputs_fg.keys():
+            fg_val = inputs_fg[tag].get().strip()
+            bg_val = inputs_bg[tag].get().strip()
+            if fg_val:
+                config.set('Syntax', f'tag.{tag}.fg', fg_val)
+            else:
+                try:
+                    config.remove_option('Syntax', f'tag.{tag}.fg')
+                except Exception:
+                    pass
+            if bg_val:
+                config.set('Syntax', f'tag.{tag}.bg', bg_val)
+            else:
+                try:
+                    config.remove_option('Syntax', f'tag.{tag}.bg')
+                except Exception:
+                    pass
+        # lists
+        config.set('Syntax', 'keywords.csv', kw_ent.get().strip())
+        config.set('Syntax', 'builtins.csv', bk_ent.get().strip())
+        # regexes
+        for key, ent in regex_entries.items():
+            txt = ent.get('1.0', 'end-1c').strip()
+            if txt:
+                config.set('Syntax', f'regex.{key}', txt)
+            else:
+                try:
+                    config.remove_option('Syntax', f'regex.{key}')
+                except Exception:
+                    pass
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+        load_syntax_config()
+        dlg.destroy()
+
+    def do_reset():
+        # clear Syntax section so defaults are used
+        try:
+            if config.has_section('Syntax'):
+                config.remove_section('Syntax')
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+        # update UI to defaults (both fg and bg)
+        for tag, defaults in _DEFAULT_TAG_COLORS.items():
+            inputs_fg[tag].delete(0, END)
+            if defaults.get('fg'):
+                inputs_fg[tag].insert(0, defaults.get('fg'))
+            inputs_bg[tag].delete(0, END)
+            if defaults.get('bg'):
+                inputs_bg[tag].insert(0, defaults.get('bg'))
+            # swatch: prefer default bg then fg; only apply if valid
+            sw_color = defaults.get('bg') or defaults.get('fg') or ''
+            if is_valid_color(sw_color):
+                try:
+                    swatches[tag].config(bg=sw_color)
+                except Exception:
+                    pass
+            else:
+                # clear any explicit bg if invalid (let system default show)
+                try:
+                    swatches[tag].config(bg=tab_tags.cget('background'))
+                except Exception:
+                    pass
+        kw_ent.delete(0, END)
+        kw_ent.insert(0, ','.join(KEYWORDS))
+        bk_ent.delete(0, END)
+        bk_ent.insert(0, ','.join(BUILTINS))
+        for key, ent in regex_entries.items():
+            ent.delete('1.0', 'end')
+            ent.insert('1.0', _DEFAULT_REGEXES.get(key, ''))
+
+    ttk.Button(btn_frame, text='Save', command=do_save).grid(row=0, column=1, padx=6)
+    ttk.Button(btn_frame, text='Reset to defaults', command=do_reset).grid(row=0, column=2, padx=6)
+    ttk.Button(btn_frame, text='Close', command=dlg.destroy).grid(row=0, column=3, padx=6)
+
+    center_window(dlg)
 
 # treat matched group(1) as variable name (tag as "variable" or "annotation")
 
@@ -2071,6 +2458,8 @@ buttonAI.pack(side=LEFT, padx=2, pady=2)
 
 formatButton5 = Button(toolBar, text='Settings', command=lambda: setting_modal())
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
+formatButton6 = Button(toolBar, text='Edit Syntax', command=lambda: setting_syntax_modal())
+formatButton6.pack(side=RIGHT, padx=2, pady=2)
 
 # create refresh button on status bar (lower-right)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
@@ -2165,7 +2554,7 @@ def create_config_window():
     sw_cursor.grid(row=4, column=2, padx=(8,0))
 
     def choose_font_color():
-        c = colorchooser.askcolor(title="Font Color", initialcolor=fontColorChoice.get())
+        c = safe_askcolor(fontColorChoice.get(), title="Font Color")
         hexc = get_hex_color(c)
         if hexc:
             fontColorChoice.delete(0, END)
@@ -2173,7 +2562,7 @@ def create_config_window():
             sw_font.config(bg=hexc)
 
     def choose_background_color():
-        c = colorchooser.askcolor(title='Background Color', initialcolor=backgroundColorField.get())
+        c = safe_askcolor(backgroundColorField.get(), title='Background Color')
         hexc = get_hex_color(c)
         if hexc:
             backgroundColorField.delete(0, END)
@@ -2181,7 +2570,7 @@ def create_config_window():
             sw_bg.config(bg=hexc)
 
     def choose_cursor_color():
-        c = colorchooser.askcolor(title="Cursor Color", initialcolor=cursorColorField.get())
+        c = safe_askcolor(cursorColorField.get(), title="Cursor Color")
         hexc = get_hex_color(c)
         if hexc:
             cursorColorField.delete(0, END)
@@ -2320,6 +2709,11 @@ def nonlocal_values_reload():
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
 
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
+    # reapply any saved/edited syntax overrides
+    try:
+        load_syntax_config()
+    except Exception:
+        pass
 
 def setting_modal():
     create_config_window()
