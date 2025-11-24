@@ -936,6 +936,95 @@ def safe_askcolor(initial_str=None, **kwargs):
         init = None
     return colorchooser.askcolor(initialcolor=init, **kwargs)
 
+def export_syntax_preset(inputs_fg=None, inputs_bg=None, kw_ent=None, bk_ent=None, regex_entries=None, preset_name=None):
+    """
+    Export current syntax settings to a .ini file inside the `syntax/` folder.
+    If widget references are provided (from open_syntax_editor) their current values
+    are exported; otherwise current values from `config` are used.
+    """
+    try:
+        # Ensure syntax directory exists
+        syntax_dir = os.path.abspath('syntax')
+        os.makedirs(syntax_dir, exist_ok=True)
+
+        # Build a sensible default filename
+        default_name = preset_name or config.get('Syntax', 'preset_name', fallback='syntax_preset')
+        default_path = os.path.join(syntax_dir, f"{default_name}.ini")
+
+        # Ask user for destination file (modal)
+        file_path = filedialog.asksaveasfilename(
+            initialdir=syntax_dir,
+            initialfile=os.path.basename(default_path),
+            title="Export Syntax Preset",
+            defaultextension='.ini',
+            filetypes=(("INI files", "*.ini"), ("All files", "*.*"))
+        )
+        if not file_path:
+            return  # user cancelled
+
+        cp = configparser.ConfigParser()
+        cp.add_section('Syntax')
+
+        # store a human-readable name
+        cp.set('Syntax', 'name', os.path.splitext(os.path.basename(file_path))[0])
+
+        # tags: either from provided widgets or from current config
+        for tag in _DEFAULT_TAG_COLORS.keys():
+            if inputs_fg and tag in inputs_fg:
+                fg_val = inputs_fg[tag].get().strip()
+            else:
+                fg_val = config.get('Syntax', f'tag.{tag}.fg', fallback='').strip()
+            if inputs_bg and tag in inputs_bg:
+                bg_val = inputs_bg[tag].get().strip()
+            else:
+                bg_val = config.get('Syntax', f'tag.{tag}.bg', fallback='').strip()
+
+            if fg_val:
+                cp.set('Syntax', f'tag.{tag}.fg', fg_val)
+            if bg_val:
+                cp.set('Syntax', f'tag.{tag}.bg', bg_val)
+
+        # keywords & builtins
+        if kw_ent:
+            kw_txt = kw_ent.get().strip()
+        else:
+            kw_txt = config.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS))
+        if bk_ent:
+            bk_txt = bk_ent.get().strip()
+        else:
+            bk_txt = config.get('Syntax', 'builtins.csv', fallback=','.join(BUILTINS))
+
+        if kw_txt:
+            cp.set('Syntax', 'keywords.csv', kw_txt)
+        if bk_txt:
+            cp.set('Syntax', 'builtins.csv', bk_txt)
+
+        # regex entries: prefer passed widgets, otherwise current config/defaults
+        if regex_entries:
+            keys = list(regex_entries.keys())
+        else:
+            keys = list(_DEFAULT_REGEXES.keys())
+        for key in keys:
+            if regex_entries and key in regex_entries:
+                val = regex_entries[key].get('1.0', 'end-1c').strip()
+            else:
+                val = config.get('Syntax', f'regex.{key}', fallback=_DEFAULT_REGEXES.get(key, '')).strip()
+            if val:
+                cp.set('Syntax', f'regex.{key}', val)
+
+        # Write to file
+        with open(file_path, 'w', encoding='utf-8') as fh:
+            cp.write(fh)
+
+        try:
+            messagebox.showinfo("Export Complete", f"Syntax preset exported to:\n{file_path}")
+        except Exception:
+            pass
+    except Exception as e:
+        try:
+            messagebox.showerror("Export Failed", str(e))
+        except Exception:
+            pass
 
 def open_syntax_editor():
     """Modal window to edit tag colors and regex/keyword lists; writes to config and reloads."""
@@ -949,6 +1038,31 @@ def open_syntax_editor():
     container.grid(row=0, column=0, sticky='nsew')
     container.columnconfigure(0, weight=1)
     container.columnconfigure(1, weight=1)
+
+    # Helper to scan syntax presets directory for .ini files and return (path, display_name)
+    def scan_syntax_dir(dirname='syntax'):
+        out = []
+        try:
+            base = os.path.abspath(dirname)
+            if not os.path.isdir(base):
+                return out
+            for fn in sorted(os.listdir(base)):
+                if not fn.lower().endswith('.ini'):
+                    continue
+                p = os.path.join(base, fn)
+                try:
+                    cp = configparser.ConfigParser()
+                    cp.read(p)
+                    if cp.has_section('Syntax'):
+                        name = cp.get('Syntax', 'name', fallback=os.path.splitext(fn)[0])
+                    else:
+                        name = os.path.splitext(fn)[0]
+                except Exception:
+                    name = os.path.splitext(fn)[0]
+                out.append((p, name))
+        except Exception:
+            pass
+        return out
 
     # Tabs for Tags and Regex/Lists
     nb = ttk.Notebook(container)
@@ -991,10 +1105,10 @@ def open_syntax_editor():
                 c = safe_askcolor(e.get())
                 hexc = get_hex_color(c)
                 if hexc:
-                   e.delete(0, END)
-                   e.insert(0, hexc)
-                   sw = swatches.get(s_tag)
-                   if sw and is_valid_color(hexc):
+                    e.delete(0, END)
+                    e.insert(0, hexc)
+                    sw = swatches.get(s_tag)
+                    if sw and is_valid_color(hexc):
                         sw.config(bg=hexc)
             return choose_bg
         ttk.Button(tab_tags, text='Choose BG...', command=make_choose_bg()).grid(row=row, column=4, padx=6)
@@ -1039,9 +1153,152 @@ def open_syntax_editor():
         regex_entries[key] = ent
         r += 1
 
-    # Buttons
+    # Preset selector (dropdown) + preview/import actions
+    preset_frame = ttk.Frame(container)
+    preset_frame.grid(row=1, column=0, columnspan=2, pady=(8,6), sticky='ew')
+    preset_frame.columnconfigure(1, weight=1)
+
+    ttk.Label(preset_frame, text="Import preset:").grid(row=0, column=0, sticky='w')
+    preset_var = StringVar(value='')
+    preset_combo = ttk.Combobox(preset_frame, textvariable=preset_var, state='readonly', width=40)
+    preset_combo.grid(row=0, column=1, sticky='ew', padx=(6,4))
+
+    presets = scan_syntax_dir()
+    preset_paths = []
+    try:
+        preset_names = [name for (_, name) in presets]
+        preset_paths = [path for (path, _) in presets]
+        preset_combo['values'] = preset_names
+    except Exception:
+        preset_combo['values'] = []
+
+    def load_preset_into_dialog(path):
+        """Populate dialog fields from an INI at `path` (preview, no persistence)."""
+        try:
+            cp = configparser.ConfigParser()
+            cp.read(path)
+            # tags
+            for tag, _ in _DEFAULT_TAG_COLORS.items():
+                fg_val = cp.get('Syntax', f'tag.{tag}.fg', fallback='')
+                bg_val = cp.get('Syntax', f'tag.{tag}.bg', fallback='')
+                inputs_fg[tag].delete(0, END)
+                if fg_val:
+                    inputs_fg[tag].insert(0, fg_val)
+                inputs_bg[tag].delete(0, END)
+                if bg_val:
+                    inputs_bg[tag].insert(0, bg_val)
+                # update swatch
+                sw_color = bg_val or fg_val or ''
+                if is_valid_color(sw_color):
+                    try:
+                        swatches[tag].config(bg=sw_color)
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        swatches[tag].config(bg=tab_tags.cget('background'))
+                    except Exception:
+                        pass
+            # lists
+            kw_ent.delete(0, END)
+            kw_ent.insert(0, cp.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS)))
+            bk_ent.delete(0, END)
+            bk_ent.insert(0, cp.get('Syntax', 'builtins.csv', fallback=','.join(BUILTINS)))
+            # regexes
+            for key, ent in regex_entries.items():
+                ent.delete('1.0', 'end')
+                ent.insert('1.0', cp.get('Syntax', f'regex.{key}', fallback=_DEFAULT_REGEXES.get(key, '')))
+        except Exception:
+            pass
+
+    def on_preview():
+        sel = preset_combo.current()
+        if sel is None or sel < 0 or sel >= len(preset_paths):
+            return
+        load_preset_into_dialog(preset_paths[sel])
+
+    def on_import():
+        """Copy chosen preset values into main config, persist, and apply."""
+        sel = preset_combo.current()
+        if sel is None or sel < 0 or sel >= len(preset_paths):
+            return
+        path = preset_paths[sel]
+        try:
+            cp = configparser.ConfigParser()
+            cp.read(path)
+            if not config.has_section('Syntax'):
+                config.add_section('Syntax')
+            # tags
+            for tag, _ in _DEFAULT_TAG_COLORS.items():
+                fg_val = cp.get('Syntax', f'tag.{tag}.fg', fallback='').strip()
+                bg_val = cp.get('Syntax', f'tag.{tag}.bg', fallback='').strip()
+                if fg_val:
+                    config.set('Syntax', f'tag.{tag}.fg', fg_val)
+                else:
+                    try:
+                        config.remove_option('Syntax', f'tag.{tag}.fg')
+                    except Exception:
+                        pass
+                if bg_val:
+                    config.set('Syntax', f'tag.{tag}.bg', bg_val)
+                else:
+                    try:
+                        config.remove_option('Syntax', f'tag.{tag}.bg')
+                    except Exception:
+                        pass
+            # lists
+            kw = cp.get('Syntax', 'keywords.csv', fallback='').strip()
+            bk = cp.get('Syntax', 'builtins.csv', fallback='').strip()
+            if kw:
+                config.set('Syntax', 'keywords.csv', kw)
+            else:
+                try:
+                    config.remove_option('Syntax', 'keywords.csv')
+                except Exception:
+                    pass
+            if bk:
+                config.set('Syntax', 'builtins.csv', bk)
+            else:
+                try:
+                    config.remove_option('Syntax', 'builtins.csv')
+                except Exception:
+                    pass
+            # regexes
+            for key in regex_entries.keys():
+                txt = cp.get('Syntax', f'regex.{key}', fallback='').strip()
+                if txt:
+                    config.set('Syntax', f'regex.{key}', txt)
+                else:
+                    try:
+                        config.remove_option('Syntax', f'regex.{key}')
+                    except Exception:
+                        pass
+            # optional: copy a human-readable preset name into config
+            try:
+                preset_name = cp.get('Syntax', 'name', fallback='')
+                if preset_name:
+                    config.set('Syntax', 'preset_name', preset_name)
+            except Exception:
+                pass
+            # persist
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+            # apply and close
+            load_syntax_config()
+            dlg.destroy()
+        except Exception:
+            pass
+
+    btn_preview = ttk.Button(preset_frame, text='Preview', command=on_preview)
+    btn_preview.grid(row=0, column=2, padx=(4,2))
+    btn_import = ttk.Button(preset_frame, text='Import', command=on_import)
+    btn_import.grid(row=0, column=3, padx=(2,0))
+    btn_export = ttk.Button(preset_frame, text='Export Preset', command=lambda: export_syntax_preset(inputs_fg, inputs_bg, kw_ent, bk_ent, regex_entries))
+    btn_export.grid(row=0, column=4, padx=6)
+
+    # Buttons (Save / Reset / Close)
     btn_frame = ttk.Frame(container)
-    btn_frame.grid(row=1, column=0, columnspan=2, pady=(8,0), sticky='ew')
+    btn_frame.grid(row=2, column=0, columnspan=2, pady=(8,0), sticky='ew')
     btn_frame.columnconfigure(0, weight=1)
 
     def do_save():
@@ -1129,8 +1386,6 @@ def open_syntax_editor():
     ttk.Button(btn_frame, text='Close', command=dlg.destroy).grid(row=0, column=3, padx=6)
 
     center_window(dlg)
-
-# treat matched group(1) as variable name (tag as "variable" or "annotation")
 
 # persisted symbol buffers (vars + defs) — load/save from config
 def _load_symbol_buffers():
