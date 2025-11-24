@@ -1582,6 +1582,7 @@ def safe_highlight_event(event=None):
     except Exception:
         pass
 
+   
 def _extract_header_and_meta(raw):
     """
     If raw begins with the SIMPLEEDIT header return (content, meta) where content
