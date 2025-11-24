@@ -92,30 +92,32 @@ def open_recent_file(path: str):
         with open(path, 'r', errors='replace', encoding='utf-8') as fh:
             raw = fh.read()
 
-        # First try SIMPLEEDIT metadata (preferred)
-        content, meta = _extract_header_and_meta(raw)
-        if meta:
-            textArea.delete('1.0', 'end')
-            textArea.insert('1.0', content)
-            statusBar['text'] = f"'{path}' opened successfully!"
-            root.fileName = path
-            try:
-                if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
-                    Thread(target=lambda: _start_model_load(start_autocomplete=False), daemon=True).start()
-            except Exception:
-                pass
-
-            add_recent_file(path)
-            if meta:
-                root.after(0, lambda: _apply_formatting_from_meta(meta))
-
-            if updateSyntaxHighlighting.get():
-                root.after(0, highlightPythonInit)
-            return
-
         # No SIMPLEEDIT meta — if file is .md/.html attempt HTML-aware parsing to reconstruct tags
         ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
         if ext in ('md', 'html', 'htm'):
+            # optional autodetect -> apply a matching syntax preset before parsing if enabled
+            try:
+                if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                    preset_path = detect_syntax_preset_from_content(raw)
+                    if preset_path:
+                        applied = apply_syntax_preset(preset_path)
+                        if applied:
+                            statusBar['text'] = "Applied syntax preset from autodetect."
+            except Exception:
+                pass
+
+            # if user requested "open as source", skip HTML/MD parsing and load raw content
+            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', raw)
+                statusBar['text'] = f"'{path}' opened (raw source)!"
+                root.fileName = path
+                add_recent_file(path)
+                if updateSyntaxHighlighting.get():
+                    root.after(0, highlightPythonInit)
+                refresh_recent_menu()
+                return
+
             plain, tags_meta = _parse_html_and_apply(raw)
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', plain)
@@ -790,6 +792,99 @@ _DEFAULT_REGEXES = {
     "CLASS_BASES_RE": r'(?m)^[ \t]*class\s+[A-Za-z_]\w*\s*\(([^)]*)\)'
 }
 
+def scan_syntax_presets(dirname='syntax'):
+    """Return list of (path, name, filename_lower) for .ini presets in `dirname`."""
+    out = []
+    try:
+        base = os.path.abspath(dirname)
+        if not os.path.isdir(base):
+            return out
+        for fn in sorted(os.listdir(base)):
+            if not fn.lower().endswith('.ini'):
+                continue
+            p = os.path.join(base, fn)
+            try:
+                cp = configparser.ConfigParser()
+                cp.read(p)
+                name = cp.get('Syntax', 'name', fallback=os.path.splitext(fn)[0])
+            except Exception:
+                name = os.path.splitext(fn)[0]
+            out.append((p, name, fn.lower()))
+    except Exception:
+        pass
+    return out
+
+
+def detect_syntax_preset_from_content(raw):
+    """Return preset path if a matching preset looks appropriate for `raw`, otherwise None.
+
+    Currently supports simple HTML detection (<!doctype html>, <html ...>, <head>, common indicators).
+    Matching looks for 'html' in preset filename or preset INI 'name'. Add more rules as needed.
+    """
+    try:
+        if not raw or not isinstance(raw, str):
+            return None
+
+        # quick heuristics
+        if re.search(r'(?i)<!doctype\s+html\b', raw) or re.search(r'(?i)<html\b', raw) or re.search(r'(?i)<head\b', raw) or re.search(r'(?i)<body\b', raw):
+            presets = scan_syntax_presets()
+            # prefer presets whose name or filename contains 'html'
+            for path, name, fname in presets:
+                if 'html' in name.lower() or 'html' in fname:
+                    return path
+            # fallback: return first preset if any
+            if presets:
+                return presets[0][0]
+        # future: add more file-type heuristics here (xml, json, css, etc.)
+    except Exception:
+        pass
+    return None
+
+
+def apply_syntax_preset(path):
+    """Apply Syntax section values from a preset INI into main `config` and persist + reload."""
+    try:
+        if not path or not os.path.isfile(path):
+            return False
+        cp = configparser.ConfigParser()
+        cp.read(path)
+        if not cp.has_section('Syntax'):
+            return False
+
+        if not config.has_section('Syntax'):
+            config.add_section('Syntax')
+
+        # copy all options prefixed for Syntax from the preset into the main config
+        for opt, val in cp.items('Syntax'):
+            # copy everything under Syntax (including name, tag.*, regex.* etc.)
+            try:
+                if val is None:
+                    # if empty, remove option if present
+                    try:
+                        config.remove_option('Syntax', opt)
+                    except Exception:
+                        pass
+                else:
+                    config.set('Syntax', opt, val)
+            except Exception:
+                pass
+
+        # persist and apply
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+
+        # reload runtime syntax
+        try:
+            load_syntax_config()
+            return True
+        except Exception:
+            return False
+    except Exception:
+        return False
+
 def load_syntax_config():
     """Load tag colors and regex overrides from config and apply them at runtime."""
     global KEYWORDS, KEYWORD_RE, BUILTINS, BUILTIN_RE
@@ -1451,6 +1546,41 @@ def _apply_formatting_from_meta(meta):
     except Exception:
         pass
 
+def safe_highlight_event(event=None):
+    """
+    Centralized event handler used by input/scroll/click bindings.
+
+    - Runs the local syntax highlighter only when `updateSyntaxHighlighting` is enabled.
+    - Always performs lightweight UI updates (current-line highlight, line numbers,
+      status bar and trailing-whitespace) so the editor remains responsive.
+    """
+    try:
+        # only run the (potentially expensive) syntax pass when enabled
+        if updateSyntaxHighlighting.get():
+            try:
+                highlight_python_helper(event)
+            except Exception:
+                pass
+
+        # lightweight UI updates always run
+        try:
+            highlight_current_line()
+        except Exception:
+            pass
+        try:
+            redraw_line_numbers()
+        except Exception:
+            pass
+        try:
+            update_status_bar()
+        except Exception:
+            pass
+        try:
+            show_trailing_whitespace()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def _extract_header_and_meta(raw):
     """
@@ -1913,6 +2043,29 @@ def open_file_threaded():
         # If no meta and file is .md or .html attempt HTML-aware parsing to reconstruct tags
         ext = fileName.lower().split('.')[-1]
         if ext in ('md', 'html', 'htm'):
+            # optional autodetect -> apply a matching syntax preset before parsing if enabled
+            try:
+                if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                    preset_path = detect_syntax_preset_from_content(raw)
+                    if preset_path:
+                        applied = apply_syntax_preset(preset_path)
+                        if applied:
+                            statusBar['text'] = "Applied syntax preset from autodetect."
+            except Exception:
+                pass
+
+            # respect "open as source" setting: show raw source if enabled
+            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', raw)
+                root.fileName = fileName
+                statusBar['text'] = f"'{fileName}' opened (raw source)!"
+                add_recent_file(fileName)
+                refresh_recent_menu()
+                if updateSyntaxHighlighting.get():
+                    root.after(0, highlightPythonInit)
+                return
+
             plain, tags_meta = _parse_html_and_apply(raw)
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', plain)
@@ -1943,6 +2096,30 @@ def open_file_threaded():
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
+
+def _on_status_syntax_toggle():
+    """Persist the syntax highlighting toggle immediately and apply change."""
+    try:
+        # persist change to config immediately
+        config.set("Section1", "syntaxHighlighting", str(bool(updateSyntaxHighlighting.get())))
+        with open(INI_PATH, 'w') as cfgf:
+            config.write(cfgf)
+    except Exception:
+        pass
+
+    try:
+        if updateSyntaxHighlighting.get():
+            # enable -> run a full initial highlight
+            highlightPythonInit()
+            statusBar['text'] = "Syntax highlighting enabled."
+        else:
+            # disable -> clear tags and update status
+            for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                      'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
+                textArea.tag_remove(t, "1.0", "end")
+            statusBar['text'] = "Syntax highlighting disabled."
+    except Exception:
+        pass
 
 def _collect_formatting_ranges():
     """Return dict mapping formatting tag -> list of (start_offset, end_offset)."""
@@ -2720,13 +2897,22 @@ formatButton6.pack(side=RIGHT, padx=2, pady=2)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
 refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
 
+syntaxToggleCheckbox = ttk.Checkbutton(
+    statusFrame,
+    text='Syntax',
+    variable=updateSyntaxHighlighting,
+    command=_on_status_syntax_toggle
+)
+# pack to the left of the refresh button (pack order: refresh first, then checkbox -> checkbox sits left)
+syntaxToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
+
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
-textArea.bind('<Return>', lambda e: (smart_newline, highlight_python_helper(e)))
-textArea.bind('<KeyRelease>', lambda e: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
-textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (highlight_python_helper(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-textArea.bind('<MouseWheel>', lambda e: (highlight_python_helper(e), redraw_line_numbers(), show_trailing_whitespace()))
+textArea.bind('<Return>', lambda e: (smart_newline, safe_highlight_event(e)))
+textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
+textArea.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: save_file())
 
@@ -2761,35 +2947,41 @@ def create_config_window():
 
     undoCheckVar = IntVar(value=config.getboolean("Section1", "undoSetting"))
     undoCheck = ttk.Checkbutton(container, text="Enable undo", variable=undoCheckVar)
-    undoCheck.grid(row=5, column=1, sticky='w', pady=6)
+    undoCheck.grid(row=5, column=0, sticky='w', pady=6)
 
     syntaxCheckVar = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
     syntaxCheck = ttk.Checkbutton(container, text="Enable syntax highlighting", variable=syntaxCheckVar)
     syntaxCheck.grid(row=5, column=1, sticky='w', pady=6)
 
-    aiMaxContextField = mk_row("Max AI Context", 6, config.get("Section1", "aiMaxContext"))
-    temperatureField = mk_row("AI Temperature", 7, config.get("Section1", "temperature"))
-    top_kField = mk_row("AI top_k", 8, config.get("Section1", "top_k"))
-    seedField = mk_row("AI seed", 9, config.get("Section1", "seed"))
+    # New: open HTML/MD as source (do not parse) — still parse SIMPLEEDIT headers
+    openAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
+    ttk.Checkbutton(container, text="Open HTML/MD as source (do not parse)", variable=openAsSourceVar).grid(row=6, column=1, sticky='e', pady=6, padx=(0,8))
+
+    aiMaxContextField = mk_row("Max AI Context", 7, config.get("Section1", "aiMaxContext"))
+    temperatureField = mk_row("AI Temperature", 8, config.get("Section1", "temperature"))
+    top_kField = mk_row("AI top_k", 9, config.get("Section1", "top_k"))
+    seedField = mk_row("AI seed", 10, config.get("Section1", "seed"))
 
     loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
     loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
     saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
-    ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=12, column=1, sticky='w', pady=6)
-    ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=10, column=1, sticky='w', pady=6)
-    ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=11, column=1, sticky='w', pady=6)
-
+    ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=11, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=12, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=13, column=1, sticky='w', pady=6)
+    # near other checkboxes in create_config_window()
+    autoDetectVar = IntVar(value=config.getboolean("Section1", "autoDetectSyntax", fallback=True))
+    ttk.Checkbutton(container, text="Autodetect syntax from file content", variable=autoDetectVar).grid(row=14, column=1, sticky='w', pady=6)
     # CSS export controls
     css_mode = config.get("Section1", "exportCssMode", fallback="inline-element")
     cssModeVar = StringVar(value=css_mode)
-    ttk.Label(container, text="Export CSS mode").grid(row=13, column=0, sticky='e', padx=(0,8), pady=6)
+    ttk.Label(container, text="Export CSS mode").grid(row=15, column=0, sticky='e', padx=(0,8), pady=6)
     css_frame = ttk.Frame(container)
-    css_frame.grid(row=13, column=1, sticky='w')
+    css_frame.grid(row=15, column=1, sticky='w')
     ttk.Radiobutton(css_frame, text="Inline styles (per-element)", variable=cssModeVar, value='inline-element').pack(anchor='w')
     ttk.Radiobutton(css_frame, text="Inline CSS block (<style>)", variable=cssModeVar, value='inline-block').pack(anchor='w')
     ttk.Radiobutton(css_frame, text="External CSS file", variable=cssModeVar, value='external').pack(anchor='w')
 
-    cssPathField = mk_row("External CSS path", 14, config.get("Section1", "exportCssPath", fallback=""))
+    cssPathField = mk_row("External CSS path", 17, config.get("Section1", "exportCssPath", fallback=""))
     def choose_css_path():
         p = filedialog.asksaveasfilename(initialdir=os.path.expanduser("~"),
                                          title="Choose CSS file path",
@@ -2799,7 +2991,7 @@ def create_config_window():
             cssPathField.delete(0, END)
             cssPathField.insert(0, p)
 
-    ttk.Button(container, text="Browse CSS path...", command=choose_css_path).grid(row=14, column=2, padx=6)
+    ttk.Button(container, text="Browse CSS path...", command=choose_css_path).grid(row=17, column=2, padx=6)
 
     sw_font = Label(container, width=3, relief='sunken', bg=config.get("Section1", "fontColor"))
     sw_font.grid(row=2, column=2, padx=(8,0))
@@ -2807,6 +2999,18 @@ def create_config_window():
     sw_bg.grid(row=3, column=2, padx=(8,0))
     sw_cursor = Label(container, width=3, relief='sunken', bg=config.get("Section1", "cursorColor"))
     sw_cursor.grid(row=4, column=2, padx=(8,0))
+
+        # make the small color swatches clickable (left-click opens chooser)
+    try:
+        sw_font.config(cursor="hand2")
+        sw_bg.config(cursor="hand2")
+        sw_cursor.config(cursor="hand2")
+
+        sw_font.bind("<Button-1>", lambda e: choose_font_color())
+        sw_bg.bind("<Button-1>", lambda e: choose_background_color())
+        sw_cursor.bind("<Button-1>", lambda e: choose_cursor_color())
+    except Exception:
+        pass
 
     def choose_font_color():
         c = safe_askcolor(fontColorChoice.get(), title="Font Color")
@@ -2831,14 +3035,6 @@ def create_config_window():
             cursorColorField.delete(0, END)
             cursorColorField.insert(0, hexc)
             sw_cursor.config(bg=hexc)
-
-    btn_frame = ttk.Frame(container)
-    btn_frame.grid(row=10, column=0, columnspan=3, pady=(8,0), sticky='ew')
-    btn_frame.columnconfigure(0, weight=1)
-    ttk.Button(btn_frame, text='Choose Font Color', command=choose_font_color).grid(row=0, column=0, padx=4, sticky='w')
-    ttk.Button(btn_frame, text='Choose Background', command=choose_background_color).grid(row=0, column=1, padx=4, sticky='w')
-    ttk.Button(btn_frame, text='Choose Cursor Color', command=choose_cursor_color).grid(row=0, column=2, padx=4, sticky='w')
-
     action_frame = ttk.Frame(top, padding=(12,8))
     action_frame.grid(row=1, column=0, sticky='ew')
     action_frame.columnconfigure(0, weight=1)
@@ -2858,6 +3054,7 @@ def create_config_window():
         config.set("Section1", "top_k", top_kField.get())
         config.set("Section1", "seed", seedField.get())
 
+
         # persist new options
         config.set("Section1", "syntaxHighlighting", str(bool(syntaxCheckVar.get())))
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
@@ -2865,6 +3062,8 @@ def create_config_window():
         config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
         config.set("Section1", "exportCssMode", cssModeVar.get())
         config.set("Section1", "exportCssPath", cssPathField.get())
+        # persist new open-as-source option
+        config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
 
         try:
             with open(INI_PATH, 'w') as configfile:
@@ -2924,6 +3123,9 @@ def create_config_window():
             cssModeVar.set(config.get("Section1", "exportCssMode", fallback="inline-element"))
             cssPathField.delete(0, END)
             cssPathField.insert(0, config.get("Section1", "exportCssPath", fallback=""))
+            # refresh open-as-source checkbox from config
+            openAsSourceVar.set(config.getboolean("Section1", "openHtmlAsSource", fallback=False))
+            autoDetectVar.set(config.getboolean("Section1", "autoDetectSyntax", fallback=True))
         except Exception:
             pass
 
@@ -2944,7 +3146,7 @@ def create_config_window():
 
 
 def nonlocal_values_reload():
-    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath
+    global fontName, fontSize, fontColor, backgroundColor, undoSetting, cursorColor, aiMaxContext, temperature, top_k, seed, exportCssMode, exportCssPath, openHtmlAsSource
     fontName = config.get("Section1", "fontName")
     fontSize = int(config.get("Section1", "fontSize"))
     fontColor = config.get("Section1", "fontColor")
@@ -2962,6 +3164,9 @@ def nonlocal_values_reload():
     # load css export settings
     exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
+
+    # load open-as-source setting
+    openHtmlAsSource = config.getboolean("Section1", "openHtmlAsSource", fallback=False)
 
     textArea.config(font=(fontName, fontSize), bg=backgroundColor, fg=fontColor, insertbackground=cursorColor, undo=undoSetting)
     # reapply any saved/edited syntax overrides
@@ -2982,6 +3187,7 @@ stop_event = threading.Event()
 
 def ready_update():
     root.after(1000, lambda: statusBar.config(text="Ready"))
+
 
 
 def newFile():
