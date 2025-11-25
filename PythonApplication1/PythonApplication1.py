@@ -1030,7 +1030,7 @@ url_history = funcs.load_url_history(config)  # most-recent-first
 _url_history_max = 50
 # stack of opened locations for back behavior (push on open)
 url_back_stack = []
-
+brainless_mode_var = BooleanVar(value=False)
 def _is_likely_url(s: str) -> bool:
     try:
         if not s or not isinstance(s, str):
@@ -1050,33 +1050,42 @@ def _record_location_opened(loc: str, push_stack: bool = True):
     If push_stack is False do not push into back stack (used for programmatic restores).
     """
     try:
+        # Session-only override: when user enables Brainless Mode, do not persist or push anything.
+        if brainless_mode_var.get():
+            return
+
         if not loc:
             return
         # normalized string
         locs = str(loc)
-        # persisted history
+
+        # Persist and back-stack ONLY for URLs (do not mix files into URL history)
         try:
-            funcs.add_url_history(config, INI_PATH, locs, max_items=_url_history_max)
+            if _is_likely_url(locs):
+                try:
+                    funcs.add_url_history(config, INI_PATH, locs, max_items=_url_history_max)
+                except Exception:
+                    pass
+                # update in-memory list and UI menu (if exists)
+                try:
+                    global url_history
+                    url_history = funcs.load_url_history(config)
+                    update_url_history_menu()
+                except Exception:
+                    pass
+                # back-stack logic (only track URLs)
+                if push_stack:
+                    try:
+                        # avoid consecutive duplicates
+                        if not url_back_stack or url_back_stack[-1] != locs:
+                            url_back_stack.append(locs)
+                        # cap stack size
+                        if len(url_back_stack) > (_url_history_max * 2):
+                            url_back_stack[:] = url_back_stack[-(_url_history_max * 2):]
+                    except Exception:
+                        pass
         except Exception:
             pass
-        # update in-memory list and UI menu (if exists)
-        try:
-            global url_history
-            url_history = funcs.load_url_history(config)
-            update_url_history_menu()
-        except Exception:
-            pass
-        # back-stack logic
-        if push_stack:
-            try:
-                # avoid consecutive duplicates
-                if not url_back_stack or url_back_stack[-1] != locs:
-                    url_back_stack.append(locs)
-                # cap stack size
-                if len(url_back_stack) > (_url_history_max * 2):
-                    url_back_stack[:] = url_back_stack[-(_url_history_max * 2):]
-            except Exception:
-                pass
     except Exception:
         pass
 
@@ -2610,8 +2619,7 @@ def open_url_action():
                                 textArea.insert('1.0', plain)
                                 _apply_tag_configs_to_widget(textArea)
                             statusBar['text'] = f"Opened URL: {url2}"
-                            add_recent_file(url2)
-                            refresh_recent_menu()
+                            # Do NOT add URLs to recent files (recent list is for local files only)
                             if tags_meta and tags_meta.get('tags'):
                                 root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
                             if updateSyntaxHighlighting.get():
@@ -3660,7 +3668,8 @@ try:
     urlHistoryBtn.history_menu = Menu(urlHistoryBtn, tearoff=0)
     urlHistoryBtn.config(menu=urlHistoryBtn.history_menu)
     urlHistoryBtn.pack(side=LEFT, padx=(2,2), pady=2)
-
+    brainless_chk = ttk.Checkbutton(toolBar, text='Brainless Mode', variable=brainless_mode_var)
+    brainless_chk.pack(side=LEFT, padx=(6,2), pady=2)
     # URL entry + Open
     url_entry = Entry(toolBar, textvariable=url_var, width=40)
     url_entry.pack(side=LEFT, padx=(6,2), pady=2)
@@ -5161,8 +5170,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
                         textArea.insert('1.0', plain)
                         _apply_tag_configs_to_widget(textArea)
                     statusBar['text'] = f"Opened URL: {url2}"
-                    add_recent_file(url2)
-                    refresh_recent_menu()
+                    # Do NOT add URLs to recent files (recent list is for local files only)
                     if tags_meta and tags_meta.get('tags'):
                         root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
                     if updateSyntaxHighlighting.get():
@@ -5881,11 +5889,47 @@ def go_to_line():
         update_status_bar()
 
 def _open_maybe_url(path: str, open_in_new_tab: bool = True):
-    """Open `path` as a URL (http/https/file) or as a local file intelligently."""
+    """Open `path` as a URL (http/https/file) or as a local file intelligently.
+
+    If `path` is a relative URL and there is a current page (toolbar URL or current tab's fileName),
+    attempt to resolve it with urllib.parse.urljoin before opening.
+    """
     try:
         import urllib.parse as up
         parsed = up.urlsplit(path)
         scheme = parsed.scheme.lower() if parsed.scheme else ''
+
+        # If path looks like a relative URL (no scheme, not starting with www. or file:///),
+        # attempt to resolve against a sensible base (toolbar URL or current tab fileName if it is a URL).
+        try:
+            if not scheme and not path.lower().startswith('www.') and not path.lower().startswith('file:///'):
+                # find base URL from toolbar field or current tab
+                base = ''
+                try:
+                    if 'url_var' in globals():
+                        base = url_var.get().strip() or ''
+                except Exception:
+                    base = ''
+                if not base:
+                    try:
+                        sel = editorNotebook.select()
+                        if sel:
+                            frame = root.nametowidget(sel)
+                            base = getattr(frame, 'fileName', '') or ''
+                    except Exception:
+                        base = ''
+                # Only attempt to join when base appears to be a URL
+                if base and _is_likely_url(base):
+                    try:
+                        resolved = up.urljoin(base, path)
+                        fetch_and_open_url(resolved, open_in_new_tab=open_in_new_tab)
+                        return
+                    except Exception:
+                        # fall through to normal handling on failure
+                        pass
+        except Exception:
+            pass
+
         # common www. shorthand
         if not scheme and path.lower().startswith('www.'):
             fetch_and_open_url('http://' + path, open_in_new_tab=open_in_new_tab)
