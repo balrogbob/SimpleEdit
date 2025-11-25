@@ -340,6 +340,76 @@ class _SimpleHTMLToTagged(HTMLParser):
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
 
+def get_hex_color(color_tuple):
+    """Return a hex string from a colorchooser return value or similar input."""
+    if not color_tuple:
+        return ""
+    if isinstance(color_tuple, tuple) and len(color_tuple) >= 2:
+        # colorchooser returns ((r,g,b), '#rrggbb')
+        return color_tuple[1]
+    m = re.search(r'#\w+', str(color_tuple))
+    return m.group(0) if m else ""
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    """Return (r,g,b) for hex like '#rrggbb' or 'rrggbb'."""
+    try:
+        s = (h or '').strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return (0, 0, 0)
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        return (0, 0, 0)
+
+def _rgb_to_hex(r: int, g: int, b: int) -> str:
+    """Return '#rrggbb' from 0-255 RGB."""
+    try:
+        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+    except Exception:
+        return "#000000"
+
+def _sanitize_tag_name(s: str) -> str:
+    """Create a safe tag name from an arbitrary string (alnum + underscores only)."""
+    try:
+        return re.sub(r'[^0-9a-zA-Z_]', '_', s).strip('_')
+    except Exception:
+        return re.sub(r'\s+', '_', str(s))
+
+def _lighten_color(hexcol: str, factor: float = 0.15) -> str:
+    """Lighten hexcol by factor (0..1) toward white. Safe fallback if invalid."""
+    try:
+        r, g, b = _hex_to_rgb(hexcol or "#ffffff")
+        nr = int(r + (255 - r) * factor)
+        ng = int(g + (255 - g) * factor)
+        nb = int(b + (255 - b) * factor)
+        return _rgb_to_hex(nr, ng, nb)
+    except Exception:
+        return hexcol or "#ffffff"
+
+def _contrast_text_color(hexcolor: str) -> str:
+    """Return black or white depending on perceived luminance for good contrast."""
+    try:
+        if not hexcolor:
+            return '#000000'
+        s = hexcolor.strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return '#000000'
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        # perceived luminance (0..1)
+        lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        return '#000000' if lum > 0.56 else '#FFFFFF'
+    except Exception:
+        return '#000000'
+
 def _serialize_tags(tags_dict):
     """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""
     try:
@@ -742,6 +812,78 @@ _TAG_COLOR_MAP = {
 }
 # reverse map for parsing spans back to tag names (normalized to lower hex)
 _COLOR_TO_TAG = {v.lower(): k for k, v in _TAG_COLOR_MAP.items()}
+
+def wrap_segment_by_tags(seg_text: str, active_tags: set) -> str:
+    """Wrap a text segment according to active tag set into Markdown/HTML."""
+    # Determine boolean flags considering explicit combo tags and 'all'
+    has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
+    has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
+    has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
+    has_small = 'small' in active_tags
+    inner = seg_text
+    # Prefer Markdown bold+italic triple-star where supported
+    if has_bold and has_italic:
+        inner = f"***{inner}***"
+    elif has_bold:
+        inner = f"**{inner}**"
+    elif has_italic:
+        inner = f"*{inner}*"
+
+    if has_underline:
+        # Markdown doesn't have native underline; use HTML <u> for compatibility
+        inner = f"<u>{inner}</u>"
+
+    if has_small:
+        # wrap in <small> so exported HTML/MD keeps the visual reduction
+        inner = f"<small>{inner}</small>"
+    return inner
+
+def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8", bg_hex: str | None = None) -> str:
+    """Return a simple complementary hex color for `hexcol`.
+    If the computed complement equals `bg_hex` it is nudged slightly to avoid exact match.
+    Safe fallback on invalid input.
+    """
+    try:
+        if not hexcol:
+            return fallback
+        s = (hexcol or "").strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch * 2 for ch in s)
+        if len(s) != 6 or not all(c in "0123456789abcdefABCDEF" for c in s):
+            return fallback
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        # simple complement
+        cr = 255 - r
+        cg = 255 - g
+        cb = 255 - b
+        # optional nudge if equals provided background
+        try:
+            if bg_hex:
+                bg = (bg_hex or "").strip()
+                if bg.startswith('#'):
+                    bgc = bg[1:]
+                else:
+                    bgc = bg
+                if len(bgc) == 3:
+                    bgc = ''.join(ch * 2 for ch in bgc)
+                if len(bgc) == 6 and all(c in "0123456789abcdefABCDEF" for c in bgc):
+                    br = int(bgc[0:2], 16)
+                    bgg = int(bgc[2:4], 16)
+                    bb = int(bgc[4:6], 16)
+                    if (cr, cg, cb) == (br, bgg, bb):
+                        # small deterministic rotation to avoid exact match
+                        cr = max(0, min(255, cr - 16))
+                        cg = max(0, min(255, cg - 8))
+                        cb = max(0, min(255, cb - 4))
+        except Exception:
+            pass
+        return f"#{cr:02x}{cg:02x}{cb:02x}"
+    except Exception:
+        return fallback
 
 def save_as_markdown(textArea):
     """
