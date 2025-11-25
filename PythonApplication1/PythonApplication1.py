@@ -27,6 +27,7 @@ from threading import Thread
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from tkinter import ttk
+import tkinter.font as tkfont
 import shutil, sys, os
 
 
@@ -530,6 +531,7 @@ def on_ai_button_click():
 # -------------------------
 # Helper utilities
 # -------------------------
+# --- Font family & size dropdowns for presentational toolbar ---
 
 
 def get_hex_color(color_tuple):
@@ -542,6 +544,135 @@ def get_hex_color(color_tuple):
     m = re.search(r'#\w+', str(color_tuple))
     return m.group(0) if m else ""
 
+def _sanitize_tag_name(s: str) -> str:
+    """Create a safe tag name from family and size (alnum + underscores only)."""
+    try:
+        return re.sub(r'[^0-9a-zA-Z_]', '_', s).strip('_')
+    except Exception:
+        return re.sub(r'\s+', '_', str(s))
+
+def get_system_fonts():
+    """Return a sorted list of available system font family names (strings)."""
+    try:
+        families = list(tkfont.families())
+        families_sorted = sorted(set(families), key=lambda x: x.lower())
+        return families_sorted
+    except Exception:
+        return []
+
+def _record_selection_for_font(event=None):
+    """Record current selection (as normalized indices) so dropdown clicks don't clear it."""
+    global _last_font_selection
+    try:
+        _last_font_selection = None
+        if not textArea:
+            return
+        rng = textArea.tag_ranges('sel')
+        if rng and len(rng) >= 2:
+            _last_font_selection = (textArea.index(rng[0]), textArea.index(rng[1]))
+    except Exception:
+        _last_font_selection = None
+
+def _restore_selection_for_font():
+    """Restore previously recorded selection (if any)."""
+    try:
+        if not textArea:
+            return
+        sel = globals().get('_last_font_selection', None)
+        if not sel:
+            return
+        s, e = sel
+        try:
+            textArea.tag_remove('sel', '1.0', 'end')
+        except Exception:
+            pass
+        try:
+            textArea.tag_add('sel', s, e)
+            textArea.mark_set('insert', e)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def apply_tag_config_to_all(tag_name: str, kwargs: dict):
+    """Apply tag_config for tag_name to every Text widget in open tabs (best-effort)."""
+    try:
+        # apply to current widget first
+        try:
+            textArea.tag_config(tag_name, **kwargs)
+        except Exception:
+            pass
+        # apply to other open tabs
+        for tab_id in editorNotebook.tabs():
+            try:
+                frame = root.nametowidget(tab_id)
+                for child in frame.winfo_children():
+                    if isinstance(child, Text):
+                        try:
+                            child.tag_config(tag_name, **kwargs)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def apply_font_to_selection(family: str | None = None, size: int | None = None):
+    """Apply the chosen font family+size to the current selection (or entire buffer)."""
+    try:
+        fam = (family or font_family_var.get() or '').strip()
+        sz = size if size is not None else (font_size_var.get() or '')
+        if isinstance(sz, str):
+            try:
+                sz = int(sz)
+            except Exception:
+                sz = None
+        if not fam and not sz:
+            return
+
+        # build sanitized tag name like 'font_Arial_14'
+        label = f"{fam}_{sz}" if fam and sz else (fam or str(sz))
+        tag = f"font_{_sanitize_tag_name(label)}"
+
+        # create font tuple for tag_config
+        font_tuple = None
+        try:
+            if fam and sz:
+                font_tuple = (fam, int(sz))
+            elif fam:
+                font_tuple = (fam, fontSize)
+            elif sz:
+                font_tuple = (fontName, int(sz))
+        except Exception:
+            font_tuple = None
+
+        kwargs = {}
+        if font_tuple:
+            kwargs['font'] = font_tuple
+
+        # apply tag_config to all widgets so tag exists everywhere
+        if kwargs:
+            apply_tag_config_to_all(tag, kwargs)
+
+        # add/remove tag for selection
+        start, end = selection_or_all()
+        # remove identical tags in selection first (toggle behaviour)
+        try:
+            # if tag already fully present remove it
+            ranges = textArea.tag_ranges(tag)
+            if ranges:
+                # If the selection intersects existing ranges, remove for the selection
+                textArea.tag_remove(tag, start, end)
+            else:
+                textArea.tag_add(tag, start, end)
+        except Exception:
+            # fallback: just add
+            try:
+                textArea.tag_add(tag, start, end)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def selection_or_all():
     """Return a (start, end) range for the current selection or entire buffer."""
@@ -550,7 +681,21 @@ def selection_or_all():
         return ranges[0], ranges[1]
     return "1.0", "end-1c"
 
-
+def clear_font_from_selection():
+    """Remove any applied font_* tags from the selection (or whole buffer if nothing selected)."""
+    try:
+        start, end = selection_or_all()
+        # Remove all tags whose name starts with 'font_' that intersect the selection.
+        for tag in textArea.tag_names():
+            try:
+                if not tag.startswith('font_'):
+                    continue
+                # Remove tag in the selected region only (safe even if tag not present there)
+                textArea.tag_remove(tag, start, end)
+            except Exception:
+                pass
+    except Exception:
+        pass
 # -------------------------
 # Tkinter UI - create root and widgets
 # -------------------------
@@ -559,6 +704,8 @@ url_var = StringVar(value='')
 root.geometry("800x600")
 root.title('SimpleEdit')
 root.fileName = ""
+font_family_var = StringVar(value=config.get("Section1", "fontName", fallback=fontName))
+font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback=str(fontSize))))
 
 menuBar = Menu(root)
 root.config(menu=menuBar)
@@ -4490,6 +4637,64 @@ formatButton6.pack(side=RIGHT, padx=2, pady=2)
 presentToolBar = Frame(topBarContainer, bg=toolBar.cget('bg'))
 presentToolBar.pack(side=TOP, fill=X)
 editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
+
+# Font family menu (render each entry in its own font) + selection-safe behavior
+font_family_var = StringVar(value=config.get("Section1", "fontName", fallback=fontName))
+font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback=str(fontSize))))
+
+# Menubutton + Menu so we can set a font per menu entry
+font_menu_btn = Menubutton(presentToolBar, textvariable=font_family_var, relief=RAISED, direction='below')
+font_menu = Menu(font_menu_btn, tearoff=0)
+try:
+    fonts = get_system_fonts()
+    for fam in fonts:
+        try:
+            # show entry in its family (small preview size)
+            preview_font = tkfont.Font(family=fam, size=max(9, min(14, int(font_size_var.get()) if font_size_var.get().isdigit() else 11)))
+            font_menu.add_command(label=fam, font=preview_font, command=lambda f=fam: _on_font_menu_select(f))
+        except Exception:
+            # fallback: add without custom font
+            font_menu.add_command(label=fam, command=lambda f=fam: _on_font_menu_select(f))
+except Exception:
+    pass
+font_menu_btn.config(menu=font_menu)
+font_menu_btn.pack(side=LEFT, padx=(6,2), pady=2)
+
+# Clear-font button (removes any font_* tags from selection)
+btn_clear_font = Button(presentToolBar, text='Clear Font', command=clear_font_from_selection)
+btn_clear_font.pack(side=LEFT, padx=2, pady=2)
+
+# Common sizes (Combobox) — restore selection before applying size
+_common_sizes = ['8','9','10','11','12','13','14','16','18','20','22','24','28','32','36','48','72']
+font_size_cb = ttk.Combobox(presentToolBar, textvariable=font_size_var, values=_common_sizes, width=6, state='readonly')
+font_size_cb.pack(side=LEFT, padx=(2,6), pady=2)
+
+# Hooks to preserve selection when interacting with dropdowns
+font_menu_btn.bind('<Button-1>', _record_selection_for_font, add=True)
+font_size_cb.bind('<Button-1>', _record_selection_for_font, add=True)
+
+def _on_font_menu_select(family: str):
+    """Menu command handler — restore selection, apply family, restore focus."""
+    try:
+        _restore_selection_for_font()
+        font_family_var.set(family)
+        apply_font_to_selection(family=family, size=None)
+    finally:
+        try:
+            textArea.focus_set()
+        except Exception:
+            pass
+
+def _on_font_size_selected(event=None):
+    try:
+        _restore_selection_for_font()
+        apply_font_to_selection(family=None, size=int(font_size_var.get()))
+    except Exception:
+        pass
+
+# bind size selection (and initial readonly selection)
+font_size_cb.bind('<<ComboboxSelected>>', _on_font_size_selected)
+
 # Presentational/tag buttons (map to HTML-like tags)
 btn_strong = Button(presentToolBar, text='Strong', command=format_strong)
 btn_strong.pack(side=LEFT, padx=2, pady=2)
