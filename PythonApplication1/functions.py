@@ -150,40 +150,34 @@ def clear_recent_files(config, ini_path: str, on_update: Optional[Callable[[], N
 
 # --- HTML parser to extract plain text and tag ranges from simple HTML fragments ---
 class _SimpleHTMLToTagged(HTMLParser):
-    """Parses a fragment of HTML and returns plain text plus tag ranges for
-    simple tags: <b>/<strong>, <i>/<em>, <u>, <span style="color:...">,
-    legacy <font color="..."> and presentational <marquee>.
+    """Parses a fragment of HTML and returns plain text plus tag ranges and explicit link entries.
 
-    Nested tags are supported and ranges are produced in absolute character offsets.
-    For arbitrary color values this synthesizes per-color tag names in the form
-    'font_rrggbb' (hex without leading '#') so the UI can apply that color later.
+    get_result() -> (plain_text, meta)
+    meta is a dict: {'tags': {tag: [[s,e],...]}, 'links': [{'start':int,'end':int,'href':str,'title':str?}, ...]}
     """
     def __init__(self):
-        super().__init__()
+        super().__init__(convert_charrefs=True)
         self.out = []
         self.pos = 0
-        self.stack = []  # list of (internal_tag_name or None, start_pos)
+        # stack entries: ('tag', start) or ('hyperlink', start, href, title)
+        self.stack = []
         self.ranges = {}  # tag -> [[start,end], ...]
-        self._span_color_pending = None
+        self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
 
     def _normalize_color_to_hex(self, col: str) -> str | None:
         if not col:
             return None
         c = col.strip().lower()
-        # strip quotes
         c = re.sub(r"^['\"]|['\"]$", "", c)
-        # named map (small common set)
         NAMED = {'red': '#ff0000', 'black': '#000000', 'white': '#ffffff', 'blue': '#0000ff', 'green': '#008000', 'yellow': '#ffff00', 'orange': '#ffa500'}
         if c in NAMED:
             c = NAMED[c]
-        # expand short hex #rgb -> #rrggbb
         m = re.match(r'^#([0-9a-f]{3})$', c)
         if m:
             s = m.group(1)
             c = '#' + ''.join([ch*2 for ch in s])
-        # accept full hex
         if re.match(r'^#[0-9a-f]{6}$', c):
-            return c  # '#rrggbb'
+            return c
         return None
 
     def handle_starttag(self, tag, attrs):
@@ -192,37 +186,33 @@ class _SimpleHTMLToTagged(HTMLParser):
             attrd = dict(attrs or {})
 
             if tag in ('b', 'strong'):
-                self.stack.append(('bold', self.pos))
-                return
-
-            # presentational element: small -> reduce font size
+                self.stack.append(('bold', self.pos)); return
             if tag == 'small':
-                self.stack.append(('small', self.pos))
-                return
-
+                self.stack.append(('small', self.pos)); return
             if tag in ('i', 'em'):
-                self.stack.append(('italic', self.pos))
-                return
-
+                self.stack.append(('italic', self.pos)); return
             if tag == 'u':
-                self.stack.append(('underline', self.pos))
-                return
+                self.stack.append(('underline', self.pos)); return
 
-            # legacy <font color="..."> -> synthesize per-color tag
             if tag == 'font':
                 color = (attrd.get('color') or attrd.get('colour') or '').strip()
                 hexcol = self._normalize_color_to_hex(color)
                 if hexcol:
                     tagname = f"font_{hexcol.lstrip('#')}"
-                    self.stack.append((tagname, self.pos))
-                    return
-                # unknown -> sentinel
-                self.stack.append((None, self.pos))
-                return
+                    self.stack.append((tagname, self.pos)); return
+                self.stack.append((None, self.pos)); return
 
-            # presentational element: marquee -> dedicated tag
             if tag == 'marquee':
-                self.stack.append(('marquee', self.pos))
+                self.stack.append(('marquee', self.pos)); return
+
+            # <a href="..."> — record href and optional title on stack
+            if tag == 'a':
+                href = (attrd.get('href') or '').strip()
+                title = (attrd.get('title') or '').strip() or None
+                if href:
+                    self.stack.append(('hyperlink', self.pos, href, title))
+                else:
+                    self.stack.append((None, self.pos))
                 return
 
             if tag == 'span':
@@ -233,20 +223,15 @@ class _SimpleHTMLToTagged(HTMLParser):
                         hexcol = self._normalize_color_to_hex(m.group(1))
                         if hexcol:
                             tagname = f"font_{hexcol.lstrip('#')}"
-                            self.stack.append((tagname, self.pos))
-                            return
-                    # todo background heuristic
+                            self.stack.append((tagname, self.pos)); return
                     m2 = re.search(r'background(?:-color)?\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
                     if m2:
                         bg = m2.group(1).lower()
                         if bg in ('#b22222', 'b22222', 'red'):
-                            self.stack.append(('todo', self.pos))
-                            return
-                # unknown span -> sentinel
-                self.stack.append((None, self.pos))
-                return
+                            self.stack.append(('todo', self.pos)); return
+                self.stack.append((None, self.pos)); return
 
-            # other tags -> sentinel so endtags pop cleanly
+            # fallback sentinel so handle_endtag can pop
             self.stack.append((None, self.pos))
         except Exception:
             try:
@@ -258,12 +243,31 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             if not self.stack:
                 return
-            name, start = self.stack.pop()
-            if not name:
+            item = self.stack.pop()
+            if not item:
+                return
+            # hyperlink entries are ('hyperlink', start, href, title)
+            if isinstance(item, tuple) and item[0] == 'hyperlink':
+                _, start, href, title = item
+                end = self.pos
+                if end > start:
+                    self.ranges.setdefault('hyperlink', []).append([start, end])
+                    try:
+                        rec = {'start': start, 'end': end, 'href': href}
+                        if title:
+                            rec['title'] = title
+                        self.hrefs.append(rec)
+                    except Exception:
+                        pass
+                return
+            # normal tags (tagname, start)
+            tagname = item[0] if len(item) > 0 else None
+            start = item[1] if len(item) > 1 else None
+            if not tagname or start is None:
                 return
             end = self.pos
             if end > start:
-                self.ranges.setdefault(name, []).append([start, end])
+                self.ranges.setdefault(tagname, []).append([start, end])
         except Exception:
             pass
 
@@ -271,6 +275,7 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             if not data:
                 return
+            # HTMLParser with convert_charrefs=True already converts char refs; keep data as-is
             self.out.append(data)
             self.pos += len(data)
         except Exception:
@@ -278,9 +283,12 @@ class _SimpleHTMLToTagged(HTMLParser):
 
     def get_result(self):
         try:
-            return ''.join(self.out), self.ranges
+            meta = {'tags': self.ranges}
+            if self.hrefs:
+                meta['links'] = list(self.hrefs)
+            return ''.join(self.out), meta
         except Exception:
-            return ''.join(self.out), self.ranges
+            return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
 
 def _serialize_tags(tags_dict):
     """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""

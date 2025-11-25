@@ -244,7 +244,8 @@ def _ask_open_choice(path: str):
             except Exception:
                 pass
             dlg.destroy()
-            _open_path(path, open_in_new_tab=open_in_new)
+            # intelligent open for URLs vs files
+            _open_maybe_url(path, open_in_new_tab=open_in_new)
 
         btns = ttk.Frame(container)
         btns.grid(row=4, column=0, columnspan=2, sticky='e', pady=(8,0))
@@ -261,7 +262,7 @@ def open_recent_file(path: str):
         # If user disabled prompting, use stored default
         if not config.getboolean("Section1", "promptOnRecentOpen", fallback=True):
             use_new = config.get("Section1", "recentOpenDefault", fallback="new") == "new"
-            _open_path(path, open_in_new_tab=use_new)
+            _open_maybe_url(path, open_in_new_tab=use_new)
             return
 
         # Otherwise show a small modal asking current/new with remember checkbox
@@ -878,8 +879,121 @@ def _apply_tag_configs_to_widget(tw):
             tw.tag_config("kbd", font=mono_font, background="#F5F5F5")
         except Exception:
             pass
+
+        # hyperlink tag: blue + underline and mouse bindings to open link
+        try:
+            tw.tag_config("hyperlink", foreground="#0000EE", underline=True)
+
+            def _find_hyperlink_for_index(w, idx):
+                """Return (start_idx_str, end_idx_str, mapping_entry) or (None, None, None)."""
+                try:
+                    rngs = w.tag_ranges("hyperlink")
+                    for i in range(0, len(rngs), 2):
+                        s = rngs[i]
+                        e = rngs[i + 1]
+                        if w.compare(s, "<=", idx) and w.compare(idx, "<", e):
+                            key = (str(s), str(e))
+                            mapping = getattr(w, '_hyperlink_map', {})
+                            entry = mapping.get(key)
+                            return str(s), str(e), entry
+                except Exception:
+                    pass
+                return None, None, None
+
+            def _on_hyperlink_enter(event):
+                try:
+                    w = event.widget
+                    idx = w.index(f"@{event.x},{event.y}")
+                    s_str, e_str, entry = _find_hyperlink_for_index(w, idx)
+                    if entry is None:
+                        # show visible text if no mapping
+                        try:
+                            if s_str and e_str:
+                                text = w.get(s_str, e_str).strip()
+                                statusBar.config(text=text)
+                        except Exception:
+                            pass
+                        try:
+                            w.config(cursor="hand2")
+                        except Exception:
+                            pass
+                        return
+                    # entry may be a dict {'href':..., 'title':...} or a plain string (legacy)
+                    href = entry.get('href') if isinstance(entry, dict) else entry
+                    title = entry.get('title') if isinstance(entry, dict) else None
+                    display = title or href or ''
+                    try:
+                        statusBar.config(text=display)
+                    except Exception:
+                        pass
+                    try:
+                        w.config(cursor="hand2")
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def _on_hyperlink_leave(event):
+                try:
+                    event.widget.config(cursor="")
+                except Exception:
+                    pass
+                try:
+                    # restore normal status (line/col)
+                    update_status_bar()
+                except Exception:
+                    pass
+
+            def _on_hyperlink_click(event):
+                try:
+                    w = event.widget
+                    idx = w.index(f"@{event.x},{event.y}")
+                    s_str, e_str, entry = _find_hyperlink_for_index(w, idx)
+                    url_text = None
+                    if entry is None:
+                        if s_str and e_str:
+                            url_text = w.get(s_str, e_str).strip()
+                    else:
+                        if isinstance(entry, dict):
+                            url_text = entry.get('href')
+                        else:
+                            url_text = entry
+                    if not url_text:
+                        return
+                    import urllib.parse as up
+                    if url_text.lower().startswith("www."):
+                        url_text = "http://" + url_text
+                    parsed = up.urlsplit(url_text)
+                    scheme = parsed.scheme.lower() if parsed.scheme else ''
+                    if scheme in ("http", "https"):
+                        fetch_and_open_url(url_text, open_in_new_tab=False)
+                        return
+                    if scheme == "file":
+                        p = parsed.path
+                        if re.match(r'^/[A-Za-z]:', p):
+                            p = p.lstrip('/')
+                        p = p.replace('/', os.sep)
+                        root.after(0, lambda path=p: _open_path(path, open_in_new_tab=False))
+                        return
+                    if not scheme:
+                        if os.path.exists(url_text):
+                            root.after(0, lambda path=url_text: _open_path(path, open_in_new_tab=False))
+                            return
+                        else:
+                            fetch_and_open_url("http://" + url_text, open_in_new_tab=False)
+                            return
+                except Exception:
+                    pass
+
+            tw.tag_bind("hyperlink", "<Enter>", _on_hyperlink_enter)
+            tw.tag_bind("hyperlink", "<Leave>", _on_hyperlink_leave)
+            tw.tag_bind("hyperlink", "<Button-1>", _on_hyperlink_click)
+        except Exception:
+            pass
+
     except Exception:
         pass
+
 def auto_pair(event):
     ch = event.char
     if ch in pairs:
@@ -939,7 +1053,11 @@ def create_editor_tab(title='Untitled', content='', filename=''):
     _configure_text_widget(tx)
     _apply_tag_configs_to_widget(tx)
     tx.insert('1.0', content)
-
+    # color literal hex codes in this new widget (so #rrggbb/#rgb are shown)
+    try:
+        color_hex_codes(tx, "1.0", "end-1c")
+    except Exception:
+        pass
     # metadata: keep filename per-tab on the frame object
     frame.fileName = filename
 
@@ -1099,7 +1217,8 @@ KEYWORD_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, KEYWORDS)) + r')\b')
 # short list of builtins you want highlighted (extend as needed)
 BUILTINS = ['len', 'range', 'print', 'open', 'isinstance', 'int', 'str', 'list', 'dict', 'set', 'True', 'False', 'None']
 BUILTIN_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, BUILTINS)) + r')\b')
-
+URL_RE = re.compile(r'(?i)\b(?:https?://[^\s<>"]+|file:///[^\s<>"]+|www\.[^\s<>"]+)\b')
+HEX_COLOR_RE = re.compile(r'#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})\b')
 STRING_RE = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|' + r"'[^'\n]*')", re.DOTALL)
 COMMENT_RE = re.compile(r'#[^\n]*')
 # better number regex (precompile at module scope)
@@ -2202,30 +2321,118 @@ def _save_symbol_buffers(vars_set, defs_set):
         pass
 
 def _serialize_formatting():
-    """Return header string (commented base64 JSON) for current non-syntax tags, or '' if no formatting."""
+    """Return header string (commented base64 JSON) for current tags, hyperlinks and tag configs.
+
+    Behavior:
+    - Inspect all tags present on the active Text widget via textArea.tag_names()
+    - Exclude internal/syntax-only tags (keywords, strings, line helpers, etc.)
+    - Save absolute start/end offsets for each tag that has ranges
+    - Save raw tag_cget values (no normalization) so they are reapplied verbatim on load
+    - Save hyperlink mappings (converted to absolute offsets) as before
+    """
     try:
-        tags_to_save = ('bold', 'italic', 'underline', 'all',
-                        'underlineitalic', 'boldunderline', 'bolditalic', 'small',
-                        'mark', 'code', 'kbd', 'sub', 'sup')        
-        data = {}
-        for tag in tags_to_save:
-            ranges = textArea.tag_ranges(tag)
-            if not ranges:
-                continue
-            arr = []
-            for i in range(0, len(ranges), 2):
-                s = ranges[i]
-                e = ranges[i + 1]
-                # compute char offsets relative to buffer start
-                start = len(textArea.get('1.0', s))
-                end = len(textArea.get('1.0', e))
-                if end > start:
-                    arr.append([start, end])
-            if arr:
-                data[tag] = arr
-        if not data:
+        if not textArea:
             return ''
-        meta = {'version': 1, 'tags': data}
+
+        # Tags we explicitly consider internal / syntax-only and should NOT be serialized
+        internal_tags = {
+            'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+            'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo',
+            'currentLine', 'trailingWhitespace', 'find_match', 'number', 'operator',
+            'marquee'  # marquee is presentation-only and hard to serialize meaningfully if animated
+        }
+
+        # Build tag -> ranges dict by inspecting all widget tags
+        tags_data = {}
+        for tag in textArea.tag_names():
+            try:
+                if tag in internal_tags:
+                    continue
+                ranges = textArea.tag_ranges(tag)
+                if not ranges:
+                    continue
+                arr = []
+                for i in range(0, len(ranges), 2):
+                    s = ranges[i]
+                    e = ranges[i + 1]
+                    # compute absolute char offsets
+                    start = len(textArea.get('1.0', s))
+                    end = len(textArea.get('1.0', e))
+                    if end > start:
+                        arr.append([start, end])
+                if arr:
+                    tags_data[tag] = arr
+            except Exception:
+                pass
+
+        # collect hyperlink mappings (if any) and convert to absolute offsets
+        links = []
+        try:
+            mapping = getattr(textArea, '_hyperlink_map', {}) or {}
+            for (s_idx, e_idx), entry in mapping.items():
+                try:
+                    snorm = textArea.index(s_idx)
+                    enorm = textArea.index(e_idx)
+                    start = len(textArea.get('1.0', snorm))
+                    end = len(textArea.get('1.0', enorm))
+                    if end <= start:
+                        continue
+                    if isinstance(entry, dict):
+                        href = entry.get('href') or ''
+                        title = entry.get('title') or None
+                    else:
+                        href = str(entry or '')
+                        title = None
+                    if not href:
+                        continue
+                    rec = {'start': start, 'end': end, 'href': href}
+                    if title:
+                        rec['title'] = title
+                    links.append(rec)
+                except Exception:
+                    continue
+        except Exception:
+            links = []
+
+        # Collect tag visual configs by reading tag_cget directly (store values as-is for tags we will save)
+        tag_configs = {}
+        try:
+            for tag in sorted(tags_data.keys()):
+                try:
+                    cfg = {}
+                    for opt in ('foreground', 'background', 'font', 'underline', 'overstrike'):
+                        try:
+                            val = textArea.tag_cget(tag, opt)
+                        except Exception:
+                            val = None
+                        if val is not None and str(val).strip() != '':
+                            cfg[opt] = str(val)
+                    # If font_xxxxxx tags exist but have no cget, preserve the name by leaving cfg empty;
+                    # but if we can infer a color from the tag name (font_rrggbb) also store it so round-trip preserves color.
+                    if not cfg and tag.startswith('font_'):
+                        try:
+                            hexpart = tag.split('_', 1)[1]
+                            if re.match(r'^[0-9a-fA-F]{6}$', hexpart):
+                                cfg['foreground'] = f"#{hexpart.lower()}"
+                        except Exception:
+                            pass
+                    if cfg:
+                        tag_configs[tag] = cfg
+                except Exception:
+                    pass
+        except Exception:
+            tag_configs = {}
+
+        # nothing to save -> return empty
+        if not tags_data and not links and not tag_configs:
+            return ''
+
+        meta = {'version': 1, 'tags': tags_data}
+        if links:
+            meta['links'] = links
+        if tag_configs:
+            meta['tag_configs'] = tag_configs
+
         b64 = base64.b64encode(json.dumps(meta).encode('utf-8')).decode('ascii')
         return "# ---SIMPLEEDIT-META-BEGIN---\n# " + b64 + "\n# ---SIMPLEEDIT-META-END---\n"
     except Exception:
@@ -2411,50 +2618,122 @@ def detect_header_and_prompt(event=None):
         pass
 
 def _apply_formatting_from_meta(meta):
-    """Apply saved tag ranges (meta is dict with key 'tags') on the UI thread."""
+    """Apply saved tag ranges (meta is dict with key 'tags' and optional 'links' and 'tag_configs') on the UI thread.
+
+    This version applies the saved tag_cget values directly (no special parsing/normalization).
+    """
     try:
         tags = meta.get('tags', {}) if isinstance(meta, dict) else {}
-        for tag in list(tags.keys()):
-            try:
-                if tag.startswith("font_"):
-                    hexpart = tag.split("_", 1)[1]
-                    if re.match(r'^[0-9a-fA-F]{6}$', hexpart):
-                        color = f"#{hexpart.lower()}"
-                        # validate color via tkinter; fall back if invalid
-                        try:
-                            root.winfo_rgb(color)
-                            textArea.tag_config(tag, foreground=color)
-                        except Exception:
-                            pass
-            except Exception:
-                pass
 
-        # Now apply tag ranges (absolute offsets)
-        # Ensure editor has sensible tag_config for known presentation tags before adding ranges
+        # Apply any explicit tag visual configs exactly as saved (foreground/background/font/underline/overstrike)
         try:
-            for present in ('mark', 'code', 'kbd', 'sub', 'sup', 'small', 'marquee'):
-                if present in tags and not textArea.tag_cget(present, "font") and not textArea.tag_cget(present, "background"):
-                    # best-effort default config; _apply_tag_configs_to_widget will set full defaults for widgets
+            tag_configs = meta.get('tag_configs', {}) if isinstance(meta, dict) else {}
+            if tag_configs:
+                for tag, cfg in tag_configs.items():
                     try:
-                        if present == 'mark':
-                            textArea.tag_config(present, background="#FFF177")
-                        elif present in ('code', 'kbd'):
-                            textArea.tag_config(present, font=("Courier New", max(6, int(fontSize - 1))), background="#F5F5F5")
-                        elif present in ('sub', 'sup', 'small'):
-                            textArea.tag_config(present, font=(fontName, max(6, int(fontSize - 2))))
-                        elif present == 'marquee':
-                            textArea.tag_config('marquee', foreground="#FF4500")
+                        kwargs = {}
+                        for opt in ('foreground', 'background', 'font', 'underline', 'overstrike'):
+                            v = cfg.get(opt)
+                            if v is not None and str(v).strip() != '':
+                                kwargs[opt] = v
+                        if kwargs:
+                            # apply per-widget so visuals survive round-trip
+                            textArea.tag_config(tag, **kwargs)
                     except Exception:
                         pass
         except Exception:
             pass
 
+        # Legacy: ensure any per-color font_xxxxxx tags still get a fallback color if missing
+        try:
+            for tag in list(tags.keys()):
+                if tag.startswith("font_"):
+                    hexpart = tag.split("_", 1)[1] if "_" in tag else ''
+                    if re.match(r'^[0-9a-fA-F]{6}$', hexpart):
+                        color = f"#{hexpart.lower()}"
+                        try:
+                            root.winfo_rgb(color)
+                            cur = ''
+                            try:
+                                cur = textArea.tag_cget(tag, 'foreground') or ''
+                            except Exception:
+                                cur = ''
+                            if not cur:
+                                textArea.tag_config(tag, foreground=color)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Ensure sensible defaults for presentational tags if not configured
+        try:
+            for present in ('mark', 'code', 'kbd', 'sub', 'sup', 'small', 'marquee'):
+                if present in tags:
+                    try:
+                        has_font = bool(textArea.tag_cget(present, "font"))
+                        has_bg = bool(textArea.tag_cget(present, "background"))
+                    except Exception:
+                        has_font = False
+                        has_bg = False
+                    if not has_font and not has_bg:
+                        try:
+                            if present == 'mark':
+                                textArea.tag_config(present, background="#FFF177")
+                            elif present in ('code', 'kbd'):
+                                textArea.tag_config(present, font=("Courier New", max(6, int(fontSize - 1))), background="#F5F5F5")
+                            elif present in ('sub', 'sup', 'small'):
+                                textArea.tag_config(present, font=(fontName, max(6, int(fontSize - 2))))
+                            elif present == 'marquee':
+                                textArea.tag_config('marquee', foreground="#FF4500")
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+        # Apply tag ranges (after configs applied)
         for tag, ranges in tags.items():
             for start, end in ranges:
                 try:
                     textArea.tag_add(tag, f"1.0 + {int(start)}c", f"1.0 + {int(end)}c")
                 except Exception:
                     pass
+
+        # Restore explicit links produced by parser (if any)
+        try:
+            links = meta.get('links', []) if isinstance(meta, dict) else []
+            if links:
+                if not hasattr(textArea, '_hyperlink_map'):
+                    textArea._hyperlink_map = {}
+                for link in links:
+                    try:
+                        s = int(link.get('start', 0))
+                        e = int(link.get('end', 0))
+                        href = str(link.get('href', '')).strip()
+                        title = link.get('title') or link.get('text') or None
+                        if e > s and href:
+                            start_idx = textArea.index(f"1.0 + {s}c")
+                            end_idx = textArea.index(f"1.0 + {e}c")
+                            try:
+                                textArea.tag_add('hyperlink', start_idx, end_idx)
+                            except Exception:
+                                pass
+                            try:
+                                entry = {'href': href}
+                                if title:
+                                    entry['title'] = title
+                                textArea._hyperlink_map[(start_idx, end_idx)] = entry
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # ensure any literal hex codes are colored as well (HTML imports may introduce them)
+        try:
+            color_hex_codes()
+        except Exception:
+            pass
+
     except Exception:
         pass
 
@@ -2467,6 +2746,11 @@ def safe_highlight_event(event=None):
       status bar and trailing-whitespace) so the editor remains responsive.
     """
     try:
+        # Always color literal hex codes even if syntax highlighting is off
+        try:
+            color_hex_codes()
+        except Exception:
+            pass
         # only run the (potentially expensive) syntax pass when enabled
         if updateSyntaxHighlighting.get():
             try:
@@ -3219,18 +3503,17 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
 def _parse_html_and_apply(raw):
     """
     Parse raw HTML fragment or document and extract plain text and tag ranges.
-    Returns (plain_text, tags_dict) where tags_dict matches _apply_formatting_from_meta format.
+    Returns (plain_text, meta) where meta is {'tags': {...}, 'links': [...]}
     """
     try:
-        # If full document, try to extract body contents heuristically
         m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
         fragment = m.group(1) if m else raw
 
         parser = funcs._SimpleHTMLToTagged()
         parser.feed(fragment)
-        plain, ranges = parser.get_result()
-        # convert ranges (already [[s,e],...]) into meta shape
-        return plain, {'tags': ranges}
+        plain, meta = parser.get_result()
+        # meta already shaped as {'tags': {...}, 'links': [...]}
+        return plain, meta
     except Exception:
         return raw, {}
 
@@ -3292,7 +3575,10 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
         # remove tags only in the scanned region
         for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
                   'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
-            textArea.tag_remove(t, start, end)
+            try:
+                textArea.tag_remove(t, start, end)
+            except Exception:
+                pass
 
         protected_spans = []  # keep (s, e) offsets relative to content for strings/comments
 
@@ -3366,7 +3652,7 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 sub = content[expr_s:expr_e]
                 # small heuristic: run keyword/builtin regex on sub and tag matches (or tag whole expr)
                 textArea.tag_add("string", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
-                # optionally tag inner expression as 'builtin'/'keyword' by re-applying regex on sub
+
         # dynamic defs (existing behaviour)
         global match_string
         match_string = match_case_like_this(start, end)
@@ -3405,6 +3691,68 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 s, e = m.span(1)
                 if not overlaps_protected(s, e):
                     textArea.tag_add("def", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+
+        # Markdown-style links: [text](url) -> tag only the visible text and remember href
+        try:
+            md_link_re = re.compile(r'\[([^\]]+)\]\(([^)]+)\)')
+            if not hasattr(textArea, '_hyperlink_map'):
+                textArea._hyperlink_map = {}
+            for m in md_link_re.finditer(content):
+                full_s, full_e = m.span()
+                text_s, text_e = m.span(1)  # visible anchor text
+                href = m.group(2).strip()
+                if overlaps_protected(text_s, text_e):
+                    continue
+                abs_s = base_offset + text_s
+                abs_e = base_offset + text_e
+                # normalize indices via textArea.index so keys match tag_ranges values
+                start_idx = textArea.index(f"1.0 + {abs_s}c")
+                end_idx = textArea.index(f"1.0 + {abs_e}c")
+                try:
+                    textArea.tag_add("hyperlink", start_idx, end_idx)
+                except Exception:
+                    pass
+                # only set mapping if one isn't already present (HTML/imported meta wins)
+                key = (start_idx, end_idx)
+                if key not in textArea._hyperlink_map:
+                    try:
+                        entry = {'href': href}
+                        textArea._hyperlink_map[key] = entry
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # hyperlink detection (http(s) / file:/// / www.)
+        try:
+            if not hasattr(textArea, '_hyperlink_map'):
+                textArea._hyperlink_map = {}
+            for m in URL_RE.finditer(content):
+                s, e = m.span()
+                if not overlaps_protected(s, e):
+                    abs_s = base_offset + s
+                    abs_e = base_offset + e
+                    start_idx = textArea.index(f"1.0 + {abs_s}c")
+                    end_idx = textArea.index(f"1.0 + {abs_e}c")
+                    try:
+                        textArea.tag_add("hyperlink", start_idx, end_idx)
+                    except Exception:
+                        pass
+                    # store mapping only when not already present so parser-applied links remain authoritative
+                    key = (start_idx, end_idx)
+                    if key in textArea._hyperlink_map:
+                        continue
+                    url_text = content[s:e].strip()
+                    if url_text.lower().startswith("www."):
+                        url_text = "http://" + url_text
+                    try:
+                        entry = {'href': url_text}
+                        textArea._hyperlink_map[key] = entry
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # after tagging work inside highlight_python_helper:
         try:
             if textArea.tag_ranges('marquee') and _is_marquee_visible():
@@ -3413,6 +3761,72 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 _stop_marquee_loop()
         except Exception:
             pass
+    except Exception:
+        pass
+
+def color_hex_codes(tw: Text | None = None, scan_start: str = "1.0", scan_end: str = "end-1c"):
+    """Find literal hex colors in the given Text widget region and color them.
+
+    Creates tags named 'hex_rrggbb' and sets their foreground to that color.
+    This runs independently of syntax-highlight toggle.
+    """
+    try:
+        if tw is None:
+            tw = globals().get('textArea')
+        if not tw or not isinstance(tw, Text):
+            return
+
+        try:
+            content = tw.get(scan_start, scan_end)
+        except Exception:
+            return
+
+        # Remove previous hex_ tag spans in the requested region (leave tag configs intact)
+        try:
+            for t in list(tw.tag_names()):
+                if t.startswith('hex_'):
+                    try:
+                        tw.tag_remove(t, scan_start, scan_end)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # compute base offset for region start to convert match offsets to indices
+        base_offset = 0
+        if scan_start != "1.0":
+            try:
+                before = tw.get("1.0", scan_start)
+                base_offset = len(before)
+            except Exception:
+                base_offset = 0
+
+        for m in HEX_COLOR_RE.finditer(content):
+            s, e = m.span()
+            hexpart = m.group(1)
+            # expand shorthand (#rgb -> #rrggbb)
+            if len(hexpart) == 3:
+                hex6 = ''.join(ch*2 for ch in hexpart).lower()
+            else:
+                hex6 = hexpart.lower()
+            start_idx = f"1.0 + {base_offset + s}c"
+            end_idx = f"1.0 + {base_offset + e}c"
+            tag = f"hex_{hex6}"
+            try:
+                tw.tag_add(tag, start_idx, end_idx)
+                # only set config if not already configured (avoid overwriting existing visuals)
+                cur_fg = ''
+                try:
+                    cur_fg = tw.tag_cget(tag, 'foreground') or ''
+                except Exception:
+                    cur_fg = ''
+                if not cur_fg:
+                    try:
+                        tw.tag_config(tag, foreground=f"#{hex6}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -3785,6 +4199,37 @@ def go_to_line():
         highlight_current_line()
         update_status_bar()
 
+def _open_maybe_url(path: str, open_in_new_tab: bool = True):
+    """Open `path` as a URL (http/https/file) or as a local file intelligently."""
+    try:
+        import urllib.parse as up
+        parsed = up.urlsplit(path)
+        scheme = parsed.scheme.lower() if parsed.scheme else ''
+        # common www. shorthand
+        if not scheme and path.lower().startswith('www.'):
+            fetch_and_open_url('http://' + path, open_in_new_tab=open_in_new_tab)
+            return
+        if scheme in ('http', 'https'):
+            fetch_and_open_url(path, open_in_new_tab=open_in_new_tab)
+            return
+        if scheme == 'file':
+            p = parsed.path
+            if re.match(r'^/[A-Za-z]:', p):
+                p = p.lstrip('/')
+            p = p.replace('/', os.sep)
+            _open_path(p, open_in_new_tab=open_in_new_tab)
+            return
+    except Exception:
+        pass
+    # fallback: if file exists treat as file, otherwise try http
+    try:
+        if os.path.exists(path):
+            _open_path(path, open_in_new_tab=open_in_new_tab)
+            return
+    except Exception:
+        pass
+    # last resort: try http
+    fetch_and_open_url(path, open_in_new_tab=open_in_new_tab)
 
 def open_find_replace():
     fr = Toplevel(root)
