@@ -617,6 +617,127 @@ def apply_tag_config_to_all(tag_name: str, kwargs: dict):
     except Exception:
         pass
 
+def _build_style_tag_name(b: bool, i: bool, u: bool) -> str:
+    """Return canonical style tag name for a combination of bold/italic/underline."""
+    try:
+        parts = []
+        if b:
+            parts.append('b')
+        if i:
+            parts.append('i')
+        if u:
+            parts.append('u')
+        if not parts:
+            return 'style_plain'
+        return 'style_' + '_'.join(parts)
+    except Exception:
+        return 'style_plain'
+
+def _make_style_tag_name(font_tag: str | None, b: bool, i: bool, u: bool) -> str:
+    """Return a sanitized style tag name optionally namespaced by a font tag."""
+    try:
+        parts = []
+        if b:
+            parts.append('b')
+        if i:
+            parts.append('i')
+        if u:
+            parts.append('u')
+        if not parts:
+            body = 'plain'
+        else:
+            body = '_'.join(parts)
+        if font_tag:
+            return f"style_{_sanitize_tag_name(font_tag)}_{body}"
+        return f"style_native_{body}"
+    except Exception:
+        return f"style_native_plain"
+
+
+def _ensure_style_tag(tag: str, bold: bool, italic: bool, underline: bool, font_tag: str | None = None):
+    """Ensure a style tag exists that sets the combined font attributes.
+
+    If a `font_tag` is supplied, derive family/size from that tag so weight/slant apply
+    without changing the family/size. Falls back to global fontName/fontSize.
+    """
+    try:
+        # if already configured with a font we assume it's OK
+        try:
+            cur = textArea.tag_cget(tag, 'font') or ''
+            cur_ug = textArea.tag_cget(tag, 'underline') or ''
+            if cur or cur_ug:
+                return
+        except Exception:
+            pass
+
+        # Derive base family/size from provided font_tag (if any) or defaults
+        fam = fontName
+        sz = fontSize
+        try:
+            if font_tag:
+                # attempt to read its configured font (may be a tuple/string)
+                fval = textArea.tag_cget(font_tag, 'font')
+                if fval:
+                    try:
+                        fobj = tkfont.Font(font=fval)
+                        fam = fobj.actual('family') or fam
+                        sz = int(fobj.actual('size') or sz)
+                    except Exception:
+                        # try parsing simple "Family Size" string
+                        m = re.match(r'([^\d]+)\s+(\d+)', str(fval))
+                        if m:
+                            fam = m.group(1).strip()
+                            try:
+                                sz = int(m.group(2))
+                            except Exception:
+                                sz = sz
+        except Exception:
+            pass
+
+        # build a tkfont.Font with requested weight/slant
+        try:
+            weight = 'bold' if bold else 'normal'
+            slant = 'italic' if italic else 'roman'
+            u = 1 if underline else 0
+            f = tkfont.Font(family=fam, size=sz, weight=weight, slant=slant, underline=u)
+            textArea.tag_config(tag, font=f)
+            # ensure underline explicitly for older Tk where Font underline may not be honored
+            if underline:
+                try:
+                    textArea.tag_config(tag, underline=1)
+                except Exception:
+                    pass
+        except Exception:
+            # fallback: attempt simple tuple + underline kw
+            try:
+                specs = [fam, sz]
+                if bold:
+                    specs.append('bold')
+                if italic:
+                    specs.append('italic')
+                textArea.tag_config(tag, font=tuple(specs), underline=1 if underline else 0)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _raise_tag_over_marquee(tag: str):
+    """Raise `tag` above marquee so its fg/bg win visually."""
+    try:
+        # If marquee exists, raise this tag above marquee; otherwise just raise it to top.
+        if 'marquee' in textArea.tag_names():
+            try:
+                textArea.tag_raise(tag, 'marquee')
+                return
+            except Exception:
+                pass
+        try:
+            textArea.tag_raise(tag)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def apply_font_to_selection(family: str | None = None, size: int | None = None):
     """Apply the chosen font family+size to the current selection (or entire buffer)."""
     try:
@@ -630,7 +751,6 @@ def apply_font_to_selection(family: str | None = None, size: int | None = None):
         if not fam and not sz:
             return
 
-        # build sanitized tag name like 'font_Arial_14'
         label = f"{fam}_{sz}" if fam and sz else (fam or str(sz))
         tag = f"font_{_sanitize_tag_name(label)}"
 
@@ -656,19 +776,19 @@ def apply_font_to_selection(family: str | None = None, size: int | None = None):
 
         # add/remove tag for selection
         start, end = selection_or_all()
-        # remove identical tags in selection first (toggle behaviour)
         try:
-            # if tag already fully present remove it
-            ranges = textArea.tag_ranges(tag)
+            # remove existing identical tag (toggle)
+            ranges = textArea.tag_nextrange(tag, start, end)
             if ranges:
-                # If the selection intersects existing ranges, remove for the selection
                 textArea.tag_remove(tag, start, end)
             else:
                 textArea.tag_add(tag, start, end)
+                # ensure font tag wins over marquee
+                _raise_tag_over_marquee(tag)
         except Exception:
-            # fallback: just add
             try:
                 textArea.tag_add(tag, start, end)
+                _raise_tag_over_marquee(tag)
             except Exception:
                 pass
     except Exception:
@@ -989,6 +1109,11 @@ def _apply_tag_configs_to_widget(tw):
         tw.tag_config("todo", foreground="#ffffff", background="#B22222")
         try:
             tw.tag_config("marquee", foreground="#FF4500")
+            # make marquee low priority so color/style tags can override it
+            try:
+                tw.tag_lower("marquee")
+            except Exception:
+                pass
         except Exception:
             pass
         tw.tag_config("bold", font=(fontName, fontSize, "bold"))
@@ -1024,6 +1149,23 @@ def _apply_tag_configs_to_widget(tw):
             mono_font = ("Courier New", max(6, int(fontSize - 1)))
             tw.tag_config("code", font=mono_font, background="#F5F5F5")
             tw.tag_config("kbd", font=mono_font, background="#F5F5F5")
+        except Exception:
+            pass
+
+        # Basic table/list visual styling so parsed tags are visible in editor
+        try:
+            # table container (no strong visual, but ensures presence)
+            tw.tag_config("table", lmargin1=0, lmargin2=0)
+            # each row starts on its own line (parser already inserted newlines)
+            tw.tag_config("tr", lmargin1=0, lmargin2=0)
+            # cell styling: light background to distinguish cells
+            tw.tag_config("td", background="#F8F8F8")
+            # header cell: bold + slightly darker background
+            tw.tag_config("th", background="#E8E8E8", font=(fontName, fontSize, "bold"))
+            # lists: indent and slightly different margin
+            tw.tag_config("li", lmargin1=20, lmargin2=20)
+            tw.tag_config("ul", lmargin1=12, lmargin2=12)
+            tw.tag_config("ol", lmargin1=12, lmargin2=12)
         except Exception:
             pass
 
@@ -1141,6 +1283,232 @@ def _apply_tag_configs_to_widget(tw):
     except Exception:
         pass
 
+def _find_tag_range_at_index(widget: Text, idx: str, tag_name: str):
+    """Return (start_index_str, end_index_str) if idx falls inside a tag range for tag_name, otherwise (None, None)."""
+    try:
+        rngs = widget.tag_ranges(tag_name)
+        for i in range(0, len(rngs), 2):
+            s = rngs[i]
+            e = rngs[i+1]
+            if widget.compare(s, "<=", idx) and widget.compare(idx, "<", e):
+                return str(s), str(e)
+    except Exception:
+        pass
+    return None, None
+
+def _on_text_right_click(event):
+    """Show context menu if right-click is over a table range; otherwise default selection menu."""
+    try:
+        w = event.widget
+        if not isinstance(w, Text):
+            return
+        idx = w.index(f"@{event.x},{event.y}")
+        tstart, tend = _find_tag_range_at_index(w, idx, 'table')
+        # build context menu
+        menu = Menu(root, tearoff=0)
+        # Always provide Find/Replace in context menu
+        try:
+            menu.add_command(label="Find/Replace...", command=lambda: open_find_replace())
+            menu.add_separator()
+        except Exception:
+            pass
+        if tstart and tend:
+            menu.add_command(label="Edit table...", command=lambda s=tstart, e=tend, w=w: open_table_editor(w, s, e))
+            menu.add_separator()        
+        # fallback items (cut/copy/paste) kept minimal
+        try:
+            menu.add_separator()
+            menu.add_command(label="Cut", command=lambda: cut_selected_text())
+            menu.add_command(label="Copy", command=lambda: copy_to_clipboard())
+            menu.add_command(label="Paste", command=lambda: paste_from_clipboard())
+        except Exception:
+            pass
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+    except Exception:
+        pass
+
+def open_table_editor(widget: Text, start_idx: str, end_idx: str):
+    """Open a grid editor for a table region. On save, replace region and reapply table/tr/td tags.
+    If start_idx == end_idx == None the dialog will operate in 'insert at cursor' mode (Add Table)."""
+    try:
+        insert_mode = False
+        if not start_idx or not end_idx:
+            # create blank default 3x3 table
+            grid = [['' for _ in range(3)] for _ in range(3)]
+            insert_mode = True
+            s_norm = None
+            e_norm = None
+        else:
+            # normalize indices and extract text
+            s_norm = widget.index(start_idx)
+            e_norm = widget.index(end_idx)
+            content = widget.get(s_norm, e_norm)
+            rows = [r for r in content.split('\n')]
+            grid = [r.split('\t') for r in rows]
+
+        dlg = Toplevel(root)
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.title("Edit Table")
+        frm = ttk.Frame(dlg, padding=6) if 'ttk' in globals() else Frame(dlg)
+        frm.pack(fill=BOTH, expand=True)
+
+        # dynamic grid of Entry widgets
+        entries = [ [None]*max(1, len(grid[0])) for _ in range(max(1, len(grid))) ]
+        def rebuild_grid(container, grid_data):
+            # destroy existing children
+            for child in container.winfo_children():
+                child.destroy()
+            rows = len(grid_data)
+            cols = max(len(r) for r in grid_data) if rows else 0
+            for r in range(rows):
+                for c in range(cols):
+                    val = grid_data[r][c] if c < len(grid_data[r]) else ''
+                    ent = Entry(container, width=max(10, len(val)+2))
+                    ent.grid(row=r, column=c, padx=2, pady=2, sticky='nsew')
+                    ent.insert(0, val)
+                    entries[r][c] = ent
+                # make columns expand equally
+                for c in range(cols):
+                    container.grid_columnconfigure(c, weight=1)
+        # initialize entries structure sized to grid
+        rows_init = max(1, len(grid))
+        cols_init = max(1, max((len(r) for r in grid), default=1))
+        entries = [ [None]*cols_init for _ in range(rows_init) ]
+        rebuild_grid(frm, grid)
+
+        # allow inserting/removing rows/cols controls (minimal)
+        ctl = Frame(dlg)
+        ctl.pack(fill=X, pady=(6,0))
+        # control actions
+        def add_row():
+            rcount = len(entries)
+            ccount = len(entries[0]) if entries else 1
+            new_row = [''] * ccount
+            entries.append([None]*ccount)
+            rebuild_grid(frm, [[ent.get() for ent in row] for row in entries if any(ent is not None for ent in row)] if entries else [new_row])
+
+        def remove_row():
+            if len(entries) <= 1:
+                return
+            entries.pop()
+            rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
+
+        def add_col():
+            for row in entries:
+                row.append(None)
+            rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
+
+        def remove_col():
+            if not entries or len(entries[0]) <= 1:
+                return
+            for row in entries:
+                row.pop()
+            rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
+
+        # row/col controls
+        def do_save():
+            try:
+                # reconstruct table text with tabs/newlines from current entries
+                new_rows = []
+                for r in range(len(entries)):
+                    row_vals = []
+                    for c in range(len(entries[0])):
+                        ent = entries[r][c]
+                        val = ent.get() if ent else ''
+                        row_vals.append(val)
+                    new_rows.append('\t'.join(row_vals))
+                new_text = '\n'.join(new_rows)
+                if insert_mode:
+                    # insert at current cursor
+                    ins_idx = widget.index('insert')
+                    abs_start_off = len(widget.get('1.0', ins_idx))
+                    widget.insert(ins_idx, new_text)
+                    ins_start_idx = ins_idx
+                else:
+                    # replace region in widget
+                    widget.delete(s_norm, e_norm)
+                    widget.insert(s_norm, new_text)
+                    abs_start_off = len(widget.get('1.0', s_norm))
+                    ins_start_idx = s_norm
+                # remove any existing table tags in the affected region
+                try:
+                    start_idx = ins_start_idx
+                    end_idx = widget.index(f"{start_idx} + {len(new_text)}c")
+                    for t in ('table','tr','td','th'):
+                        widget.tag_remove(t, start_idx, end_idx)
+                except Exception:
+                    pass
+                # add new tags based on new_text geometry
+                cursor_off = 0
+                for r_idx, line in enumerate(new_rows):
+                    row_start_off = abs_start_off + cursor_off
+                    cells = line.split('\t')
+                    cell_cursor = row_start_off
+                    for c_idx, cell_text in enumerate(cells):
+                        cs = cell_cursor
+                        ce = cs + len(cell_text)
+                        # add td tag
+                        try:
+                            widget.tag_add('td', f"1.0 + {cs}c", f"1.0 + {ce}c")
+                        except Exception:
+                            pass
+                        # advance: account for tab char between cells
+                        cell_cursor = ce + 1
+                    # add tr tag for the whole row
+                    row_end_off = row_start_off + len(line)
+                    try:
+                        widget.tag_add('tr', f"1.0 + {row_start_off}c", f"1.0 + {row_end_off}c")
+                    except Exception:
+                        pass
+                    cursor_off += len(line) + 1  # plus newline
+                # add table tag covering whole inserted region
+                try:
+                    widget.tag_add('table', ins_start_idx, f"1.0 + {abs_start_off + len(new_text)}c")
+                except Exception:
+                    pass
+                # apply visual configs to ensure tags show
+                _apply_tag_configs_to_widget(widget)
+                # re-highlight and refresh
+                safe_highlight_event(None)
+            except Exception:
+                pass
+            finally:
+                try:
+                    dlg.grab_release()
+                except Exception:
+                    pass
+                dlg.destroy()
+
+        def do_cancel():
+            try:
+                dlg.grab_release()
+            except Exception:
+                pass
+            dlg.destroy()
+
+        Button(ctl, text="Save", command=do_save).pack(side=RIGHT, padx=6)
+        Button(ctl, text="Cancel", command=do_cancel).pack(side=RIGHT)
+        # Add row/col controls left of Save/Cancel
+        Frame(ctl).pack(side=LEFT, expand=True)
+        btn_add_row = Button(ctl, text="Add Row", command=add_row)
+        btn_add_row.pack(side=LEFT, padx=4)
+        btn_remove_row = Button(ctl, text="Remove Row", command=remove_row)
+        btn_remove_row.pack(side=LEFT, padx=4)
+        btn_add_col = Button(ctl, text="Add Col", command=add_col)
+        btn_add_col.pack(side=LEFT, padx=4)
+        btn_remove_col = Button(ctl, text="Remove Col", command=remove_col)
+        btn_remove_col.pack(side=LEFT, padx=4)
+        # ensure dialog sized sensibly
+        dlg.update_idletasks()
+        center_window(dlg)
+        dlg.focus_force()
+    except Exception:
+        pass
+
 def auto_pair(event):
     ch = event.char
     if ch in pairs:
@@ -1170,6 +1538,11 @@ def _configure_text_widget(tw):
     tw.bind('<Button-1>', lambda e: tw.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
     tw.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
     tw.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+    # right-click context for table editing
+    try:
+        tw.bind('<Button-3>', _on_text_right_click, add=True)
+    except Exception:
+        pass
 
 def create_editor_tab(title='Untitled', content='', filename=''):
     """Create a new tab containing a Text widget and return (text_widget, frame)."""
@@ -1634,50 +2007,148 @@ def _stop_marquee_loop():
     finally:
         _marquee_running = False
 
+def _replace_region_preserve_tags(start_idx: str, end_idx: str, new_text: str):
+    """Replace text in [start_idx, end_idx) with new_text while preserving overlapping tags.
+
+    - Records tag ranges overlapping the region (except 'sel' which is handled separately).
+    - Removes those tag spans inside the region, performs the replace, and re-adds tags
+      at the same relative positions inside the region.
+    """
+    try:
+        if not textArea:
+            return
+        s = textArea.index(start_idx)
+        e = textArea.index(end_idx)
+
+        # compute absolute offsets for region start/end
+        region_start_off = len(textArea.get('1.0', s))
+        region_end_off = len(textArea.get('1.0', e))
+        region_len = max(0, region_end_off - region_start_off)
+
+        # collect overlapping tag fragments (tag, rel_start, rel_end)
+        preserved = []
+        for tag in textArea.tag_names():
+            if tag == 'sel':
+                continue
+            try:
+                rngs = textArea.tag_ranges(tag)
+                for i in range(0, len(rngs), 2):
+                    rs = textArea.index(rngs[i])
+                    re_ = textArea.index(rngs[i+1])
+                    rs_off = len(textArea.get('1.0', rs))
+                    re_off = len(textArea.get('1.0', re_))
+                    # overlap test
+                    if re_off <= region_start_off or rs_off >= region_end_off:
+                        continue
+                    rel_s = max(0, rs_off - region_start_off)
+                    rel_e = min(region_len, re_off - region_start_off)
+                    if rel_e > rel_s:
+                        preserved.append((tag, rel_s, rel_e))
+            except Exception:
+                pass
+
+        # deduplicate preserved entries to avoid duplicate re-adds
+        seen = set()
+        uniq_preserved = []
+        for tag, rs, re_ in preserved:
+            key = (tag, rs, re_)
+            if key in seen:
+                continue
+            seen.add(key)
+            uniq_preserved.append((tag, rs, re_))
+
+        # remove all preserved tag spans in region
+        try:
+            for tag, _, _ in uniq_preserved:
+                try:
+                    textArea.tag_remove(tag, s, e)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # record selection to restore roughly (best-effort)
+        sel_ranges = textArea.tag_ranges('sel')
+
+        # replace text (delete + insert)
+        try:
+            textArea.delete(s, e)
+            textArea.insert(s, new_text)
+        except Exception:
+            return
+
+        # reapply preserved tag spans relative to start
+        try:
+            for tag, rel_s, rel_e in uniq_preserved:
+                try:
+                    ns = textArea.index(f"{s} + {int(rel_s)}c")
+                    ne = textArea.index(f"{s} + {int(rel_e)}c")
+                    textArea.tag_add(tag, ns, ne)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+        # restore selection roughly if present (best-effort)
+        try:
+            if sel_ranges and len(sel_ranges) >= 2:
+                try:
+                    textArea.tag_remove('sel', '1.0', 'end')
+                except Exception:
+                    pass
+                try:
+                    # if selection was after replace region, we place it at region end
+                    textArea.tag_add('sel', s, textArea.index(f"{s} + {len(new_text)}c"))
+                    textArea.mark_set('insert', textArea.index(f"{s} + {len(new_text)}c"))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
 def _marquee_tick():
-    """One animation tick: rotate characters left for each marquee range, then reschedule or stop."""
+    """One animation tick: rotate characters left for each marquee range, preserving other tags."""
     global _marquee_after_id, _marquee_running
     try:
         if not _marquee_running:
             return
-        # Ensure we operate on the active textArea and current marquee tag ranges
+        # snapshot of marquee ranges (work on a copy)
         ranges = list(textArea.tag_ranges('marquee'))
         if not ranges:
             _stop_marquee_loop()
             return
 
-        # Work on a snapshot of ranges; performing replacement of same-length content keeps indices stable.
         for i in range(0, len(ranges), 2):
             try:
                 s = str(ranges[i])
                 e = str(ranges[i + 1])
-                content = textArea.get(s, e)
+                try:
+                    content = textArea.get(s, e)
+                except Exception:
+                    continue
                 if not content or len(content) <= 1:
                     continue
-                # produce rotated string
+
+                # produce rotated string (left rotate by one char)
                 new = content[1:] + content[0]
-                # preserve selection/cursor roughly: record selection indices if any
-                sel = textArea.tag_ranges('sel')
-                # replace region
-                textArea.delete(s, e)
-                textArea.insert(s, new)
-                # reapply marquee tag for the new text
-                textArea.tag_remove('marquee', s, f"{s} + {len(new)}c")
-                textArea.tag_add('marquee', s, f"{s} + {len(new)}c")
-                # restore selection roughly (best-effort)
-                if sel:
-                    try:
-                        textArea.tag_remove('sel', '1.0', 'end')
-                        # naive restore: if selection was within replaced region, place it at same absolute offsets
-                        # skip precise adjustment for simplicity
-                        textArea.tag_add('sel', sel[0], sel[1])
-                    except Exception:
-                        pass
+
+                # replace region preserving tags
+                _replace_region_preserve_tags(s, e, new)
+
+                # ensure marquee tag still covers the full replaced region
+                try:
+                    textArea.tag_remove('marquee', s, f"{s} + {len(new)}c")
+                    textArea.tag_add('marquee', s, f"{s} + {len(new)}c")
+                except Exception:
+                    pass
+
             except Exception:
-                # keep going with other ranges even if one fails
+                # continue with other ranges even on error
                 pass
 
-        # Continue only if marquee remains visible
+        # Continue if marquee remains visible
         if _is_marquee_visible():
             _marquee_schedule_tick()
         else:
@@ -2470,12 +2941,8 @@ def _save_symbol_buffers(vars_set, defs_set):
 def _serialize_formatting():
     """Return header string (commented base64 JSON) for current tags, hyperlinks and tag configs.
 
-    Behavior:
-    - Inspect all tags present on the active Text widget via textArea.tag_names()
-    - Exclude internal/syntax-only tags (keywords, strings, line helpers, etc.)
-    - Save absolute start/end offsets for each tag that has ranges
-    - Save raw tag_cget values (no normalization) so they are reapplied verbatim on load
-    - Save hyperlink mappings (converted to absolute offsets) as before
+    Coalesce legacy bold/italic/underline into combined `style_*` tags (per-font when possible)
+    so round-trips restore composed styling reliably.
     """
     try:
         if not textArea:
@@ -2486,10 +2953,10 @@ def _serialize_formatting():
             'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
             'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo',
             'currentLine', 'trailingWhitespace', 'find_match', 'number', 'operator',
-            'marquee'  # marquee is presentation-only and hard to serialize meaningfully if animated
+            # marquee is presentation-only and animated; we still save ranges but visual priority handled by tags
         }
 
-        # Build tag -> ranges dict by inspecting all widget tags
+        # Build tag -> ranges dict by inspecting all widget tags (raw tags)
         tags_data = {}
         for tag in textArea.tag_names():
             try:
@@ -2502,7 +2969,6 @@ def _serialize_formatting():
                 for i in range(0, len(ranges), 2):
                     s = ranges[i]
                     e = ranges[i + 1]
-                    # compute absolute char offsets
                     start = len(textArea.get('1.0', s))
                     end = len(textArea.get('1.0', e))
                     if end > start:
@@ -2541,7 +3007,7 @@ def _serialize_formatting():
         except Exception:
             links = []
 
-        # Collect tag visual configs by reading tag_cget directly (store values as-is for tags we will save)
+        # Collect raw tag visual configs for tags we will save (store values as-is)
         tag_configs = {}
         try:
             for tag in sorted(tags_data.keys()):
@@ -2554,8 +3020,6 @@ def _serialize_formatting():
                             val = None
                         if val is not None and str(val).strip() != '':
                             cfg[opt] = str(val)
-                    # If font_xxxxxx tags exist but have no cget, preserve the name by leaving cfg empty;
-                    # but if we can infer a color from the tag name (font_rrggbb) also store it so round-trip preserves color.
                     if not cfg and tag.startswith('font_'):
                         try:
                             hexpart = tag.split('_', 1)[1]
@@ -2569,6 +3033,123 @@ def _serialize_formatting():
                     pass
         except Exception:
             tag_configs = {}
+
+        # Build composed style ranges from legacy tags (bold/italic/underline combos) partitioned per-font
+        try:
+            content = textArea.get('1.0', 'end-1c')
+            N = len(content)
+            if N > 0:
+                # boolean arrays
+                b_arr = [False] * N
+                i_arr = [False] * N
+                u_arr = [False] * N
+
+                # helper mark ranges
+                def mark_flag_for_tag(tname, b=False, i=False, u=False):
+                    try:
+                        for j in range(0, len(textArea.tag_ranges(tname)), 2):
+                            s = textArea.tag_ranges(tname)[j]
+                            e = textArea.tag_ranges(tname)[j+1]
+                            so = len(textArea.get('1.0', s))
+                            eo = len(textArea.get('1.0', e))
+                            so = max(0, min(N, so))
+                            eo = max(0, min(N, eo))
+                            for p in range(so, eo):
+                                if b:
+                                    b_arr[p] = True
+                                if i:
+                                    i_arr[p] = True
+                                if u:
+                                    u_arr[p] = True
+                    except Exception:
+                        pass
+
+                # mark legacy tags
+                mark_flag_for_tag('bold', b=True)
+                mark_flag_for_tag('italic', i=True)
+                mark_flag_for_tag('underline', u=True)
+                mark_flag_for_tag('bolditalic', b=True, i=True)
+                mark_flag_for_tag('boldunderline', b=True, u=True)
+                mark_flag_for_tag('underlineitalic', i=True, u=True)
+                mark_flag_for_tag('all', b=True, i=True, u=True)
+
+                # iterate and group contiguous spans by (b,i,u,font_tag)
+                p = 0
+                while p < N:
+                    b = b_arr[p]
+                    i = i_arr[p]
+                    u = u_arr[p]
+                    # if no style flags at this char move on
+                    if not (b or i or u):
+                        p += 1
+                        continue
+                    # determine font tag at this position
+                    idx = textArea.index(f"1.0 + {p}c")
+                    tags_here = textArea.tag_names(idx)
+                    font_here = None
+                    for tt in tags_here:
+                        if tt.startswith('font_'):
+                            font_here = tt
+                            break
+                    # find run end where all attributes and font_here remain the same
+                    run_end = p + 1
+                    while run_end < N:
+                        if b_arr[run_end] != b or i_arr[run_end] != i or u_arr[run_end] != u:
+                            break
+                        idx2 = textArea.index(f"1.0 + {run_end}c")
+                        tags2 = textArea.tag_names(idx2)
+                        f2 = None
+                        for tt in tags2:
+                            if tt.startswith('font_'):
+                                f2 = tt
+                                break
+                        if f2 != font_here:
+                            break
+                        run_end += 1
+                    # construct style tag and record range
+                    style_tag = _make_style_tag_name(font_here, b, i, u)
+                    tags_data.setdefault(style_tag, []).append([p, run_end])
+                    # create tag_config for style_tag so load can reproduce composed font
+                    if style_tag not in tag_configs:
+                        try:
+                            cfg = {}
+                            # derive base family/size from font_here if present
+                            fam = fontName
+                            sz = fontSize
+                            if font_here:
+                                try:
+                                    fval = textArea.tag_cget(font_here, 'font')
+                                    if fval:
+                                        fobj = tkfont.Font(font=fval)
+                                        fam = fobj.actual('family') or fam
+                                        sz = int(fobj.actual('size') or sz)
+                                except Exception:
+                                    pass
+                            # build font string preserving family/size and adding weight/slant
+                            font_parts = [str(fam), str(sz)]
+                            if b:
+                                font_parts.append('bold')
+                            if i:
+                                font_parts.append('italic')
+                            cfg['font'] = ' '.join(font_parts)
+                            if u:
+                                cfg['underline'] = 1
+                            tag_configs[style_tag] = cfg
+                        except Exception:
+                            pass
+                    p = run_end
+        except Exception:
+            pass
+
+        # Remove legacy simple style tags from tags_data and tag_configs to avoid duplication
+        for legacy in ('bold', 'italic', 'underline', 'bolditalic', 'boldunderline', 'underlineitalic', 'all'):
+            try:
+                if legacy in tags_data:
+                    tags_data.pop(legacy, None)
+                if legacy in tag_configs:
+                    tag_configs.pop(legacy, None)
+            except Exception:
+                pass
 
         # nothing to save -> return empty
         if not tags_data and not links and not tag_configs:
@@ -2761,6 +3342,45 @@ def detect_header_and_prompt(event=None):
             if stripped.startswith('#!') or stripped.startswith('"""') or stripped.startswith("'''"):
                 _ask_template_modal('python', tw)
                 return
+    except Exception:
+        pass
+
+def _init_toolbar_color_buttons():
+    """Apply FG/BG appearances after UI is realized. Run a couple of times to work around platform theme timing.
+
+    If the configured color is blank/invalid we explicitly set the button text color to white so
+    the label remains readable even on dark/unknown backgrounds.
+    """
+    try:
+        for btn, var in ((btn_fg, fg_color_var), (btn_bg, bg_color_var)):
+            try:
+                c = (var.get() or '').strip()
+                if c and is_valid_color(c):
+                    contrast = _contrast_text_color(c)
+                    # Apply both common option names and multiple states to increase chance platform honors them.
+                    try:
+                        btn.configure(bg=c, activebackground=c, activeforeground=contrast)
+                    except Exception:
+                        pass
+                    try:
+                        btn.configure(fg=contrast, foreground=contrast)
+                    except Exception:
+                        pass
+                else:
+                    # No valid color configured -> ensure button text is white for readability
+                    try:
+                        btn.configure(fg='#FFFFFF', activeforeground='#FFFFFF')
+                    except Exception:
+                        pass
+
+                # Some platforms/themes only apply appearance after a short delay / widget realization.
+                try:
+                    btn.update_idletasks()
+                    btn.update()
+                except Exception:
+                    pass
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -3240,21 +3860,188 @@ def cut_selected_text():
 # -------------------------
 # Formatting toggles
 # -------------------------
+def _tag_implies_attribute(tag: str, attr: str) -> bool:
+    """Return True if `tag` implies `attr` ('bold'|'italic'|'underline')."""
+    try:
+        if not tag:
+            return False
+        # legacy mappings
+        if attr == 'bold':
+            if tag in ('bold', 'bolditalic', 'boldunderline', 'all'):
+                return True
+        if attr == 'italic':
+            if tag in ('italic', 'bolditalic', 'underlineitalic', 'all'):
+                return True
+        if attr == 'underline':
+            if tag in ('underline', 'boldunderline', 'underlineitalic', 'all'):
+                return True
+        # style_* tags end with a suffix that encodes combination, e.g. style_native_b_i or style_fontname_b
+        if tag.startswith('style_'):
+            try:
+                body = tag.rsplit('_', 1)[1]
+                if attr == 'bold' and 'b' in body:
+                    return True
+                if attr == 'italic' and 'i' in body:
+                    return True
+                if attr == 'underline' and 'u' in body:
+                    return True
+            except Exception:
+                pass
+        # nothing implies attribute
+        return False
+    except Exception:
+        return False
+
+def _range_fully_has_attribute(start_idx: str, end_idx: str, attr: str) -> bool:
+    """Return True if every character in [start_idx, end_idx) has `attr` applied."""
+    try:
+        # normalize indices
+        s = textArea.index(start_idx)
+        e = textArea.index(end_idx)
+        s_off = len(textArea.get('1.0', s))
+        e_off = len(textArea.get('1.0', e))
+        if e_off <= s_off:
+            return False
+        # For each char position, ensure at least one tag present that implies the attribute
+        for p in range(s_off, e_off):
+            idx = textArea.index(f"1.0 + {p}c")
+            tags_here = textArea.tag_names(idx)
+            has_attr = False
+            for t in tags_here:
+                if _tag_implies_attribute(t, attr):
+                    has_attr = True
+                    break
+            if not has_attr:
+                return False
+        return True
+    except Exception:
+        return False
+
 def toggle_tag_complex(tag):
-    """High-level toggling that preserves combinations similar to original behaviour."""
-    start, end = selection_or_all()
-    if textArea.tag_ranges(tag):
-        textArea.tag_remove(tag, start, end)
-        return
+    """Toggle bold/italic/underline across the selection, respecting font_* boundaries and composite style tags.
 
-    # Simplified combination logic: remove mutually exclusive combinations and add requested tag.
-    # Keep the previous detailed transformations minimal but consistent.
-    # Remove 'all' if adding single style; remove conflicting combos.
-    for t in ('all', 'bolditalic', 'underlineitalic', 'boldunderline'):
-        if textArea.tag_ranges(t):
-            textArea.tag_remove(t, start, end)
+    Behavior:
+    - If the entire selection already has the attribute, remove it (clear composite/legacy tags for that attr).
+    - Otherwise apply the attribute by creating per-font composite style tags so family/size are preserved.
+    """
+    try:
+        start, end = selection_or_all()
 
-    textArea.tag_add(tag, start, end)
+        if tag not in ('bold', 'italic', 'underline'):
+            # fallback to simple toggle for other tags
+            try:
+                ranges = textArea.tag_ranges(tag)
+                if ranges:
+                    textArea.tag_remove(tag, start, end)
+                else:
+                    textArea.tag_add(tag, start, end)
+            except Exception:
+                pass
+            return
+
+        attr = tag  # 'bold'|'italic'|'underline'
+        # if entire range currently has attr -> we'll remove it
+        fully_has = _range_fully_has_attribute(start, end, attr)
+        if fully_has:
+            # remove any style_* and legacy tags that imply this attribute inside the selection
+            try:
+                for t in list(textArea.tag_names()):
+                    if t.startswith('style_') or t in ('bold', 'italic', 'underline', 'all', 'bolditalic', 'boldunderline', 'underlineitalic'):
+                        try:
+                            textArea.tag_remove(t, start, end)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+            return
+
+        # otherwise we need to add the attribute across the selection.
+        # We'll remove legacy/simple style tags first to avoid overlapping duplicates,
+        # then partition by font_* boundaries and add composite style tags per partition.
+        try:
+            for t in list(textArea.tag_names()):
+                if t.startswith('style_') or t in ('bold', 'italic', 'underline', 'all', 'bolditalic', 'boldunderline', 'underlineitalic'):
+                    try:
+                        textArea.tag_remove(t, start, end)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # compute absolute offsets
+        s_off = len(textArea.get('1.0', start))
+        e_off = len(textArea.get('1.0', end))
+        pos = s_off
+        while pos < e_off:
+            try:
+                # find contiguous run where the active font_* tag is the same
+                idx = textArea.index(f"1.0 + {pos}c")
+                tags_here = textArea.tag_names(idx)
+                font_here = None
+                for tt in tags_here:
+                    if tt.startswith('font_'):
+                        font_here = tt
+                        break
+                run_end = pos + 1
+                while run_end < e_off:
+                    idx2 = textArea.index(f"1.0 + {run_end}c")
+                    tags2 = textArea.tag_names(idx2)
+                    f2 = None
+                    for tt in tags2:
+                        if tt.startswith('font_'):
+                            f2 = tt
+                            break
+                    if f2 != font_here:
+                        break
+                    run_end += 1
+
+                ns = textArea.index(f"1.0 + {pos}c")
+                ne = textArea.index(f"1.0 + {run_end}c")
+
+                # Determine resulting combination flags for this run:
+                # Check existing attributes on this run to preserve other flags (we are toggling one attr)
+                # Build booleans by sampling first char in run
+                sample_idx = ns
+                existing_b = False
+                existing_i = False
+                existing_u = False
+                tags_sample = textArea.tag_names(sample_idx)
+                for t in tags_sample:
+                    if _tag_implies_attribute(t, 'bold'):
+                        existing_b = True
+                    if _tag_implies_attribute(t, 'italic'):
+                        existing_i = True
+                    if _tag_implies_attribute(t, 'underline'):
+                        existing_u = True
+
+                # Toggle the requested attr on this run (we want to set it to True)
+                if attr == 'bold':
+                    new_b = True
+                    new_i = existing_i
+                    new_u = existing_u
+                elif attr == 'italic':
+                    new_b = existing_b
+                    new_i = True
+                    new_u = existing_u
+                else:  # underline
+                    new_b = existing_b
+                    new_i = existing_i
+                    new_u = True
+
+                # create composite style tag name and ensure config
+                style_tag = _make_style_tag_name(font_here, new_b, new_i, new_u)
+                _ensure_style_tag(style_tag, new_b, new_i, new_u, font_tag=font_here)
+                try:
+                    textArea.tag_add(style_tag, ns, ne)
+                    _raise_tag_over_marquee(style_tag)
+                except Exception:
+                    pass
+
+                pos = run_end
+            except Exception:
+                pos += 1
+    except Exception:
+        pass
 
 
 def format_bold():
@@ -3270,9 +4057,30 @@ def format_underline():
 
 
 def remove_all_formatting():
-    start, end = selection_or_all()
-    for t in ("underline", "underlineitalic", "all", "boldunderline", "italic", "bold", "bolditalic"):
-        textArea.tag_remove(t, start, end)
+    """Remove all presentational tags from selection (or whole buffer) while leaving syntax tags intact."""
+    try:
+        start, end = selection_or_all()
+        # Tags considered syntax/internal which we should not remove
+        internal_tags = {
+            'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+            'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo',
+            'currentLine', 'trailingWhitespace', 'find_match', 'operator'
+        }
+        for t in list(textArea.tag_names()):
+            try:
+                if t in internal_tags:
+                    continue
+                # Keep hyperlink mappings intact (but remove visual hyperlink tag if requested)
+                # We remove all presentation tags including style_*, font_*, hex_*, and explicit mark/code/etc.
+                if True:
+                    try:
+                        textArea.tag_remove(t, start, end)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 # -------------------------
@@ -3972,6 +4780,14 @@ def color_hex_codes(tw: Text | None = None, scan_start: str = "1.0", scan_end: s
                         tw.tag_config(tag, foreground=f"#{hex6}")
                     except Exception:
                         pass
+                # ensure color tags visually win over marquee
+                try:
+                    tw.tag_raise(tag, 'marquee')
+                except Exception:
+                    try:
+                        tw.tag_raise(tag)
+                    except Exception:
+                        pass
             except Exception:
                 pass
     except Exception:
@@ -4593,7 +5409,153 @@ def python_ai_autocomplete():
         except Exception:
             pass
 
+fg_color_var = StringVar(value=config.get("Section1", "fontColor", fallback=fontColor))
+bg_color_var = StringVar(value=config.get("Section1", "backgroundColor", fallback=backgroundColor))
 
+def _range_has_tag_entirely(tag: str, start: str, end: str) -> bool:
+    """Return True if `tag` exists at least once in the region (used for simple toggle logic)."""
+    try:
+        return bool(textArea.tag_nextrange(tag, start, end))
+    except Exception:
+        return False
+
+def _contrast_text_color(hexcolor: str) -> str:
+    """Return black or white depending on perceived luminance for good contrast."""
+    try:
+        if not hexcolor:
+            return '#000000'
+        s = hexcolor.strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return '#000000'
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        # perceived luminance (0..1)
+        lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        return '#000000' if lum > 0.56 else '#FFFFFF'
+    except Exception:
+        return '#000000'
+
+def _raise_tag_to_top_all(tag_name: str):
+    """Raise tag to top in every Text widget so its fg/bg take precedence."""
+    try:
+        # current widget first
+        try:
+            textArea.tag_raise(tag_name)
+        except Exception:
+            pass
+        # other tabs
+        for tab_id in editorNotebook.tabs():
+            try:
+                frame = root.nametowidget(tab_id)
+                for child in frame.winfo_children():
+                    if isinstance(child, Text):
+                        try:
+                            child.tag_raise(tag_name)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def apply_color_to_selection(foreground: str | None = None, background: str | None = None):
+    """Apply or toggle a foreground/background color tag on the current selection (or whole buffer)."""
+    try:
+        start, end = selection_or_all()
+
+        if foreground:
+            hex_fg = foreground.lstrip('#').lower()
+            fg_tag = f"color_{hex_fg}"
+            # configure tag globally (all widgets) with explicit foreground
+            try:
+                apply_tag_config_to_all(fg_tag, {'foreground': f"#{hex_fg}"})
+            except Exception:
+                pass
+            # toggle: if the selection already has this exact color tag, remove it; otherwise add it.
+            try:
+                if _range_has_tag_entirely(fg_tag, start, end):
+                    textArea.tag_remove(fg_tag, start, end)
+                else:
+                    textArea.tag_add(fg_tag, start, end)
+                    # ensure this color tag visually wins
+                    _raise_tag_to_top_all(fg_tag)
+            except Exception:
+                pass
+
+        if background:
+            hex_bg = background.lstrip('#').lower()
+            bg_tag = f"bg_{hex_bg}"
+            # configure tag globally with explicit background
+            try:
+                apply_tag_config_to_all(bg_tag, {'background': f"#{hex_bg}"})
+            except Exception:
+                pass
+            try:
+                if _range_has_tag_entirely(bg_tag, start, end):
+                    textArea.tag_remove(bg_tag, start, end)
+                else:
+                    textArea.tag_add(bg_tag, start, end)
+                    # raise background tag to top so it is visible above other tags (including marquee)
+                    _raise_tag_to_top_all(bg_tag)
+            except Exception:
+                pass
+
+        # refresh UI lightly
+        try:
+            safe_highlight_event(None)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _choose_fg_from_toolbar(event=None):
+    """Show color chooser for FG, preserve selection and apply result. Button updates to contrast text color."""
+    try:
+        _record_selection_for_font(event)
+        c = safe_askcolor(fg_color_var.get(), title="Choose foreground color")
+        hexc = get_hex_color(c)
+        if hexc:
+            fg_color_var.set(hexc)
+            try:
+                contrast = _contrast_text_color(hexc)
+                btn_fg.config(bg=hexc, activebackground=hexc, fg=contrast, activeforeground=contrast)
+            except Exception:
+                pass
+            _restore_selection_for_font()
+            apply_color_to_selection(foreground=hexc)
+            try:
+                textArea.focus_set()
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _choose_bg_from_toolbar(event=None):
+    """Show color chooser for BG, preserve selection and apply result. Button updates to contrast text color."""
+    try:
+        _record_selection_for_font(event)
+        c = safe_askcolor(bg_color_var.get(), title="Choose background color")
+        hexc = get_hex_color(c)
+        if hexc:
+            bg_color_var.set(hexc)
+            try:
+                contrast = _contrast_text_color(hexc)
+                btn_bg.config(bg=hexc, activebackground=hexc, fg=contrast, activeforeground=contrast)
+            except Exception:
+                pass
+            _restore_selection_for_font()
+            apply_color_to_selection(background=hexc)
+            try:
+                textArea.focus_set()
+            except Exception:
+                pass
+    except Exception:
+        pass
 # -------------------------
 # Bindings & widget wiring
 # -------------------------
@@ -4694,6 +5656,48 @@ def _on_font_size_selected(event=None):
 
 # bind size selection (and initial readonly selection)
 font_size_cb.bind('<<ComboboxSelected>>', _on_font_size_selected)
+# Create the buttons in the presentational toolbar (placed after font size combobox)
+btn_fg = Button(presentToolBar, text='FG', command=lambda: _choose_fg_from_toolbar(), width=5)
+try:
+    # Prefer using configured color when valid; otherwise ensure button text is white so it's readable.
+    c = (fg_color_var.get() or '').strip()
+    if is_valid_color(c):
+        try:
+            contrast = _contrast_text_color(c)
+            btn_fg.config(bg=c, activebackground=c, fg=contrast, activeforeground=contrast)
+        except Exception:
+            btn_fg.config(bg=c, activebackground=c)
+    else:
+        # blank/invalid color -> force readable white text on the button
+        try:
+            btn_fg.config(fg='#FFFFFF', activeforeground='#FFFFFF')
+        except Exception:
+            pass
+except Exception:
+    pass
+btn_fg.pack(side=LEFT, padx=2, pady=2)
+# preserve selection when interacting
+btn_fg.bind('<Button-1>', _record_selection_for_font, add=True)
+
+btn_bg = Button(presentToolBar, text='BG', command=lambda: _choose_bg_from_toolbar(), width=5)
+try:
+    c = (bg_color_var.get() or '').strip()
+    if is_valid_color(c):
+        try:
+            contrast = _contrast_text_color(c)
+            btn_bg.config(bg=c, activebackground=c, fg=contrast, activeforeground=contrast)
+        except Exception:
+            btn_bg.config(bg=c, activebackground=c)
+    else:
+        # blank/invalid color -> force readable white text on the button
+        try:
+            btn_bg.config(fg='#FFFFFF', activeforeground='#FFFFFF')
+        except Exception:
+            pass
+except Exception:
+    pass
+btn_bg.pack(side=LEFT, padx=2, pady=2)
+btn_bg.bind('<Button-1>', _record_selection_for_font, add=True)
 
 # Presentational/tag buttons (map to HTML-like tags)
 btn_strong = Button(presentToolBar, text='Strong', command=format_strong)
@@ -5124,6 +6128,11 @@ def newFile():
 # populate recent menu
 try:
     refresh_recent_menu()
+except Exception:
+    pass
+try:
+    root.after(250, _init_toolbar_color_buttons)
+    root.after(1200, _init_toolbar_color_buttons)
 except Exception:
     pass
 

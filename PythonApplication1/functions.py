@@ -161,6 +161,8 @@ class _SimpleHTMLToTagged(HTMLParser):
         self.pos = 0
         # stack entries: ('tag', start) or ('hyperlink', start, href, title)
         self.stack = []
+        # stack to track nested ordered-list counters (one counter per open <ol>)
+        self._ol_counters = []
         self.ranges = {}  # tag -> [[start,end], ...]
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
 
@@ -184,6 +186,47 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             tag = (tag or '').lower()
             attrd = dict(attrs or {})
+
+            # Basic table/list handling: produce readable plain-text layout and record ranges.
+            if tag in ('table', 'tr', 'td', 'th', 'ul', 'ol', 'li'):
+                # row -> newline before starting a row (if not at start)
+                if tag == 'tr':
+                    if self.pos > 0:
+                        # ensure a newline separating rows
+                        self.out.append('\n')
+                        self.pos += 1
+                # cells -> separate with a tab so table columns remain aligned in plain text
+                elif tag in ('td', 'th'):
+                    prev_text = ''.join(self.out) if self.out else ''
+                    if prev_text and not prev_text.endswith('\n'):
+                        # insert a cell separator
+                        self.out.append('\t')
+                        self.pos += 1
+                # list item -> newline + bullet (unordered) or dash (ordered fallback)
+                elif tag == 'li':
+                    # ensure newline, then a bullet + space
+                    if self.pos > 0 and not ''.join(self.out).endswith('\n'):
+                        self.out.append('\n')
+                        self.pos += 1
+                    # use a bullet for unordered lists; if inside an <ol> use numbering
+                    if self._ol_counters:
+                        # use current counter from the top of the ol stack
+                        n = self._ol_counters[-1]
+                        s_n = f"{n}. "
+                        self.out.append(s_n)
+                        self.pos += len(s_n)
+                        # increment counter for next item
+                        self._ol_counters[-1] = n + 1
+                    else:
+                        # unordered list bullet
+                        self.out.append('\u2022 ')
+                        self.pos += 2                # push the tag onto stack so handle_endtag will emit ranges
+                # special-case <ol> to start a numbering counter
+                if tag == 'ol':
+                    # start numbering at 1
+                    self._ol_counters.append(1)
+                self.stack.append((tag, self.pos))
+                return
 
             if tag in ('b', 'strong'):
                 self.stack.append(('bold', self.pos)); return
@@ -252,6 +295,13 @@ class _SimpleHTMLToTagged(HTMLParser):
                 end = self.pos
                 if end > start:
                     self.ranges.setdefault('hyperlink', []).append([start, end])
+            # if closing an ordered list, pop the counter stack
+            if tag.lower() == 'ol':
+                try:
+                    if self._ol_counters:
+                        self._ol_counters.pop()
+                except Exception:
+                    pass                    
                     try:
                         rec = {'start': start, 'end': end, 'href': href}
                         if title:
@@ -301,6 +351,116 @@ def _serialize_tags(tags_dict):
     except Exception:
         return ''
 
+def get_result(self):
+    try:
+        # Build the plain-text output
+        full = ''.join(self.out)
+
+        # If there are table ranges, post-process each table to compute column widths
+        # and replace the plain segment with a padded version for nicer in-editor alignment.
+        table_ranges = list(self.ranges.get('table', [])) if isinstance(self.ranges.get('table', []), list) else []
+        if table_ranges:
+            # Sort by start so adjustments can accumulate
+            table_ranges = sorted(table_ranges, key=lambda r: r[0])
+            offset_shift = 0
+            # Remove existing structural table tags -- we'll rebuild them to match padded layout
+            for t in ('table', 'tr', 'td', 'th'):
+                if t in self.ranges:
+                    self.ranges.pop(t, None)
+
+            for orig_start, orig_end in table_ranges:
+                try:
+                    start = orig_start + offset_shift
+                    end = orig_end + offset_shift
+                    if start < 0 or end <= start or start >= len(full):
+                        continue
+                    end = min(end, len(full))
+                    seg = full[start:end]
+                    # Split into rows then cells (parser used '\n' between rows and '\t' between cells)
+                    rows = seg.split('\n')
+                    cells_by_row = [r.split('\t') if r != '' else [''] for r in rows]
+
+                    if not cells_by_row:
+                        continue
+
+                    # compute column widths across all rows
+                    max_cols = max(len(row) for row in cells_by_row)
+                    col_widths = [0] * max_cols
+                    for row in cells_by_row:
+                        for ci, cell in enumerate(row):
+                            col_widths[ci] = max(col_widths[ci], len(cell))
+
+                    # build new padded rows using spaces to align columns; preserve tabs as separators
+                    new_rows = []
+                    for row in cells_by_row:
+                        padded_cells = []
+                        for ci in range(max_cols):
+                            text = row[ci] if ci < len(row) else ''
+                            padded = text.ljust(col_widths[ci])
+                            padded_cells.append(padded)
+                        new_rows.append('\t'.join(padded_cells))
+                    new_seg = '\n'.join(new_rows)
+
+                    # replace full text segment
+                    full = full[:start] + new_seg + full[end:]
+                    delta = len(new_seg) - (end - start)
+                    offset_shift += delta
+
+                    # Recreate table/tr/td/th ranges for this table using new_seg geometry
+                    table_start = start
+                    table_end = start + len(new_seg)
+                    self.ranges.setdefault('table', []).append([table_start, table_end])
+
+                    # compute per-row/per-cell positions and record tr/td/th ranges
+                    cursor = table_start
+                    for ridx, rtext in enumerate(new_rows):
+                        row_start = cursor
+                        # iterate cells separated by '\t'
+                        cell_cursor = row_start
+                        cells = rtext.split('\t')
+                        for cidx, cell_text in enumerate(cells):
+                            cs = cell_cursor
+                            ce = cs + len(cell_text)
+                            # treat first row as header if original parser had any 'th' within original table range
+                            is_header = False
+                            # If original had 'th' ranges, prefer them. Check overlap with original table orig_start..orig_end
+                            th_ranges = self.ranges.get('th', []) if isinstance(self.ranges.get('th', []), list) else []
+                            # But we removed 'th' earlier; instead infer header if first row or if any <th> existed originally
+                            # Heuristic: if the original segment included any '<th>' we will mark first row as header
+                            # Use the original parser info: if there was any 'th' in original ranges list of table region
+                            # Since we removed earlier, we can't reliably inspect; fallback to making first row header only if it contains non-empty cells and original first-row likely header
+                            if ridx == 0:
+                                # Make header if any cell had non-empty and original segment contained "<th" or if every cell is non-empty.
+                                # We can attempt to detect original th occurrences by searching for '<th' in the original (non-escaped) seg,
+                                # but parser already stripped tags. So practical heuristic: treat first row as header only if any original row started with capital or it's the only indicator.
+                                # For safety, do not force header unless a 'th' tag originally existed - best-effort: skip header detection here.
+                                is_header = False
+                            if is_header:
+                                self.ranges.setdefault('th', []).append([cs, ce])
+                            else:
+                                self.ranges.setdefault('td', []).append([cs, ce])
+                            cell_cursor = ce + 1  # skip the tab that follows in new layout
+                        row_end = cursor + len(rtext)
+                        self.ranges.setdefault('tr', []).append([row_start, row_end])
+                        cursor = row_end + 1  # move past newline
+                except Exception:
+                    # On any per-table error continue to next table
+                    continue
+
+            # Replace out and pos with updated full
+            self.out = [full]
+            self.pos = len(full)
+
+        # Build meta based on (possibly updated) ranges
+        meta = {'tags': self.ranges}
+        if self.hrefs:
+            meta['links'] = list(self.hrefs)
+        return full, meta
+    except Exception:
+        try:
+            return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
+        except Exception:
+            return ''.join(self.out), {'tags': self.ranges}
 
 def _parse_simple_markdown(md_text):
     """
@@ -394,10 +554,9 @@ def _collect_all_tag_ranges(textArea):
 # --- Convert buffer to HTML fragment (used for .md and .html outputs) ---
 def _convert_buffer_to_html_fragment(textArea):
     """
-    Produce HTML fragment. Behavior depends on `exportCssMode`:
-     - 'inline-element': (original) produce per-element inline style attributes
-     - 'inline-block': produce class-based spans and caller should include <style> with _generate_css()
-     - 'external': produce class-based spans; caller should write CSS file and include <link>
+    Produce HTML fragment. Special-case: reconstruct real <table>...</table> elements
+    when 'table'/'tr'/'td'/'th' tags are present in the tag ranges. For other regions
+    we fall back to the existing span/class approach.
     """
     try:
         content = textArea.get('1.0', 'end-1c')
@@ -405,92 +564,85 @@ def _convert_buffer_to_html_fragment(textArea):
             return ''
 
         tags_by_name = _collect_all_tag_ranges(textArea)  # dict tag -> [[s,e], ...]
-        # build events list
-        events = []
-        for tag, ranges in tags_by_name.items():
-            for s, e in ranges:
-                events.append((s, 'start', tag))
-                events.append((e, 'end', tag))
-        if not events:
-            return html.escape(content)
+        # If no table tags present, keep existing rendering path (fast path)
+        if 'table' not in tags_by_name:
+            # reuse original conversion logic (escape plain text with inline spans)
+            # build events list as before
+            events = []
+            for tag, ranges in tags_by_name.items():
+                for s, e in ranges:
+                    events.append((s, 'start', tag))
+                    events.append((e, 'end', tag))
+            if not events:
+                return html.escape(content)
 
-        events_by_pos = {}
-        for pos, kind, tag in events:
-            events_by_pos.setdefault(pos, []).append((kind, tag))
-        positions = sorted(set(list(events_by_pos.keys()) + [0, len(content)]))
-        for pos in events_by_pos:
-            events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
+            events_by_pos = {}
+            for pos, kind, tag in events:
+                events_by_pos.setdefault(pos, []).append((kind, tag))
+            positions = sorted(set(list(events_by_pos.keys()) + [0, len(content)]))
+            for pos in events_by_pos:
+                events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
 
-        out_parts = []
-        active = []  # track active tags for nested closing
-        for i in range(len(positions) - 1):
-            pos = positions[i]
-            for kind, tag in events_by_pos.get(pos, []):
-                if kind == 'end':
-                    for j in range(len(active) - 1, -1, -1):
-                        if active[j] == tag:
-                            for k in range(len(active) - 1, j - 1, -1):
-                                t = active.pop()
-                                if t in ('bold', 'italic', 'underline'):
-                                    if t == 'bold':
-                                        out_parts.append('</strong>')
-                                    elif t == 'italic':
-                                        out_parts.append('</em>')
-                                    elif t == 'underline':
-                                        out_parts.append('</u>')
-                                else:
-                                    out_parts.append('</span>')
-                            break
-                elif kind == 'start':
-                    if tag in ('bold', 'italic', 'underline'):
-                        if exportCssMode in ('inline-block', 'external'):
-                            # use class wrappers for formatting when using block/external CSS
-                            if tag == 'bold':
-                                out_parts.append('<strong class="se-bold">')
-                            elif tag == 'italic':
-                                out_parts.append('<em class="se-italic">')
-                            elif tag == 'underline':
-                                out_parts.append('<u class="se-underline">')
+            out_parts = []
+            active = []
+            for i in range(len(positions) - 1):
+                pos = positions[i]
+                for kind, tag in events_by_pos.get(pos, []):
+                    if kind == 'end':
+                        for j in range(len(active) - 1, -1, -1):
+                            if active[j] == tag:
+                                for k in range(len(active) - 1, j - 1, -1):
+                                    t = active.pop()
+                                    if t in ('bold', 'italic', 'underline'):
+                                        if t == 'bold':
+                                            out_parts.append('</strong>')
+                                        elif t == 'italic':
+                                            out_parts.append('</em>')
+                                        elif t == 'underline':
+                                            out_parts.append('</u>')
+                                    else:
+                                        out_parts.append('</span>')
+                                break
+                    elif kind == 'start':
+                        if tag in ('bold', 'italic', 'underline'):
+                            if exportCssMode in ('inline-block', 'external'):
+                                if tag == 'bold':
+                                    out_parts.append('<strong class="se-bold">')
+                                elif tag == 'italic':
+                                    out_parts.append('<em class="se-italic">')
+                                elif tag == 'underline':
+                                    out_parts.append('<u class="se-underline">')
+                            else:
+                                if tag == 'bold':
+                                    out_parts.append('<strong>')
+                                elif tag == 'italic':
+                                    out_parts.append('<em>')
+                                elif tag == 'underline':
+                                    out_parts.append('<u>')
+                            active.append(tag)
                         else:
-                            if tag == 'bold':
-                                out_parts.append('<strong>')
-                            elif tag == 'italic':
-                                out_parts.append('<em>')
-                            elif tag == 'underline':
-                                out_parts.append('<u>')
-                        active.append(tag)
-                    else:
-                        # syntax tags
-                        if exportCssMode in ('inline-block', 'external'):
-                            # class-based
-                            if tag == 'todo':
+                            if exportCssMode in ('inline-block', 'external'):
                                 out_parts.append(f'<span class="se-{tag}">')
                             else:
-                                out_parts.append(f'<span class="se-{tag}">')
-                        else:
-                            # inline style attribute as before
-                            if tag == 'todo':
-                                out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
-                            else:
-                                color = _TAG_COLOR_MAP.get(tag)
-                                if color:
-                                    out_parts.append(f'<span style="color:{color}">')
+                                if tag == 'todo':
+                                    out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
                                 else:
-                                    out_parts.append('<span>')
-                        active.append(tag)
+                                    color = _TAG_COLOR_MAP.get(tag)
+                                    if color:
+                                        out_parts.append(f'<span style="color:{color}">')
+                                    else:
+                                        out_parts.append('<span>')
+                            active.append(tag)
 
-            next_pos = positions[i + 1]
-            if next_pos <= pos:
-                continue
-            seg = content[pos:next_pos]
-            seg_escaped = html.escape(seg)
-            out_parts.append(seg_escaped)
+                next_pos = positions[i + 1]
+                if next_pos <= pos:
+                    continue
+                seg = content[pos:next_pos]
+                out_parts.append(html.escape(seg))
 
-        # close any remaining open tags
-        while active:
-            t = active.pop()
-            if t in ('bold', 'italic', 'underline'):
-                if exportCssMode in ('inline-block', 'external'):
+            while active:
+                t = active.pop()
+                if t in ('bold', 'italic', 'underline'):
                     if t == 'bold':
                         out_parts.append('</strong>')
                     elif t == 'italic':
@@ -498,14 +650,44 @@ def _convert_buffer_to_html_fragment(textArea):
                     elif t == 'underline':
                         out_parts.append('</u>')
                 else:
-                    if t == 'bold':
-                        out_parts.append('</strong>')
-                    elif t == 'italic':
-                        out_parts.append('</em>')
-                    elif t == 'underline':
-                        out_parts.append('</u>')
-            else:
-                out_parts.append('</span>')
+                    out_parts.append('</span>')
+
+            return ''.join(out_parts)
+
+        # If tables exist: produce output by slicing plain content and substituting table HTML for table ranges.
+        table_ranges = sorted(tags_by_name.get('table', []), key=lambda r: r[0])
+        out_parts = []
+        last = 0
+        for tstart, tend in table_ranges:
+            # append escaped content before table
+            if last < tstart:
+                out_parts.append(html.escape(content[last:tstart]))
+            # build table HTML for this table segment
+            seg = content[tstart:tend]
+            # split into rows and cells (parser uses '\n' and '\t')
+            rows = [r for r in seg.split('\n') if r is not None]
+            out_parts.append('<table border="1" cellpadding="4" cellspacing="0">')
+            for ridx, row in enumerate(rows):
+                # skip empty trailing lines
+                if row == '' and len(rows) == 1:
+                    continue
+                out_parts.append('<tr>')
+                cells = row.split('\t')
+                # for each cell determine whether it was originally a header by checking th ranges overlap
+                for cell_text in cells:
+                    cell_text_escaped = html.escape(cell_text)
+                    # simple heuristic: treat first row as header if 'th' tag exists anywhere in table tags
+                    is_header = bool('th' in tags_by_name and tags_by_name['th'])
+                    if is_header and ridx == 0:
+                        out_parts.append(f'<th>{cell_text_escaped}</th>')
+                    else:
+                        out_parts.append(f'<td>{cell_text_escaped}</td>')
+                out_parts.append('</tr>')
+            out_parts.append('</table>')
+            last = tend
+        # append remainder
+        if last < len(content):
+            out_parts.append(html.escape(content[last:]))
 
         return ''.join(out_parts)
     except Exception:
