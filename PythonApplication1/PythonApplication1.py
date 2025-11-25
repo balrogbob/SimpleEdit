@@ -2654,8 +2654,26 @@ def open_url_action():
                             raw = raw_bytes.decode('utf-8', errors='replace')
 
                     # reuse existing HTML parsing flow
-                    plain, tags_meta = funcs._parse_html_and_apply(raw)
-
+                    # Respect the user preference: if configured to open HTML/MD "as source",
+                    # treat fetched bytes as raw text and do NOT parse into visual tags.
+                    preset_path = None
+                    if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                        plain = raw
+                        tags_meta = None
+                        # still attempt syntax autodetect (but apply on UI thread so highlighting uses the widget)
+                        try:
+                            if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                                preset_path = detect_syntax_preset_from_content(raw)
+                        except Exception:
+                            preset_path = None
+                    else:
+                        plain, tags_meta = funcs._parse_html_and_apply(raw)
+                        # when parsed HTML, we may still want to autodetect syntax for non-HTML fragments
+                        try:
+                            if config.getboolean("Section1", "autoDetectSyntax", fallback=True) and not preset_path:
+                                preset_path = detect_syntax_preset_from_content(raw)
+                        except Exception:
+                            preset_path = None
                     def ui():
                         try:
                             title = up.urlsplit(url2).netloc or url2
@@ -2698,6 +2716,15 @@ def open_url_action():
                                 # record the new URL open into history/back-stack
                                 try:
                                     _record_location_opened(url2, push_stack=True)
+                                except Exception:
+                                    pass
+
+                                # if autodetect yielded a preset, apply it now on the UI thread so highlighting rules update
+                                try:
+                                    if preset_path:
+                                        applied = apply_syntax_preset(preset_path)
+                                        if applied:
+                                            statusBar['text'] = "Applied syntax preset from autodetect."
                                 except Exception:
                                     pass
 
@@ -5248,7 +5275,23 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                 except Exception:
                     raw = raw_bytes.decode('utf-8', errors='replace')
 
-            plain, tags_meta = funcs._parse_html_and_apply(raw)
+            # Respect the 'open as source' preference for fetched HTML/MD
+            preset_path = None
+            if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                plain = raw
+                tags_meta = None
+                try:
+                    if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                        preset_path = detect_syntax_preset_from_content(raw)
+                except Exception:
+                    preset_path = None
+            else:
+                plain, tags_meta = funcs._parse_html_and_apply(raw)
+                try:
+                    if config.getboolean("Section1", "autoDetectSyntax", fallback=True) and not preset_path:
+                        preset_path = detect_syntax_preset_from_content(raw)
+                except Exception:
+                    preset_path = None
 
             def ui():
                 try:
@@ -5300,6 +5343,14 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                         except Exception:
                             pass
 
+                       # apply autodetected syntax preset (run on UI thread so config+highlighting update correctly)
+                        try:
+                            if preset_path:
+                                applied = apply_syntax_preset(preset_path)
+                                if applied:
+                                    statusBar['text'] = "Applied syntax preset from autodetect."
+                        except Exception:
+                            pass
                     statusBar['text'] = f"Opened URL: {url2}"
                     # Do NOT add URLs to recent files (recent list is for local files only)
                     if tags_meta and tags_meta.get('tags'):
@@ -5336,7 +5387,20 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
 # Highlighting toggle (initialized from config)
 updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
 fullScanEnabled = IntVar(value=config.getboolean("Section1", "fullScanEnabled", fallback=True))
+openHtmlAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
 
+def _on_open_as_source_toggle():
+    """Persist the 'Open HTML/MD as source' toggle and update status text."""
+    try:
+        config.set("Section1", "openHtmlAsSource", str(bool(openHtmlAsSourceVar.get())))
+        with open(INI_PATH, 'w') as cfgf:
+            config.write(cfgf)
+    except Exception:
+        pass
+    try:
+        statusBar['text'] = "Open HTML/MD as source: ON" if openHtmlAsSourceVar.get() else "Open HTML/MD as source: OFF"
+    except Exception:
+        pass
 
 def match_case_like_this(start, end):
     pattern = r'def\s+([\w_]+)\s*\('
@@ -6635,6 +6699,13 @@ fullScanToggleCheckbox = ttk.Checkbutton(
     command=_on_full_scan_toggle
 )
 fullScanToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
+openAsSourceCheckbox = ttk.Checkbutton(
+    statusFrame,
+    text='Open as source',
+    variable=openHtmlAsSourceVar,
+    command=_on_open_as_source_toggle
+)
+openAsSourceCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
 
 
 # Bindings
@@ -6982,7 +7053,10 @@ def nonlocal_values_reload():
 
     # load open-as-source setting
     openHtmlAsSource = config.getboolean("Section1", "openHtmlAsSource", fallback=False)
-
+    try:
+        openHtmlAsSourceVar.set(1 if openHtmlAsSource else 0)
+    except Exception:
+        pass
     # load recent-open settings
     promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
     recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")
