@@ -1089,6 +1089,25 @@ def _record_location_opened(loc: str, push_stack: bool = True):
     except Exception:
         pass
 
+def _push_back_stack(url: str):
+    """Push `url` onto the in-memory back-stack (no persistence) and refresh UI/menu."""
+    try:
+        if not url or not _is_likely_url(url):
+            return
+        u = str(url)
+        if not url_back_stack or url_back_stack[-1] != u:
+            url_back_stack.append(u)
+            # cap to sane limit
+            if len(url_back_stack) > (_url_history_max * 2):
+                url_back_stack[:] = url_back_stack[-(_url_history_max * 2):]
+        # immediately refresh history menu / back button state
+        try:
+            update_url_history_menu()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def update_url_history_menu():
     """Rebuild the url history dropdown menu from `url_history`."""
     try:
@@ -1151,10 +1170,11 @@ def _back_action():
             return
         prev = url_back_stack[-1]
         try:
-            _open_maybe_url(prev, open_in_new_tab=False)
+            # Open the previous location WITHOUT recording it again on the back-stack
+            _open_maybe_url(prev, open_in_new_tab=False, record_history=False)
         except Exception:
             try:
-                fetch_and_open_url(prev, open_in_new_tab=False)
+                fetch_and_open_url(prev, open_in_new_tab=False, record_history=False)
             except Exception:
                 try:
                     _open_path(prev, open_in_new_tab=False)
@@ -1486,11 +1506,40 @@ def _apply_tag_configs_to_widget(tw):
                                     statusBar['text'] = f"Opening: {href}"
                                 except Exception:
                                     pass
+
+                                # RECORD current location before navigating so Back becomes available immediately
                                 try:
-                                    _open_maybe_url(href, open_in_new_tab=True)
+                                    sel = editorNotebook.select()
+                                    prev = ''
+                                    if sel:
+                                        frame = root.nametowidget(sel)
+                                        prev = getattr(frame, 'fileName', '') or getattr(root, 'fileName', '') or ''
+                                    else:
+                                        prev = getattr(root, 'fileName', '') or ''
+                                   # push previous URL onto in-memory back-stack immediately (no persistence) so UI enables
+                                    try:
+                                        _record_location_opened(prev, push_stack=True)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+
+                                                                # Optimistically push the clicked target onto the back-stack
+                                # so the Back button enables immediately (fetch/persist may happen async).
+                                try:
+                                    if href:
+                                        # prefer non-persistent push initially so menu won't show a dead entry
+                                        _push_back_stack(href)
+                                except Exception:
+                                    pass
+
+                                try:
+                                    # OPEN IN CURRENT TAB (changed from new-tab behavior)
+                                    _open_maybe_url(href, open_in_new_tab=False)
                                 except Exception:
                                     try:
-                                        fetch_and_open_url(href, open_in_new_tab=True)
+                                        # fallback: also open in current tab
+                                        fetch_and_open_url(href, open_in_new_tab=False)
                                     except Exception:
                                         pass
                             break
@@ -2615,15 +2664,55 @@ def open_url_action():
                                 tx.focus_set()
                                 _apply_tag_configs_to_widget(tx)
                             else:
+                                # When navigating in the current tab, record the previous URL (if any)
+                                try:
+                                    sel = editorNotebook.select()
+                                    prev = ''
+                                    if sel:
+                                        frame = root.nametowidget(sel)
+                                        prev = getattr(frame, 'fileName', '') or getattr(root, 'fileName', '') or ''
+                                    else:
+                                        prev = getattr(root, 'fileName', '') or ''
+                                    # Persist / push the previous location exactly like other open-path code
+                                    # (this updates the url history UI + back-stack immediately)
+                                    try:
+                                        _record_location_opened(prev, push_stack=True)
+                                    except Exception:
+                                        pass
+                                except Exception:
+                                    pass
+
+                                # replace current tab content and set metadata to new URL
                                 textArea.delete('1.0', 'end')
                                 textArea.insert('1.0', plain)
                                 _apply_tag_configs_to_widget(textArea)
+                                try:
+                                    sel = editorNotebook.select()
+                                    if sel:
+                                        frame = root.nametowidget(sel)
+                                        frame.fileName = url2
+                                    root.fileName = url2
+                                except Exception:
+                                    root.fileName = url2
+
+                                # record the new URL open into history/back-stack
+                                try:
+                                    _record_location_opened(url2, push_stack=True)
+                                except Exception:
+                                    pass
+
                             statusBar['text'] = f"Opened URL: {url2}"
                             # Do NOT add URLs to recent files (recent list is for local files only)
                             if tags_meta and tags_meta.get('tags'):
                                 root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
                             if updateSyntaxHighlighting.get():
                                 root.after(0, highlightPythonInit)
+                            # keep the toolbar field in sync with what we opened
+                            try:
+                                if 'url_var' in globals():
+                                    url_var.set(url2)
+                            except Exception:
+                                pass
                         except Exception as e:
                             try:
                                 messagebox.showerror("Error", str(e))
@@ -5129,9 +5218,12 @@ def save_as_markdown(textArea):
     add_recent_file(fileName)
     refresh_recent_menu()
 
-def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
-    """Fetch `url` on a background thread and open parsed HTML in a tab (reusable helper)."""
-    def worker(url_in, open_tab):
+def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: bool = True):
+    """Fetch `url` on a background thread and open parsed HTML in a tab (reusable helper).
+
+    record_history: when False do NOT call _record_location_opened for the opened URL.
+    """
+    def worker(url_in, open_tab, record_hist):
         try:
             import urllib.request as urr
             import urllib.parse as up
@@ -5166,9 +5258,48 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
                         tx.focus_set()
                         _apply_tag_configs_to_widget(tx)
                     else:
+                        # When navigating in the current tab, record the previous URL (if any)
+                        try:
+                            sel = editorNotebook.select()
+                            prev = ''
+                            if sel:
+                                frame = root.nametowidget(sel)
+                                prev = getattr(frame, 'fileName', '') or getattr(root, 'fileName', '') or ''
+                            else:
+                                prev = getattr(root, 'fileName', '') or ''
+                                try:
+                                   # ensure previous location is available immediately in the in-memory stack
+                                    _push_back_stack(prev)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                        # replace current tab content and set per-tab filename so refresh/back work
                         textArea.delete('1.0', 'end')
                         textArea.insert('1.0', plain)
                         _apply_tag_configs_to_widget(textArea)
+                        try:
+                            sel = editorNotebook.select()
+                            if sel:
+                                frame = root.nametowidget(sel)
+                                frame.fileName = url2
+                                   # update visible tab title to reflect the loaded page immediately
+                                try:
+                                    editorNotebook.tab(sel, text=title)
+                                except Exception:
+                                    pass
+                            root.fileName = url2
+                        except Exception:
+                            root.fileName = url2
+
+                        # record opened URL into history/back-stack (only URLs are stored)
+                        try:
+                            if record_hist:
+                                _record_location_opened(url2, push_stack=True)
+                        except Exception:
+                            pass
+
                     statusBar['text'] = f"Opened URL: {url2}"
                     # Do NOT add URLs to recent files (recent list is for local files only)
                     if tags_meta and tags_meta.get('tags'):
@@ -5197,7 +5328,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
                     pass
             root.after(0, ui_err)
 
-    Thread(target=worker, args=(url, bool(open_in_new_tab)), daemon=True).start()
+    Thread(target=worker, args=(url, bool(open_in_new_tab), bool(record_history)), daemon=True).start()
 
 # -------------------------
 # Highlighting
@@ -5888,11 +6019,13 @@ def go_to_line():
         highlight_current_line()
         update_status_bar()
 
-def _open_maybe_url(path: str, open_in_new_tab: bool = True):
+def _open_maybe_url(path: str, open_in_new_tab: bool = True, record_history: bool = True):
     """Open `path` as a URL (http/https/file) or as a local file intelligently.
 
     If `path` is a relative URL and there is a current page (toolbar URL or current tab's fileName),
     attempt to resolve it with urllib.parse.urljoin before opening.
+
+    record_history: when False do NOT call _record_location_opened for the target URL (used by Back).
     """
     try:
         import urllib.parse as up
@@ -5922,7 +6055,7 @@ def _open_maybe_url(path: str, open_in_new_tab: bool = True):
                 if base and _is_likely_url(base):
                     try:
                         resolved = up.urljoin(base, path)
-                        fetch_and_open_url(resolved, open_in_new_tab=open_in_new_tab)
+                        fetch_and_open_url(resolved, open_in_new_tab=open_in_new_tab, record_history=record_history)
                         return
                     except Exception:
                         # fall through to normal handling on failure
@@ -5932,10 +6065,10 @@ def _open_maybe_url(path: str, open_in_new_tab: bool = True):
 
         # common www. shorthand
         if not scheme and path.lower().startswith('www.'):
-            fetch_and_open_url('http://' + path, open_in_new_tab=open_in_new_tab)
+            fetch_and_open_url('http://' + path, open_in_new_tab=open_in_new_tab, record_history=record_history)
             return
         if scheme in ('http', 'https'):
-            fetch_and_open_url(path, open_in_new_tab=open_in_new_tab)
+            fetch_and_open_url(path, open_in_new_tab=open_in_new_tab, record_history=record_history)
             return
         if scheme == 'file':
             p = parsed.path
@@ -5954,7 +6087,7 @@ def _open_maybe_url(path: str, open_in_new_tab: bool = True):
     except Exception:
         pass
     # last resort: try http
-    fetch_and_open_url(path, open_in_new_tab=open_in_new_tab)
+    fetch_and_open_url(path, open_in_new_tab=open_in_new_tab, record_history=record_history)
 
 def open_find_replace():
     fr = Toplevel(root)
