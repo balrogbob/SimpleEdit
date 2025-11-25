@@ -1025,7 +1025,177 @@ def open_symbols_manager():
 # toolbar
 toolBar = Frame(root, bg='blue')
 toolBar.pack(side=TOP, fill=X)
+# URL history + back/refresh support (in-memory + persisted via funcs)
+url_history = funcs.load_url_history(config)  # most-recent-first
+_url_history_max = 50
+# stack of opened locations for back behavior (push on open)
+url_back_stack = []
 
+def _is_likely_url(s: str) -> bool:
+    try:
+        if not s or not isinstance(s, str):
+            return False
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9+\-.]*://', s):
+            return True
+        if s.lower().startswith('www.'):
+            return True
+        if s.lower().startswith('file:///'):
+            return True
+        return False
+    except Exception:
+        return False
+
+def _record_location_opened(loc: str, push_stack: bool = True):
+    """Record an opened URL/file into persisted history and back-stack.
+    If push_stack is False do not push into back stack (used for programmatic restores).
+    """
+    try:
+        if not loc:
+            return
+        # normalized string
+        locs = str(loc)
+        # persisted history
+        try:
+            funcs.add_url_history(config, INI_PATH, locs, max_items=_url_history_max)
+        except Exception:
+            pass
+        # update in-memory list and UI menu (if exists)
+        try:
+            global url_history
+            url_history = funcs.load_url_history(config)
+            update_url_history_menu()
+        except Exception:
+            pass
+        # back-stack logic
+        if push_stack:
+            try:
+                # avoid consecutive duplicates
+                if not url_back_stack or url_back_stack[-1] != locs:
+                    url_back_stack.append(locs)
+                # cap stack size
+                if len(url_back_stack) > (_url_history_max * 2):
+                    url_back_stack[:] = url_back_stack[-(_url_history_max * 2):]
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def update_url_history_menu():
+    """Rebuild the url history dropdown menu from `url_history`."""
+    try:
+        if not hasattr(globals().get('urlHistoryBtn', None), 'history_menu'):
+            return
+        menu = urlHistoryBtn.history_menu
+        menu.delete(0, END)
+        if not url_history:
+            menu.add_command(label="(no history)", state='disabled')
+        else:
+            for u in url_history:
+                label = os.path.basename(u) if not _is_likely_url(u) else (u if len(u) <= 60 else u[:56] + '...')
+                menu.add_command(label=label, command=lambda uu=u: _open_history_item(uu))
+            menu.add_separator()
+            menu.add_command(label="Clear History", command=lambda: (funcs.clear_url_history(config, INI_PATH, on_update=update_url_history_menu), update_url_history_menu()))
+        # enable/disable back button
+        try:
+            if url_back_stack and len(url_back_stack) > 1:
+                backBtn.config(state=NORMAL)
+            else:
+                backBtn.config(state=DISABLED)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _open_history_item(u: str):
+    """Open history item in a new tab (always)."""
+    try:
+        if not u:
+            return
+        # open in new tab, prefer URL fetch helper
+        try:
+            _open_maybe_url(u, open_in_new_tab=True)
+        except Exception:
+            try:
+                # fallback: use fetch helper for URLs
+                fetch_and_open_url(u, open_in_new_tab=True)
+            except Exception:
+                try:
+                    _open_path(u, open_in_new_tab=True)
+                except Exception:
+                    pass
+        # record the open (do push to stack)
+        _record_location_opened(u, push_stack=True)
+    except Exception:
+        pass
+
+def _back_action():
+    """Go back to previous opened location (open in current tab)."""
+    try:
+        if not url_back_stack or len(url_back_stack) < 2:
+            return
+        # pop current
+        try:
+            url_back_stack.pop()
+        except Exception:
+            pass
+        if not url_back_stack:
+            return
+        prev = url_back_stack[-1]
+        try:
+            _open_maybe_url(prev, open_in_new_tab=False)
+        except Exception:
+            try:
+                fetch_and_open_url(prev, open_in_new_tab=False)
+            except Exception:
+                try:
+                    _open_path(prev, open_in_new_tab=False)
+                except Exception:
+                    pass
+        # do not push the back-open as a duplicate on the stack
+    except Exception:
+        pass
+
+def _refresh_action():
+    """Reload currently visible tab from its source (URL or file)."""
+    try:
+        fn = getattr(root, 'fileName', '') or ''
+        # also prefer frame.fileName when available
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                fn = getattr(frame, 'fileName', fn) or fn
+        except Exception:
+            pass
+        if not fn:
+            try:
+                statusBar['text'] = "Nothing to refresh."
+            except Exception:
+                pass
+            return
+        # if URL -> fetch; if file-like -> open path
+        if _is_likely_url(fn) or fn.lower().startswith('http') or fn.lower().startswith('file:///') or fn.lower().startswith('www.'):
+            try:
+                fetch_and_open_url(fn, open_in_new_tab=False)
+            except Exception:
+                try:
+                    _open_maybe_url(fn, open_in_new_tab=False)
+                except Exception:
+                    pass
+        else:
+            try:
+                if os.path.isfile(fn):
+                    _open_path(fn, open_in_new_tab=False)
+                else:
+                    # try as file:// URI or fallback to _open_maybe_url
+                    _open_maybe_url(fn, open_in_new_tab=False)
+            except Exception:
+                try:
+                    _open_maybe_url(fn, open_in_new_tab=False)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 # initialize line numbers canvas placeholder
 lineNumbersCanvas = None
 
@@ -2135,6 +2305,13 @@ def create_editor_tab(title='Untitled', content='', filename=''):
         pass
     # metadata: keep filename per-tab on the frame object
     frame.fileName = filename
+
+        # record opened location (file path or URL) into history/back-stack
+    try:
+        if filename:
+            _record_location_opened(filename, push_stack=True)
+    except Exception:
+        pass
 
     editorNotebook.add(frame, text=title)
     editorNotebook.select(frame)
@@ -3474,11 +3651,28 @@ def open_url_from_field():
             pass
 
 try:
-    # URL entry + toolbar button (quick open)
+    # Back button
+    backBtn = Button(toolBar, text='◀', width=3, command=_back_action, state=DISABLED)
+    backBtn.pack(side=LEFT, padx=(6,2), pady=2)
+
+    # History dropdown (Menubutton)
+    urlHistoryBtn = Menubutton(toolBar, text='History', relief=RAISED)
+    urlHistoryBtn.history_menu = Menu(urlHistoryBtn, tearoff=0)
+    urlHistoryBtn.config(menu=urlHistoryBtn.history_menu)
+    urlHistoryBtn.pack(side=LEFT, padx=(2,2), pady=2)
+
+    # URL entry + Open
     url_entry = Entry(toolBar, textvariable=url_var, width=40)
     url_entry.pack(side=LEFT, padx=(6,2), pady=2)
     btnOpenURL = Button(toolBar, text='Open URL', command=open_url_from_field)
     btnOpenURL.pack(side=LEFT, padx=2, pady=2)
+
+    # Refresh button
+    refreshBtn = Button(toolBar, text='⟳', width=3, command=_refresh_action)
+    refreshBtn.pack(side=LEFT, padx=(2,6), pady=2)
+
+    # initialize history menu from persisted store
+    update_url_history_menu()
 except Exception:
     pass
 

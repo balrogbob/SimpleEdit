@@ -24,6 +24,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="beep.py" />
+    <Compile Include="functions.py" />
     <Compile Include="model.py" />
     <Compile Include="PythonApplication1.py" />
     <Compile Include="recent_files.py" />

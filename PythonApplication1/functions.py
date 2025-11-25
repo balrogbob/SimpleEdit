@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Small, dependency-free helper module to manage a persistent recent-files MRU list.
@@ -248,7 +248,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             if tag == 'marquee':
                 self.stack.append(('marquee', self.pos)); return
 
-            # <a href="..."> � record href and optional title on stack
+            # <a href="...">  record href and optional title on stack
             if tag == 'a':
                 href = (attrd.get('href') or '').strip()
                 title = (attrd.get('title') or '').strip() or None
@@ -416,7 +416,7 @@ def _contrast_text_color(hexcolor: str) -> str:
     except Exception:
         return '#000000'
 
-def _wrap_segment_by_tags(seg_text: str, active_tags: set):
+def wrap_segment_by_tags(seg_text: str, active_tags: set):
     """Wrap a text segment according to active tag set into Markdown/HTML."""
     # Determine boolean flags considering explicit combo tags and 'all'
     has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
@@ -497,6 +497,56 @@ def _parse_html_and_apply(raw) -> tuple[str, dict]:
         return plain, meta
     except Exception:
         return raw, {}
+
+# --- URL history (persisted) -------------------------------------------------
+def _ensure_url_section(cfg):
+    """Ensure the 'URLHistory' section exists."""
+    if not cfg.has_section("URLHistory"):
+        cfg.add_section("URLHistory")
+
+def load_url_history(cfg) -> List[str]:
+    """Load URL history list (most-recent-first) from config JSON."""
+    _ensure_url_section(cfg)
+    try:
+        raw = cfg.get("URLHistory", "urls", fallback="[]")
+        return json.loads(raw)
+    except Exception:
+        return []
+
+def save_url_history(cfg, ini_path: str, lst: Iterable[str]) -> None:
+    """Persist URL history (iterable) into config under URLHistory/urls as JSON string."""
+    _ensure_url_section(cfg)
+    try:
+        cfg.set("URLHistory", "urls", json.dumps(list(lst)))
+        with open(ini_path, "w", encoding="utf-8") as fh:
+            cfg.write(fh)
+    except Exception:
+        pass
+
+def add_url_history(cfg, ini_path: str, url: str, max_items: int = 50) -> None:
+    """Add `url` to history (front), dedupe and truncate to `max_items`."""
+    try:
+        if not url:
+            return
+        lst = load_url_history(cfg)
+        # normalize as string
+        u = str(url)
+        if u in lst:
+            lst.remove(u)
+        lst.insert(0, u)
+        lst = lst[:max_items]
+        save_url_history(cfg, ini_path, lst)
+    except Exception:
+        pass
+
+def clear_url_history(cfg, ini_path: str, on_update: Optional[Callable[[], None]] = None) -> None:
+    """Clear persisted URL history and optionally call on_update."""
+    save_url_history(cfg, ini_path, [])
+    if on_update:
+        try:
+            on_update()
+        except Exception:
+            pass
 
 def _serialize_tags(tags_dict):
     """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""
