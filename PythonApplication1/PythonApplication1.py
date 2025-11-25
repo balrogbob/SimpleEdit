@@ -155,7 +155,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                     root.after(0, highlightPythonInit)
                 return
 
-            plain, tags_meta = _parse_html_and_apply(raw)
+            plain, tags_meta = funcs._parse_html_and_apply(raw)
             if open_in_new_tab:
                 tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", plain, filename=path)
                 _apply_tag_configs_to_widget(tx)
@@ -535,21 +535,10 @@ def on_ai_button_click():
 
 
 def get_hex_color(color_tuple):
-    """Return a hex string from a colorchooser return value."""
-    if not color_tuple:
-        return ""
-    if isinstance(color_tuple, tuple) and len(color_tuple) >= 2:
-        # colorchooser returns ((r,g,b), '#rrggbb')
-        return color_tuple[1]
-    m = re.search(r'#\w+', str(color_tuple))
-    return m.group(0) if m else ""
+    return funcs.get_hex_color(color_tuple)
 
 def _sanitize_tag_name(s: str) -> str:
-    """Create a safe tag name from family and size (alnum + underscores only)."""
-    try:
-        return re.sub(r'[^0-9a-zA-Z_]', '_', s).strip('_')
-    except Exception:
-        return re.sub(r'\s+', '_', str(s))
+    return funcs._sanitize_tag_name(s)
 
 def get_system_fonts():
     """Return a sorted list of available system font family names (strings)."""
@@ -1069,36 +1058,13 @@ pairs = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
 IN_CELL_NL = '\u2028'  # internal cell-newline marker (stored inside table cells so real \n doesn't break rows)
 
 def _hex_to_rgb(h: str) -> tuple[int, int, int]:
-    """Return (r,g,b) for hex like '#rrggbb' or 'rrggbb'."""
-    try:
-        s = (h or '').strip()
-        if s.startswith('#'):
-            s = s[1:]
-        if len(s) == 3:
-            s = ''.join(ch*2 for ch in s)
-        if len(s) != 6:
-            return (0, 0, 0)
-        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
-    except Exception:
-        return (0, 0, 0)
+    return funcs._hex_to_rgb(h)
 
 def _rgb_to_hex(r: int, g: int, b: int) -> str:
-    """Return '#rrggbb' from 0-255 RGB."""
-    try:
-        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
-    except Exception:
-        return "#000000"
+    return funcs._rgb_to_hex(r, g, b)
 
 def _lighten_color(hexcol: str, factor: float = 0.15) -> str:
-    """Lighten hexcol by factor (0..1) toward white. Safe fallback if invalid."""
-    try:
-        r, g, b = _hex_to_rgb(hexcol or "#ffffff")
-        nr = int(r + (255 - r) * factor)
-        ng = int(g + (255 - g) * factor)
-        nb = int(b + (255 - b) * factor)
-        return _rgb_to_hex(nr, ng, nb)
-    except Exception:
-        return hexcol or "#ffffff"
+    return funcs._lighten_color(hexcol, factor)
 
 def _iter_text_widgets():
     """Yield all Text widgets in open editor tabs."""
@@ -1196,44 +1162,8 @@ def _apply_tag_configs_to_widget(tw):
             # - Use editor fontColor as base; compute simple RGB complement.
             # - If the computed color equals the overall background, nudge it slightly.
             def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
-                try:
-                    if not hexcol:
-                        return fallback
-                    s = hexcol.strip()
-                    if s.startswith('#'):
-                        s = s[1:]
-                    if len(s) == 3:
-                        s = ''.join(ch*2 for ch in s)
-                    if len(s) != 6:
-                        return fallback
-                    r = int(s[0:2], 16)
-                    g = int(s[2:4], 16)
-                    b = int(s[4:6], 16)
-                    # simple complement
-                    cr = 255 - r
-                    cg = 255 - g
-                    cb = 255 - b
-                    # nudge if equals background color
-                    try:
-                        bg = (backgroundColor or "").strip()
-                        if bg and bg.startswith('#'):
-                            bgc = bg[1:]
-                            if len(bgc) == 3:
-                                bgc = ''.join(ch*2 for ch in bgc)
-                            if len(bgc) == 6:
-                                br = int(bgc[0:2], 16)
-                                bg_ = int(bgc[2:4], 16)
-                                bb = int(bgc[4:6], 16)
-                                if (cr, cg, cb) == (br, bg_, bb):
-                                    # rotate the complement slightly
-                                    cr = max(0, min(255, cr - 16))
-                                    cg = max(0, min(255, cg - 8))
-                                    cb = max(0, min(255, cb - 4))
-                    except Exception:
-                        pass
-                    return f"#{cr:02x}{cg:02x}{cb:02x}"
-                except Exception:
-                    return fallback
+                """Wrapper to the functions module; passes editor background for nudging."""
+                return funcs._compute_complementary(hexcol, fallback, bg_hex=backgroundColor)
 
             try:
                 # Make cell background several shades lighter than editor background
@@ -1276,7 +1206,124 @@ def _apply_tag_configs_to_widget(tw):
         # hyperlink tag: blue + underline and mouse bindings to open link
         try:
             tw.tag_config("hyperlink", foreground="#0000EE", underline=True)
-            ...
+            # Ensure per-widget hyperlink mapping exists (used by click handler)
+            if not hasattr(tw, '_hyperlink_map'):
+                tw._hyperlink_map = {}
+            def _resolve_href_for_index(w, idx):
+                try:
+                    rngs = w.tag_ranges('hyperlink')
+                    for i in range(0, len(rngs), 2):
+                        s = rngs[i]
+                        e = rngs[i + 1]
+                        if w.compare(s, '<=', idx) and w.compare(idx, '<', e):
+                            key = (str(s), str(e))
+                            entry = getattr(w, '_hyperlink_map', {}).get(key)
+                            if entry:
+                                if isinstance(entry, dict):
+                                    return entry.get('href'), entry.get('title') or entry.get('text')
+                                return str(entry), None
+                            # fallback to visible text
+                            try:
+                                return w.get(s, e).strip(), None
+                            except Exception:
+                                return None, None
+                except Exception:
+                    pass
+                return None, None
+            # Mouse handlers for hyperlink tag (show hand cursor, open URL on click)
+            def _on_hyper_enter(event):
+                try:
+                    w = event.widget
+                    idx = w.index(f"@{event.x},{event.y}")
+                    href, title = _resolve_href_for_index(w, idx)
+                    # store previous status so we can restore on leave
+                    try:
+                        w._last_status_text = statusBar['text']
+                    except Exception:
+                        w._last_status_text = None
+                    if href:
+                        disp = href if not title else f"{title} → {href}"
+                        try:
+                            statusBar['text'] = disp
+                        except Exception:
+                            pass
+                    try:
+                        w.config(cursor='hand2')
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def _on_hyper_leave(event):
+                try:
+                    w = event.widget
+                    try:
+                        prev = getattr(w, '_last_status_text', None)
+                        if prev is not None:
+                            statusBar['text'] = prev
+                        else:
+                            # fallback to showing caret position
+                            update_status_bar()
+                    except Exception:
+                        try:
+                            update_status_bar()
+                        except Exception:
+                            pass
+                    try:
+                        w.config(cursor='')
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            def _on_hyper_click(event):
+                try:
+                    w = event.widget
+                    # get index under mouse
+                    idx = w.index(f"@{event.x},{event.y}")
+                    # find hyperlink span that contains this index
+                    rngs = w.tag_ranges('hyperlink')
+                    for i in range(0, len(rngs), 2):
+                        s = rngs[i]
+                        e = rngs[i + 1]
+                        if w.compare(s, '<=', idx) and w.compare(idx, '<', e):
+                            key = (str(s), str(e))
+                            entry = getattr(w, '_hyperlink_map', {}).get(key)
+                            href = None
+                            if entry:
+                                if isinstance(entry, dict):
+                                    href = entry.get('href')
+                                else:
+                                    href = str(entry)
+                            # fallback: use visible text if mapping missing
+                            if not href:
+                                try:
+                                    href = w.get(s, e).strip()
+                                except Exception:
+                                    href = None
+                            if href:
+                                # Prefer intelligent open helper; fall back to fetch helper
+                                try:
+                                    statusBar['text'] = f"Opening: {href}"
+                                except Exception:
+                                    pass
+                                try:
+                                    _open_maybe_url(href, open_in_new_tab=True)
+                                except Exception:
+                                    try:
+                                        fetch_and_open_url(href, open_in_new_tab=True)
+                                    except Exception:
+                                        pass
+                            break
+                except Exception:
+                    pass
+
+            try:
+                tw.tag_bind('hyperlink', '<Enter>', _on_hyper_enter)
+                tw.tag_bind('hyperlink', '<Leave>', _on_hyper_leave)
+                tw.tag_bind('hyperlink', '<Button-1>', _on_hyper_click)
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2372,7 +2419,7 @@ def open_url_action():
                             raw = raw_bytes.decode('utf-8', errors='replace')
 
                     # reuse existing HTML parsing flow
-                    plain, tags_meta = _parse_html_and_apply(raw)
+                    plain, tags_meta = funcs._parse_html_and_apply(raw)
 
                     def ui():
                         try:
@@ -4870,29 +4917,7 @@ def _collect_formatting_ranges():
 
 
 def _wrap_segment_by_tags(seg_text: str, active_tags: set):
-    """Wrap a text segment according to active tag set into Markdown/HTML."""
-    # Determine boolean flags considering explicit combo tags and 'all'
-    has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
-    has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
-    has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
-    has_small = 'small' in active_tags
-    inner = seg_text
-    # Prefer Markdown bold+italic triple-star where supported
-    if has_bold and has_italic:
-        inner = f"***{inner}***"
-    elif has_bold:
-        inner = f"**{inner}**"
-    elif has_italic:
-        inner = f"*{inner}*"
-
-    if has_underline:
-        # Markdown doesn't have native underline; use HTML <u> for compatibility
-        inner = f"<u>{inner}</u>"
-
-    if has_small:
-        # wrap in <small> so exported HTML/MD keeps the visual reduction
-        inner = f"<small>{inner}</small>"
-    return inner
+    return funcs.wrap_segment_by_tags(seg_text, active_tags)
 
 def save_as_markdown(textArea):
     fileName = funcs.save_as_markdown(textArea)
@@ -4928,7 +4953,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
                 except Exception:
                     raw = raw_bytes.decode('utf-8', errors='replace')
 
-            plain, tags_meta = _parse_html_and_apply(raw)
+            plain, tags_meta = funcs._parse_html_and_apply(raw)
 
             def ui():
                 try:
@@ -4971,28 +4996,6 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True):
             root.after(0, ui_err)
 
     Thread(target=worker, args=(url, bool(open_in_new_tab)), daemon=True).start()
-
-
-
-
-# --- Parse saved HTML fragments or full HTML docs back into plain text + tags ---
-def _parse_html_and_apply(raw):
-    """
-    Parse raw HTML fragment or document and extract plain text and tag ranges.
-    Returns (plain_text, meta) where meta is {'tags': {...}, 'links': [...]}
-    """
-    try:
-        m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
-        fragment = m.group(1) if m else raw
-
-        parser = funcs._SimpleHTMLToTagged()
-        parser.feed(fragment)
-        plain, meta = parser.get_result()
-        # meta already shaped as {'tags': {...}, 'links': [...]}
-        return plain, meta
-    except Exception:
-        return raw, {}
-
 
 # -------------------------
 # Highlighting
@@ -5941,25 +5944,7 @@ def _range_has_tag_entirely(tag: str, start: str, end: str) -> bool:
         return False
 
 def _contrast_text_color(hexcolor: str) -> str:
-    """Return black or white depending on perceived luminance for good contrast."""
-    try:
-        if not hexcolor:
-            return '#000000'
-        s = hexcolor.strip()
-        if s.startswith('#'):
-            s = s[1:]
-        if len(s) == 3:
-            s = ''.join(ch*2 for ch in s)
-        if len(s) != 6:
-            return '#000000'
-        r = int(s[0:2], 16)
-        g = int(s[2:4], 16)
-        b = int(s[4:6], 16)
-        # perceived luminance (0..1)
-        lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
-        return '#000000' if lum > 0.56 else '#FFFFFF'
-    except Exception:
-        return '#000000'
+    return funcs._contrast_text_color(hexcolor)
 
 def _raise_tag_to_top_all(tag_name: str):
     """Raise tag to top in every Text widget so its fg/bg take precedence."""

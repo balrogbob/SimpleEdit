@@ -289,19 +289,15 @@ class _SimpleHTMLToTagged(HTMLParser):
             item = self.stack.pop()
             if not item:
                 return
+
             # hyperlink entries are ('hyperlink', start, href, title)
             if isinstance(item, tuple) and item[0] == 'hyperlink':
                 _, start, href, title = item
                 end = self.pos
                 if end > start:
+                    # record visible range for hyperlink (so tag ranges still work)
                     self.ranges.setdefault('hyperlink', []).append([start, end])
-            # if closing an ordered list, pop the counter stack
-            if tag.lower() == 'ol':
-                try:
-                    if self._ol_counters:
-                        self._ol_counters.pop()
-                except Exception:
-                    pass                    
+                    # also record link metadata so callers can restore clickable mappings
                     try:
                         rec = {'start': start, 'end': end, 'href': href}
                         if title:
@@ -310,6 +306,16 @@ class _SimpleHTMLToTagged(HTMLParser):
                     except Exception:
                         pass
                 return
+
+            # if closing an ordered list, pop the counter stack
+            if tag.lower() == 'ol':
+                try:
+                    if self._ol_counters:
+                        self._ol_counters.pop()
+                except Exception:
+                    pass
+                return
+
             # normal tags (tagname, start)
             tagname = item[0] if len(item) > 0 else None
             start = item[1] if len(item) > 1 else None
@@ -339,6 +345,158 @@ class _SimpleHTMLToTagged(HTMLParser):
             return ''.join(self.out), meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
+
+def get_hex_color(color_tuple):
+    """Return a hex string from a colorchooser return value."""
+    if not color_tuple:
+        return ""
+    if isinstance(color_tuple, tuple) and len(color_tuple) >= 2:
+        # colorchooser returns ((r,g,b), '#rrggbb')
+        return color_tuple[1]
+    m = re.search(r'#\w+', str(color_tuple))
+    return m.group(0) if m else ""
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    """Return (r,g,b) for hex like '#rrggbb' or 'rrggbb'."""
+    try:
+        s = (h or '').strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return (0, 0, 0)
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        return (0, 0, 0)
+
+def _rgb_to_hex(r: int, g: int, b: int) -> str:
+    """Return '#rrggbb' from 0-255 RGB."""
+    try:
+        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+    except Exception:
+        return "#000000"
+
+def _sanitize_tag_name(s: str) -> str:
+    """Create a safe tag name from family and size (alnum + underscores only)."""
+    try:
+        return re.sub(r'[^0-9a-zA-Z_]', '_', s).strip('_')
+    except Exception:
+        return re.sub(r'\s+', '_', str(s))
+
+def _lighten_color(hexcol: str, factor: float = 0.15) -> str:
+    """Lighten hexcol by factor (0..1) toward white. Safe fallback if invalid."""
+    try:
+        r, g, b = _hex_to_rgb(hexcol or "#ffffff")
+        nr = int(r + (255 - r) * factor)
+        ng = int(g + (255 - g) * factor)
+        nb = int(b + (255 - b) * factor)
+        return _rgb_to_hex(nr, ng, nb)
+    except Exception:
+        return hexcol or "#ffffff"
+
+def _contrast_text_color(hexcolor: str) -> str:
+    """Return black or white depending on perceived luminance for good contrast."""
+    try:
+        if not hexcolor:
+            return '#000000'
+        s = hexcolor.strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return '#000000'
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        # perceived luminance (0..1)
+        lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
+        return '#000000' if lum > 0.56 else '#FFFFFF'
+    except Exception:
+        return '#000000'
+
+def _wrap_segment_by_tags(seg_text: str, active_tags: set):
+    """Wrap a text segment according to active tag set into Markdown/HTML."""
+    # Determine boolean flags considering explicit combo tags and 'all'
+    has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
+    has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
+    has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
+    has_small = 'small' in active_tags
+    inner = seg_text
+    # Prefer Markdown bold+italic triple-star where supported
+    if has_bold and has_italic:
+        inner = f"***{inner}***"
+    elif has_bold:
+        inner = f"**{inner}**"
+    elif has_italic:
+        inner = f"*{inner}*"
+
+    if has_underline:
+        # Markdown doesn't have native underline; use HTML <u> for compatibility
+        inner = f"<u>{inner}</u>"
+
+    if has_small:
+        # wrap in <small> so exported HTML/MD keeps the visual reduction
+        inner = f"<small>{inner}</small>"
+    return inner
+
+def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
+    try:
+        if not hexcol:
+            return fallback
+        s = hexcol.strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return fallback
+            r = int(s[0:2], 16)
+            g = int(s[2:4], 16)
+            b = int(s[4:6], 16)
+            # simple complement
+            cr = 255 - r
+            cg = 255 - g
+            cb = 255 - b
+            # nudge if equals background color
+            try:
+                bg = (backgroundColor or "").strip()
+                if bg and bg.startswith('#'):
+                    bgc = bg[1:]
+                    if len(bgc) == 3:
+                        bgc = ''.join(ch*2 for ch in bgc)
+                    if len(bgc) == 6:
+                        br = int(bgc[0:2], 16)
+                        bg_ = int(bgc[2:4], 16)
+                        bb = int(bgc[4:6], 16)
+                        if (cr, cg, cb) == (br, bg_, bb):
+                            # rotate the complement slightly
+                            cr = max(0, min(255, cr - 16))
+                            cg = max(0, min(255, cg - 8))
+                            cb = max(0, min(255, cb - 4))
+            except Exception:
+                pass
+            return f"#{cr:02x}{cg:02x}{cb:02x}"
+    except Exception:
+        return fallback
+
+def _parse_html_and_apply(raw) -> tuple[str, dict]:
+    """
+    Parse raw HTML fragment or document and extract plain text and tag ranges.
+    Returns (plain_text, meta) where meta is {'tags': {...}, 'links': [...]}
+    """
+    try:
+        m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
+        fragment = m.group(1) if m else raw
+
+        parser = _SimpleHTMLToTagged()
+        parser.feed(fragment)
+        plain, meta = parser.get_result()
+        # meta already shaped as {'tags': {...}, 'links': [...]}
+        return plain, meta
+    except Exception:
+        return raw, {}
 
 def _serialize_tags(tags_dict):
     """Return header string (commented base64 JSON) for provided tags dict, or '' if empty."""
