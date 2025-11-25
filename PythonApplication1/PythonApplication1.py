@@ -1066,6 +1066,39 @@ init_line_numbers()
 
 
 pairs = {'(': ')', '[': ']', '{': '}', '"': '"', "'": "'"}
+IN_CELL_NL = '\u2028'  # internal cell-newline marker (stored inside table cells so real \n doesn't break rows)
+
+def _hex_to_rgb(h: str) -> tuple[int, int, int]:
+    """Return (r,g,b) for hex like '#rrggbb' or 'rrggbb'."""
+    try:
+        s = (h or '').strip()
+        if s.startswith('#'):
+            s = s[1:]
+        if len(s) == 3:
+            s = ''.join(ch*2 for ch in s)
+        if len(s) != 6:
+            return (0, 0, 0)
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except Exception:
+        return (0, 0, 0)
+
+def _rgb_to_hex(r: int, g: int, b: int) -> str:
+    """Return '#rrggbb' from 0-255 RGB."""
+    try:
+        return f"#{int(r):02x}{int(g):02x}{int(b):02x}"
+    except Exception:
+        return "#000000"
+
+def _lighten_color(hexcol: str, factor: float = 0.15) -> str:
+    """Lighten hexcol by factor (0..1) toward white. Safe fallback if invalid."""
+    try:
+        r, g, b = _hex_to_rgb(hexcol or "#ffffff")
+        nr = int(r + (255 - r) * factor)
+        ng = int(g + (255 - g) * factor)
+        nb = int(b + (255 - b) * factor)
+        return _rgb_to_hex(nr, ng, nb)
+    except Exception:
+        return hexcol or "#ffffff"
 
 def _iter_text_widgets():
     """Yield all Text widgets in open editor tabs."""
@@ -1158,125 +1191,92 @@ def _apply_tag_configs_to_widget(tw):
             tw.tag_config("table", lmargin1=0, lmargin2=0)
             # each row starts on its own line (parser already inserted newlines)
             tw.tag_config("tr", lmargin1=0, lmargin2=0)
-            # cell styling: light background to distinguish cells
-            tw.tag_config("td", background="#F8F8F8")
+
+            # Compute a complimentary background for table cells:
+            # - Use editor fontColor as base; compute simple RGB complement.
+            # - If the computed color equals the overall background, nudge it slightly.
+            def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
+                try:
+                    if not hexcol:
+                        return fallback
+                    s = hexcol.strip()
+                    if s.startswith('#'):
+                        s = s[1:]
+                    if len(s) == 3:
+                        s = ''.join(ch*2 for ch in s)
+                    if len(s) != 6:
+                        return fallback
+                    r = int(s[0:2], 16)
+                    g = int(s[2:4], 16)
+                    b = int(s[4:6], 16)
+                    # simple complement
+                    cr = 255 - r
+                    cg = 255 - g
+                    cb = 255 - b
+                    # nudge if equals background color
+                    try:
+                        bg = (backgroundColor or "").strip()
+                        if bg and bg.startswith('#'):
+                            bgc = bg[1:]
+                            if len(bgc) == 3:
+                                bgc = ''.join(ch*2 for ch in bgc)
+                            if len(bgc) == 6:
+                                br = int(bgc[0:2], 16)
+                                bg_ = int(bgc[2:4], 16)
+                                bb = int(bgc[4:6], 16)
+                                if (cr, cg, cb) == (br, bg_, bb):
+                                    # rotate the complement slightly
+                                    cr = max(0, min(255, cr - 16))
+                                    cg = max(0, min(255, cg - 8))
+                                    cb = max(0, min(255, cb - 4))
+                    except Exception:
+                        pass
+                    return f"#{cr:02x}{cg:02x}{cb:02x}"
+                except Exception:
+                    return fallback
+
+            try:
+                # Make cell background several shades lighter than editor background
+                base_bg = (backgroundColor or "#ffffff").strip() or "#ffffff"
+                # apply a small incremental lighten (approx 3-4 subtle steps)
+                td_bg = _lighten_color(base_bg, 0.18)
+            except Exception:
+                td_bg = "#F8F8F8"
+            # cell styling: use complimentary background for table cells
+            try:
+                tw.tag_config("td", background=td_bg)
+            except Exception:
+                pass
             # header cell: bold + slightly darker background
-            tw.tag_config("th", background="#E8E8E8", font=(fontName, fontSize, "bold"))
+            tw.tag_config("th", background=_lighten_color(base_bg, 0.08), font=(fontName, fontSize, "bold"))
             # lists: indent and slightly different margin
             tw.tag_config("li", lmargin1=20, lmargin2=20)
             tw.tag_config("ul", lmargin1=12, lmargin2=12)
             tw.tag_config("ol", lmargin1=12, lmargin2=12)
+
+            try:
+                bg_contrast = _contrast_text_color(base_bg)
+                sep_color = "#000000" if bg_contrast == "#FFFFFF" else "#FFFFFF"
+                # set both foreground and background so the tab slot appears as a solid block
+                tw.tag_config("table_sep", foreground=sep_color, background=sep_color)
+                # ensure separator displays above td backgrounds
+                try:
+                    tw.tag_raise("table_sep", "td")
+                except Exception:
+                    try:
+                        tw.tag_raise("table_sep")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         except Exception:
             pass
 
         # hyperlink tag: blue + underline and mouse bindings to open link
         try:
             tw.tag_config("hyperlink", foreground="#0000EE", underline=True)
-
-            def _find_hyperlink_for_index(w, idx):
-                """Return (start_idx_str, end_idx_str, mapping_entry) or (None, None, None)."""
-                try:
-                    rngs = w.tag_ranges("hyperlink")
-                    for i in range(0, len(rngs), 2):
-                        s = rngs[i]
-                        e = rngs[i + 1]
-                        if w.compare(s, "<=", idx) and w.compare(idx, "<", e):
-                            key = (str(s), str(e))
-                            mapping = getattr(w, '_hyperlink_map', {})
-                            entry = mapping.get(key)
-                            return str(s), str(e), entry
-                except Exception:
-                    pass
-                return None, None, None
-
-            def _on_hyperlink_enter(event):
-                try:
-                    w = event.widget
-                    idx = w.index(f"@{event.x},{event.y}")
-                    s_str, e_str, entry = _find_hyperlink_for_index(w, idx)
-                    if entry is None:
-                        # show visible text if no mapping
-                        try:
-                            if s_str and e_str:
-                                text = w.get(s_str, e_str).strip()
-                                statusBar.config(text=text)
-                        except Exception:
-                            pass
-                        try:
-                            w.config(cursor="hand2")
-                        except Exception:
-                            pass
-                        return
-                    # entry may be a dict {'href':..., 'title':...} or a plain string (legacy)
-                    href = entry.get('href') if isinstance(entry, dict) else entry
-                    title = entry.get('title') if isinstance(entry, dict) else None
-                    display = title or href or ''
-                    try:
-                        statusBar.config(text=display)
-                    except Exception:
-                        pass
-                    try:
-                        w.config(cursor="hand2")
-                    except Exception:
-                        pass
-                except Exception:
-                    pass
-
-            def _on_hyperlink_leave(event):
-                try:
-                    event.widget.config(cursor="")
-                except Exception:
-                    pass
-                try:
-                    # restore normal status (line/col)
-                    update_status_bar()
-                except Exception:
-                    pass
-
-            def _on_hyperlink_click(event):
-                try:
-                    w = event.widget
-                    idx = w.index(f"@{event.x},{event.y}")
-                    s_str, e_str, entry = _find_hyperlink_for_index(w, idx)
-                    url_text = None
-                    if entry is None:
-                        if s_str and e_str:
-                            url_text = w.get(s_str, e_str).strip()
-                    else:
-                        if isinstance(entry, dict):
-                            url_text = entry.get('href')
-                        else:
-                            url_text = entry
-                    if not url_text:
-                        return
-                    import urllib.parse as up
-                    if url_text.lower().startswith("www."):
-                        url_text = "http://" + url_text
-                    parsed = up.urlsplit(url_text)
-                    scheme = parsed.scheme.lower() if parsed.scheme else ''
-                    if scheme in ("http", "https"):
-                        fetch_and_open_url(url_text, open_in_new_tab=False)
-                        return
-                    if scheme == "file":
-                        p = parsed.path
-                        if re.match(r'^/[A-Za-z]:', p):
-                            p = p.lstrip('/')
-                        p = p.replace('/', os.sep)
-                        root.after(0, lambda path=p: _open_path(path, open_in_new_tab=False))
-                        return
-                    if not scheme:
-                        if os.path.exists(url_text):
-                            root.after(0, lambda path=url_text: _open_path(path, open_in_new_tab=False))
-                            return
-                        else:
-                            fetch_and_open_url("http://" + url_text, open_in_new_tab=False)
-                            return
-                except Exception:
-                    pass
-
-            tw.tag_bind("hyperlink", "<Enter>", _on_hyperlink_enter)
-            tw.tag_bind("hyperlink", "<Leave>", _on_hyperlink_leave)
-            tw.tag_bind("hyperlink", "<Button-1>", _on_hyperlink_click)
+            ...
         except Exception:
             pass
 
@@ -1296,6 +1296,248 @@ def _find_tag_range_at_index(widget: Text, idx: str, tag_name: str):
         pass
     return None, None
 
+def _table_sync_column_at_index(widget: Text, idx: str):
+    """Ensure the column containing idx has uniform first-line widths across rows by padding cells with spaces.
+
+    Best-effort only: pads shorter first-lines in the same column so tab offsets remain aligned.
+    """
+    try:
+        # find encompassing table range
+        tstart, tend = _find_tag_range_at_index(widget, idx, 'table')
+        if not tstart or not tend:
+            return
+
+        # get table text and base offset
+        table_text = widget.get(tstart, tend)
+        if not table_text:
+            return
+        base_off = len(widget.get('1.0', tstart))
+
+        rows = table_text.split('\n')
+        # determine column index of cursor within its row
+        # compute cursor absolute offset within table
+        cursor_abs = len(widget.get('1.0', widget.index(idx))) - base_off
+        # locate row and cell containing cursor by walking the table string
+        cum = 0
+        cursor_row = None
+        for r_i, r in enumerate(rows):
+            row_len = len(r)
+            if cum <= cursor_abs <= cum + row_len:
+                cursor_row = r_i
+                offset_in_row = cursor_abs - cum
+                break
+            cum += row_len + 1  # +1 for the newline
+        if cursor_row is None:
+            return
+        # find column index by counting tabs in the row up to offset_in_row
+        cur_row_cells = rows[cursor_row].split('\t')
+        col_index = 0
+        running = 0
+        for ci, ctext in enumerate(cur_row_cells):
+            running += len(ctext)
+            if offset_in_row <= running:
+                col_index = ci
+                break
+            # account for tab separator
+            running += 1  # the tab char
+            col_index = ci + 1
+
+        # collect first-line lengths per row for this column and compute insert operations needed
+        first_line_lens = []
+        ops = []  # list of (abs_offset, text_to_insert)
+        table_cursor = 0
+        for r_idx, row in enumerate(rows):
+            cells = row.split('\t')
+            if col_index >= len(cells):
+                first_line_lens.append(0)
+                table_cursor += len(row) + 1
+                continue
+            cell = cells[col_index]
+            # interpret internal marker as newline for first-line measurement
+            first_line = cell.replace(IN_CELL_NL, '\n').split('\n')[0] if cell else ''
+            first_line_lens.append(len(first_line))
+            table_cursor += len(row) + 1
+
+        if not first_line_lens:
+            return
+
+        target_max = max(first_line_lens)
+
+        # if nothing to pad, exit
+        if target_max <= 0:
+            return
+
+        # now compute where to insert padding for each row that is short
+        # iterate rows again to compute precise cell start offsets
+        abs_cursor = 0  # offset inside table_text
+        for r_idx, row in enumerate(rows):
+            row_start_off = abs_cursor
+            cells = row.split('\t')
+            # compute cell start offset by summing preceding cells+tabs
+            cell_start_off = row_start_off
+            for ci in range(min(col_index, len(cells))):
+                cell_start_off += len(cells[ci]) + 1  # +1 for the tab
+            if col_index >= len(cells):
+                abs_cursor += len(row) + 1
+                continue
+            cell_text = cells[col_index]
+            # find end of first-line inside this cell (either IN_CELL_NL or true end)
+            repl = cell_text
+            nl_pos = repl.find(IN_CELL_NL)
+            if nl_pos >= 0:
+                first_line_len = nl_pos
+                insert_pos_in_cell = nl_pos  # insert before the marker so visual first-line padded
+            else:
+                # no internal marker; first line is the entire cell (we want to pad before the tab or row end)
+                first_line_len = len(repl)
+                insert_pos_in_cell = first_line_len
+            cur_len = first_line_lens[r_idx]
+            if cur_len < target_max:
+                pad = target_max - cur_len
+                abs_insert_off = base_off + cell_start_off + insert_pos_in_cell
+                ops.append((abs_insert_off, ' ' * pad))
+            abs_cursor += len(row) + 1
+
+        if not ops:
+            return
+
+        # apply operations from highest offset to lowest so earlier inserts don't shift later offsets
+        ops.sort(key=lambda x: x[0], reverse=True)
+        for off, txt in ops:
+            try:
+                pos = widget.index(f"1.0 + {off}c")
+                widget.insert(pos, txt)
+            except Exception:
+                pass
+
+        # refresh visual tags & highlighting
+        safe_highlight_event(None)
+    except Exception:
+        pass
+
+def _table_live_adjust(event=None):
+    """KeyRelease handler wrapper — only act when editing inside a table and when printable keys or deletes occur."""
+    try:
+        w = event.widget if hasattr(event, 'widget') else textArea
+        if not isinstance(w, Text):
+            return
+        # cheap filter: only run on likely content keys to reduce churn
+        ks = getattr(event, 'keysym', '') or ''
+        ch = getattr(event, 'char', '')
+        interesting = False
+        if ch and (ch.isprintable() or ch.isspace()):
+            interesting = True
+        if ks in ('BackSpace', 'Delete'):
+            interesting = True
+        if not interesting:
+            return
+        idx = w.index('insert')
+        # only run if cursor inside a table tag
+        tstart, tend = _find_tag_range_at_index(w, idx, 'table')
+        if not tstart:
+            return
+        _table_sync_column_at_index(w, idx)
+    except Exception:
+        pass
+
+def _text_area_return(event):
+    """Return handler for main Text widget: when inside a table cell insert an in-cell newline marker
+    instead of breaking the table. Otherwise perform normal smart newline behavior."""
+    try:
+        w = event.widget
+        if not isinstance(w, Text):
+            return
+        idx = w.index('insert')
+        # if cursor is inside a td range, insert internal marker and keep table intact
+        tags_here = w.tag_names(idx)
+        if 'td' in tags_here:
+            try:
+                w.insert(idx, IN_CELL_NL)
+                # move caret after inserted marker
+                w.mark_set('insert', f"{idx} + 1c")
+                # reapply a small visual highlight update
+                safe_highlight_event(None)
+            except Exception:
+                pass
+            return 'break'
+        # otherwise default behavior: smart newline + UI refresh
+        try:
+            smart_newline(event)
+        except Exception:
+            pass
+        try:
+            safe_highlight_event(event)
+        except Exception:
+            pass
+        return 'break'
+    except Exception:
+        return None
+
+def reflow_numbered_lists():
+    """Renumber ordered lists (lines starting with digits + '. ') across the current buffer.
+
+    Finds contiguous runs of lines that look like ordered-list items and renumbers them from 1
+    (preserving indentation and trailing text). Works on the active textArea and preserves tags
+    as best-effort by using _replace_region_preserve_tags on the whole buffer.
+    """
+    try:
+        if not textArea:
+            return
+        content = textArea.get('1.0', 'end-1c')
+        if not content:
+            return
+
+        lines = content.splitlines()
+        out_lines = []
+        i = 0
+        ordered_re = re.compile(r'^(\s*)(\d+)\.\s+(.*)$')
+        while i < len(lines):
+            m = ordered_re.match(lines[i])
+            if not m:
+                out_lines.append(lines[i])
+                i += 1
+                continue
+
+            # Start of an ordered block
+            indent = m.group(1)
+            block_start = i
+            seq = []
+            # collect contiguous lines that match same indent (or deeper nested with same indent prefix)
+            while i < len(lines):
+                mm = ordered_re.match(lines[i])
+                if not mm:
+                    break
+                # require identical indentation for simple reflow; preserve nested blocks separately
+                if mm.group(1) != indent:
+                    break
+                seq.append(mm.group(3))  # store the item text only
+                i += 1
+
+            # Renumber collected sequence starting at 1
+            for idx, item_text in enumerate(seq, start=1):
+                out_lines.append(f"{indent}{idx}. {item_text}")
+        new_content = "\n".join(out_lines)
+
+        # If nothing changed, do nothing
+        if new_content == content:
+            return
+
+        # Replace whole buffer while preserving tags where possible
+        try:
+            _replace_region_preserve_tags('1.0', 'end-1c', new_content)
+        except Exception:
+            # fallback: plain replace
+            try:
+                textArea.delete('1.0', 'end')
+                textArea.insert('1.0', new_content)
+            except Exception:
+                pass
+
+        # Refresh UI
+        safe_highlight_event(None)
+    except Exception:
+        pass
+
 def _on_text_right_click(event):
     """Show context menu if right-click is over a table range; otherwise default selection menu."""
     try:
@@ -1306,15 +1548,51 @@ def _on_text_right_click(event):
         tstart, tend = _find_tag_range_at_index(w, idx, 'table')
         # build context menu
         menu = Menu(root, tearoff=0)
+
         # Always provide Find/Replace in context menu
         try:
             menu.add_command(label="Find/Replace...", command=lambda: open_find_replace())
             menu.add_separator()
         except Exception:
             pass
+
+        # Add Table option (insert at cursor)
+        try:
+            menu.add_command(label="Add Table...", command=lambda w=w: open_table_editor(w, None, None))
+            menu.add_separator()
+        except Exception:
+            pass
+
         if tstart and tend:
             menu.add_command(label="Edit table...", command=lambda s=tstart, e=tend, w=w: open_table_editor(w, s, e))
-            menu.add_separator()        
+            menu.add_separator()
+
+        # Reflow numbered lists for current buffer (best-effort)
+        try:
+            menu.add_command(label="Reflow numbered lists", command=lambda: reflow_numbered_lists())
+            menu.add_separator()
+        except Exception:
+            pass
+
+        # If selection contains an ordered-list block, offer reorder-selection
+        try:
+            sel = w.tag_ranges('sel')
+            sel_has_ordered = False
+            if sel and len(sel) >= 2:
+                sel_text = w.get(sel[0], sel[1])
+                if re.search(r'^\s*\d+\.\s+', sel_text, flags=re.MULTILINE):
+                    sel_has_ordered = True
+            else:
+                # check current line
+                cur_line_text = w.get(f"{w.index('insert').split('.')[0]}.0", f"{w.index('insert').split('.')[0]}.0 lineend")
+                if re.match(r'^\s*\d+\.\s+', cur_line_text):
+                    sel_has_ordered = True
+            if sel_has_ordered:
+                menu.add_command(label="Reorder selection", command=lambda: reorder_selection())
+                menu.add_separator()
+        except Exception:
+            pass
+
         # fallback items (cut/copy/paste) kept minimal
         try:
             menu.add_separator()
@@ -1358,22 +1636,116 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
 
         # dynamic grid of Entry widgets
         entries = [ [None]*max(1, len(grid[0])) for _ in range(max(1, len(grid))) ]
+
+        # Heuristic: if the first cell starts with a single accidental leading space,
+        # remove that single space when populating the editor so the dialog doesn't show the spurious space.
+        # Only strip a single leading space on row=0,col=0 to avoid changing intentional leading whitespace elsewhere.
+        def _sanitize_initial_grid(g):
+            try:
+                if not g or not g[0]:
+                    return g
+                if len(g) >= 1 and len(g[0]) >= 1:
+                    first = g[0][0]
+                    # convert any stored in-cell newline markers back to real newlines for editing
+                    if isinstance(first, str) and IN_CELL_NL in first:
+                        g[0][0] = first.replace(IN_CELL_NL, '\n')
+                    if isinstance(g[0][0], str):
+                        first = g[0][0]
+                        if first.startswith(' ') and not first.startswith('  '):
+                            g[0][0] = first[1:]
+                # also ensure any other cells replace IN_CELL_NL with real newlines
+                for r in range(len(g)):
+                    for c in range(len(g[r])):
+                        if isinstance(g[r][c], str) and IN_CELL_NL in g[r][c]:
+                            g[r][c] = g[r][c].replace(IN_CELL_NL, '\n')
+                return g
+            except Exception:
+                return g
+
+        grid = _sanitize_initial_grid(grid)
+
         def rebuild_grid(container, grid_data):
             # destroy existing children
             for child in container.winfo_children():
                 child.destroy()
             rows = len(grid_data)
             cols = max(len(r) for r in grid_data) if rows else 0
+            # ensure entries matrix matches grid size
+            nonlocal entries
+            entries = [ [None]*cols for _ in range(rows) ]
             for r in range(rows):
                 for c in range(cols):
                     val = grid_data[r][c] if c < len(grid_data[r]) else ''
-                    ent = Entry(container, width=max(10, len(val)+2))
+                    ent = Entry(container, width=max(10, max(10, len(val.splitlines()[0]) + 2 if val else 10)))
                     ent.grid(row=r, column=c, padx=2, pady=2, sticky='nsew')
-                    ent.insert(0, val)
+                    # insert the single-line representation (internal newlines shown as literal newlines aren't supported in Entry)
+                    # we preserve actual newlines by replacing them with a visible placeholder in the Entry UI (join with ' ↵ ').
+                    if isinstance(val, str) and '\n' in val:
+                        display = val.replace('\n', ' ↵ ')
+                    else:
+                        display = val
+                    ent.insert(0, display)
                     entries[r][c] = ent
+                # separator columns (visual black bar) as Labels (one per gap between columns)
+                # place separators to the right of each column except last
+                for c in range(cols - 1):
+                    sep = Label(container, width=1, relief='flat', bd=0)
+                    # color configured later via tag; here choose black/white based on editor bg
+                    bg_contrast = _contrast_text_color(backgroundColor or "#ffffff")
+                    sep_color = "#FFFFFF" if bg_contrast == "#FFFFFF" else "#000000"
+                    sep.config(bg=sep_color)
+                    # place separator in a separate grid column (interleaving is easier done by placing separators in same column index with sticky)
+                    # We'll put separators using grid on the same column with sticky so they appear between entries visually.
+                    # To keep things simple we won't create extra columns; visual separators rely on spacing between entries.
+                    # (This label helps show a visual column border in the editor dialog.)
+                    sep.grid(row=r, column=cols + c + 1, padx=0, pady=2, sticky='ns')
                 # make columns expand equally
                 for c in range(cols):
                     container.grid_columnconfigure(c, weight=1)
+
+            # bind key handlers after rebuild so we can adjust widths live
+            for cc in range(cols):
+                def make_handler(col):
+                    return lambda e: _sync_column_widths(col)
+                for rr in range(rows):
+                    ent = entries[rr][cc]
+                    if ent:
+                        ent.bind('<KeyRelease>', make_handler(cc), add=False)
+
+            # sync initial widths
+            for ccol in range(cols):
+                _sync_column_widths(ccol)
+
+        def _sync_column_widths(col_index: int):
+            """Compute max visible length in a column and set each Entry width to match."""
+            try:
+                if not entries or col_index < 0:
+                    return
+                maxlen = 0
+                rows_count = len(entries)
+                for r in range(rows_count):
+                    try:
+                        ent = entries[r][col_index]
+                        if not ent:
+                            continue
+                        txt = ent.get() or ''
+                        # consider the visible representation length (replace internal ↵ with single char)
+                        txt_len = max(len(part) for part in txt.replace(' ↵ ', '\n').splitlines()) if txt else 0
+                        if txt_len > maxlen:
+                            maxlen = txt_len
+                    except Exception:
+                        pass
+                new_w = max(10, maxlen + 2)
+                for r in range(rows_count):
+                    try:
+                        ent = entries[r][col_index]
+                        if ent:
+                            ent.config(width=new_w)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
         # initialize entries structure sized to grid
         rows_init = max(1, len(grid))
         cols_init = max(1, max((len(r) for r in grid), default=1))
@@ -1387,9 +1759,12 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
         def add_row():
             rcount = len(entries)
             ccount = len(entries[0]) if entries else 1
-            new_row = [''] * ccount
+            for r in entries:
+                # ensure each row has same length
+                while len(r) < ccount:
+                    r.append(None)
             entries.append([None]*ccount)
-            rebuild_grid(frm, [[ent.get() for ent in row] for row in entries if any(ent is not None for ent in row)] if entries else [new_row])
+            rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
 
         def remove_row():
             if len(entries) <= 1:
@@ -1414,14 +1789,52 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
             try:
                 # reconstruct table text with tabs/newlines from current entries
                 new_rows = []
+                # gather values into a 2D list and compute column widths
+                grid_vals = []
                 for r in range(len(entries)):
                     row_vals = []
                     for c in range(len(entries[0])):
                         ent = entries[r][c]
                         val = ent.get() if ent else ''
+                        # restore internal newline markers if the user used the visible ↵ marker
+                        if ' ↵ ' in val:
+                            val = val.replace(' ↵ ', '\n')
+                        # Replace real newlines with internal marker so rows remain row-delimited in main Text widget
+                        if '\n' in val:
+                            val = val.replace('\n', IN_CELL_NL)
                         row_vals.append(val)
-                    new_rows.append('\t'.join(row_vals))
+                    grid_vals.append(row_vals)
+
+                # compute max width per column (characters)
+                max_cols = max(len(row) for row in grid_vals) if grid_vals else 0
+                col_widths = [0] * max_cols
+                for row in grid_vals:
+                    for ci in range(max_cols):
+                        text = row[ci] if ci < len(row) else ''
+                        # measure by longest line inside the cell (account for internal markers)
+                        parts = text.replace(IN_CELL_NL, '\n').splitlines()
+                        longest = max((len(p) for p in parts), default=0)
+                        col_widths[ci] = max(col_widths[ci], longest)
+
+                # pad cells to uniform widths so visual wrapping is consistent across rows
+                for row in grid_vals:
+                    padded_cells = []
+                    for ci in range(max_cols):
+                        text = row[ci] if ci < len(row) else ''
+                        padded = text
+                        # pad the first line so column alignment is preserved visually
+                        parts = padded.replace(IN_CELL_NL, '\n').splitlines()
+                        if parts:
+                            parts[0] = parts[0].ljust(col_widths[ci])
+                        else:
+                            parts = [''.ljust(col_widths[ci])]
+                        # rejoin using internal marker so the main buffer doesn't get real newlines inside cells
+                        padded = IN_CELL_NL.join(parts)
+                        padded_cells.append(padded)
+                    new_rows.append('\t'.join(padded_cells))
+
                 new_text = '\n'.join(new_rows)
+
                 if insert_mode:
                     # insert at current cursor
                     ins_idx = widget.index('insert')
@@ -1438,7 +1851,7 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                 try:
                     start_idx = ins_start_idx
                     end_idx = widget.index(f"{start_idx} + {len(new_text)}c")
-                    for t in ('table','tr','td','th'):
+                    for t in ('table','tr','td','th','table_sep'):
                         widget.tag_remove(t, start_idx, end_idx)
                 except Exception:
                     pass
@@ -1447,19 +1860,32 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                 for r_idx, line in enumerate(new_rows):
                     row_start_off = abs_start_off + cursor_off
                     cells = line.split('\t')
+                    # compute row_end_off once
+                    row_end_off = row_start_off + len(line)
                     cell_cursor = row_start_off
                     for c_idx, cell_text in enumerate(cells):
                         cs = cell_cursor
                         ce = cs + len(cell_text)
+                        # Add td background: include the separator (tab) so background fills cell area
+                        if c_idx < len(cells) - 1:
+                            ce_display = ce + 1  # include tab
+                        else:
+                            ce_display = row_end_off
                         # add td tag
                         try:
-                            widget.tag_add('td', f"1.0 + {cs}c", f"1.0 + {ce}c")
+                            widget.tag_add('td', f"1.0 + {cs}c", f"1.0 + {ce_display}c")
                         except Exception:
                             pass
-                        # advance: account for tab char between cells
+                        # add a visual separator tag on the tab char (if present)
+                        if c_idx < len(cells) - 1:
+                            try:
+                                sep_offset = ce  # the tab character offset
+                                widget.tag_add('table_sep', f"1.0 + {sep_offset}c", f"1.0 + {sep_offset + 1}c")
+                            except Exception:
+                                pass
+                        # advance: account for tab char between cells (the stored new_rows include tabs)
                         cell_cursor = ce + 1
                     # add tr tag for the whole row
-                    row_end_off = row_start_off + len(line)
                     try:
                         widget.tag_add('tr', f"1.0 + {row_start_off}c", f"1.0 + {row_end_off}c")
                     except Exception:
@@ -1509,6 +1935,77 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
     except Exception:
         pass
 
+def reorder_selection():
+    """Renumber ordered list items inside current selection (or current paragraph/lines if no selection)."""
+    try:
+        if not textArea:
+            return
+        # determine region: use selection if present, otherwise current line or contiguous ordered-block around cursor
+        sel = textArea.tag_ranges('sel')
+        if sel and len(sel) >= 2:
+            s_idx = sel[0]
+            e_idx = sel[1]
+        else:
+            # select current contiguous block of lines around cursor
+            cur_line = int(textArea.index('insert').split('.')[0])
+            # expand up
+            start_line = cur_line
+            while start_line > 1:
+                line_text = textArea.get(f"{start_line-1}.0", f"{start_line-1}.0 lineend")
+                if re.match(r'^\s*\d+\.\s+', line_text):
+                    start_line -= 1
+                else:
+                    break
+            # expand down
+            end_line = cur_line
+            max_line = int(textArea.index('end-1c').split('.')[0])
+            while end_line < max_line:
+                line_text = textArea.get(f"{end_line+1}.0", f"{end_line+1}.0 lineend")
+                if re.match(r'^\s*\d+\.\s+', line_text):
+                    end_line += 1
+                else:
+                    break
+            s_idx = f"{start_line}.0"
+            e_idx = f"{end_line}.0 lineend"
+        # get text and split lines
+        block = textArea.get(s_idx, e_idx)
+        lines = block.splitlines()
+        ordered_re = re.compile(r'^(\s*)(\d+)\.\s+(.*)$')
+        # detect whether there is at least one ordered line
+        has_ordered = any(ordered_re.match(l) for l in lines)
+        if not has_ordered:
+            return
+        # renumber contiguous ordered sub-blocks inside selection separately
+        out_lines = []
+        i = 0
+        while i < len(lines):
+            m = ordered_re.match(lines[i])
+            if not m:
+                out_lines.append(lines[i])
+                i += 1
+                continue
+            # collect contiguous same-indent block
+            indent = m.group(1)
+            seq = []
+            while i < len(lines):
+                mm = ordered_re.match(lines[i])
+                if not mm or mm.group(1) != indent:
+                    break
+                seq.append(mm.group(3))
+                i += 1
+            for idx, item in enumerate(seq, start=1):
+                out_lines.append(f"{indent}{idx}. {item}")
+        new_block = "\n".join(out_lines)
+        # replace region preserving tags if possible
+        try:
+            _replace_region_preserve_tags(s_idx, e_idx, new_block)
+        except Exception:
+            textArea.delete(s_idx, e_idx)
+            textArea.insert(s_idx, new_block)
+        safe_highlight_event(None)
+    except Exception:
+        pass
+
 def auto_pair(event):
     ch = event.char
     if ch in pairs:
@@ -1533,8 +2030,19 @@ def _configure_text_widget(tw):
     # event bindings (same behavior as before) -- bound per-widget
     for k in ['(', '[', '{', '"', "'"]:
         tw.bind(k, auto_pair)
-    tw.bind('<Return>', lambda e: smart_newline(e))
-    tw.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+    tw.bind('<Return>', lambda e: _text_area_return(e))
+    tw.bind(
+        '<KeyRelease>',
+        lambda e: (
+            _table_live_adjust(e),
+            safe_highlight_event(e),
+            detect_header_and_prompt(e),
+            highlight_current_line(),
+            redraw_line_numbers(),
+            update_status_bar(),
+            show_trailing_whitespace()
+        )
+    )
     tw.bind('<Button-1>', lambda e: tw.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
     tw.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
     tw.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
@@ -3327,12 +3835,25 @@ def detect_header_and_prompt(event=None):
 
         # inspect the start of buffer and the line around insert
         try:
-            head = tw.get('1.0', '1.0 + 512c').lower()
+            head = tw.get('1.0', '1.0 + 1024c').lower()
         except Exception:
             head = ''
-        # HTML detection: <!doctype html or <html
-        if (not getattr(frame, '_template_prompted_html', False)) and ('<!doctype html' in head or '<html' in head):
-            # prompt user
+
+        # Improved HTML detection:
+        # - existing checks for DOCTYPE / <html remain
+        # - also detect presence of <table>, <th>, or common HTML head tags early
+        is_html_sig = False
+        try:
+            if ('<!doctype html' in head) or ('<html' in head) or ('<head' in head) or ('<body' in head):
+                is_html_sig = True
+            # table-ish content often indicates HTML fragment
+            if not is_html_sig and ('<table' in head or '<th' in head or '<tr' in head or '<td' in head):
+                is_html_sig = True
+        except Exception:
+            is_html_sig = False
+
+        # HTML prompt
+        if (not getattr(frame, '_template_prompted_html', False)) and is_html_sig:
             _ask_template_modal('html', tw)
             return
 
@@ -5719,6 +6240,11 @@ btn_sup = Button(presentToolBar, text='Sup', command=format_sup)
 btn_sup.pack(side=LEFT, padx=2, pady=2)
 btn_marquee = Button(presentToolBar, text='Marquee', command=format_marquee)
 btn_marquee.pack(side=LEFT, padx=2, pady=2)
+try:
+    add_table_btn = Button(presentToolBar, text='Add Table', command=lambda: open_table_editor(textArea, None, None))
+    add_table_btn.pack(side=RIGHT, padx=2, pady=2)
+except Exception:
+    pass
 
 # create refresh button on status bar (lower-right)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
@@ -5758,8 +6284,28 @@ fullScanToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
 # Bindings
 for k in ['(', '[', '{', '"', "'"]:
     textArea.bind(k, auto_pair)
-textArea.bind('<Return>', lambda e: (smart_newline, safe_highlight_event(e)))
-textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
+try:
+    textArea.bind('<Return>', _text_area_return)
+except Exception:
+    try:
+        textArea.bind('<Return>', lambda e: (safe_highlight_event(e), smart_newline(e)))
+    except Exception:
+        pass
+try:
+    textArea.bind(
+        '<KeyRelease>',
+        lambda e: (
+            _table_live_adjust(e),
+            safe_highlight_event(e),
+            detect_header_and_prompt(e),
+            highlight_current_line(),
+            redraw_line_numbers(),
+            update_status_bar(),
+            show_trailing_whitespace()
+        )
+    )
+except Exception:
+    textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
 textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
 textArea.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
