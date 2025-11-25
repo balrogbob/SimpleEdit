@@ -2319,7 +2319,9 @@ def _configure_text_widget(tw):
         )
     )
     tw.bind('<Button-1>', lambda e: tw.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-    tw.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+    tw.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
+    tw.bind('<Button-4>', lambda e: (redraw_line_numbers(), show_trailing_whitespace(), safe_highlight_event(e)), add=False)
+    tw.bind('<Button-5>', lambda e: (redraw_line_numbers(), show_trailing_whitespace(), safe_highlight_event(e)), add=False)
     tw.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
     # right-click context for table editing
     try:
@@ -2348,7 +2350,17 @@ def create_editor_tab(title='Untitled', content='', filename=''):
     tx.pack(side=LEFT, fill=BOTH, expand=True)
 
     # per-tab scrollbar (right)
-    scr = Scrollbar(frame, command=tx.yview)
+    # wrap the scrollbar command so scrolling also updates quick highlighting immediately
+    def _scroll_cmd(*args, _tx=tx):
+        try:
+            _tx.yview(*args)
+        except Exception:
+            pass
+        try:
+            safe_highlight_event(None)
+        except Exception:
+            pass
+    scr = Scrollbar(frame, command=_scroll_cmd)    
     tx.configure(yscrollcommand=scr.set)
     scr.pack(side=RIGHT, fill=Y)
 
@@ -2439,6 +2451,19 @@ def _on_tab_changed(event):
         redraw_line_numbers()
         update_status_bar()
         show_trailing_whitespace()
+
+
+        try:
+            global manual_detect_after_id
+            if manual_detect_after_id:
+                try:
+                    root.after_cancel(manual_detect_after_id)
+                except Exception:
+                    pass
+            # run after 1 second so UI settle and any initial insertions complete
+            manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+        except Exception:
+            pass
     except Exception:
         pass
 
@@ -3055,27 +3080,118 @@ def scan_syntax_presets(dirname='syntax'):
     return out
 
 
-def detect_syntax_preset_from_content(raw):
+def detect_syntax_preset_from_content(raw, filename_hint: str | None = None):
     """Return preset path if a matching preset looks appropriate for `raw`, otherwise None.
 
-    Currently supports simple HTML detection (<!doctype html>, <html ...>, <head>, common indicators).
-    Matching looks for 'html' in preset filename or preset INI 'name'. Add more rules as needed.
+    Detection rules are read from each preset's [Syntax] section. Supported detection keys:
+      - detect.regex, detect.regex.N : regular expressions (applied with re.I|re.S)
+      - detect.contains                : comma/semicolon/newline-separated literal substrings
+      - detect.priority                : integer priority (higher wins when multiple presets match)
+      - detect.filename                : substring matched against provided filename_hint (optional)
+    This makes detection extensible by editing / adding presets under `syntax/`.
     """
     try:
         if not raw or not isinstance(raw, str):
             return None
 
-        # quick heuristics
-        if re.search(r'(?i)<!doctype\s+html\b', raw) or re.search(r'(?i)<html\b', raw) or re.search(r'(?i)<head\b', raw) or re.search(r'(?i)<body\b', raw):
-            presets = scan_syntax_presets()
-            # prefer presets whose name or filename contains 'html'
-            for path, name, fname in presets:
-                if 'html' in name.lower() or 'html' in fname:
-                    return path
-            # fallback: return first preset if any
-            if presets:
-                return presets[0][0]
-        # future: add more file-type heuristics here (xml, json, css, etc.)
+        presets = scan_syntax_presets()
+        if not presets:
+            return None
+
+        matches = []  # list of (priority:int, index:int, path:str)
+
+        for idx, (path, name, fname) in enumerate(presets):
+            try:
+                cp = configparser.ConfigParser()
+                cp.read(path)
+                if not cp.has_section('Syntax'):
+                    continue
+
+                pr = 0
+                try:
+                    pr = int(cp.get('Syntax', 'detect.priority', fallback='0') or '0')
+                except Exception:
+                    pr = 0
+
+                # 1) regex-based detection (can provide multiple keys detect.regex, detect.regex.1, ...)
+                matched = False
+                try:
+                    for opt, val in cp.items('Syntax'):
+                        if opt.startswith('detect.regex'):
+                            pat = (val or '').strip()
+                            if not pat:
+                                continue
+                            try:
+                                if re.search(pat, raw, flags=re.I | re.S):
+                                    matches.append((pr, idx, path))
+                                    matched = True
+                                    break
+                            except Exception:
+                                # ignore invalid pattern
+                                continue
+                    if matched:
+                        continue
+                except Exception:
+                    pass
+
+                # 2) contains-based detection: comma/semicolon/newline separated tokens
+                try:
+                    contains = cp.get('Syntax', 'detect.contains', fallback='').strip()
+                    if contains:
+                        tokens = [t.strip() for t in re.split(r'[,\n;]+', contains) if t.strip()]
+                        low = raw.lower()
+                        for tok in tokens:
+                            if tok.lower() in low:
+                                matches.append((pr, idx, path))
+                                matched = True
+                                break
+                    if matched:
+                        continue
+                except Exception:
+                    pass
+
+                # 3) filename hint match (useful when caller supplies the filename)
+                if filename_hint:
+                    try:
+                        det_fn = cp.get('Syntax', 'detect.filename', fallback='').strip().lower()
+                        if det_fn and det_fn in (filename_hint or '').lower():
+                            matches.append((pr, idx, path))
+                            continue
+                    except Exception:
+                        pass
+
+                # 4) fallback: some presets may include a simple 'detect.ext' comma list
+                try:
+                    det_ext = cp.get('Syntax', 'detect.ext', fallback='').strip()
+                    if det_ext and filename_hint:
+                        exts = [e.strip().lstrip('.').lower() for e in re.split(r'[,\n;]+', det_ext) if e.strip()]
+                        if any((filename_hint.lower().endswith('.' + e) for e in exts)):
+                            matches.append((pr, idx, path))
+                            continue
+                except Exception:
+                    pass
+
+            except Exception:
+                # skip preset on error
+                continue
+
+        # if any preset matched, choose highest priority, then lowest index (stable)
+        if matches:
+            matches.sort(key=lambda x: (-x[0], x[1]))
+            return matches[0][2]
+
+        # legacy heuristics (keep existing simple html detection)
+        try:
+            if re.search(r'(?i)<!doctype\s+html\b', raw) or re.search(r'(?i)<html\b', raw) or re.search(r'(?i)<head\b', raw) or re.search(r'(?i)<body\b', raw):
+                presets = scan_syntax_presets()
+                for path, name, fname in presets:
+                    if 'html' in name.lower() or 'html' in fname:
+                        return path
+                if presets:
+                    return presets[0][0]
+        except Exception:
+            pass
+
     except Exception:
         pass
     return None
@@ -3124,6 +3240,8 @@ def apply_syntax_preset(path):
             return False
     except Exception:
         return False
+
+
 
 def load_syntax_config():
     """Load tag colors and regex overrides from config and apply them at runtime."""
@@ -4129,9 +4247,61 @@ def _apply_template_to_widget(tw, kind: str):
     except Exception:
         pass
 
+def create_template(kind: str, open_in_new_tab: bool = True):
+    """Create a template of `kind` ('python'|'html'|'md'|'json').
+
+    By default opens in a new tab. Uses `_apply_template_to_widget` for content.
+    """
+    try:
+        title_map = {
+            'python': 'New - Python',
+            'html': 'New - HTML',
+            'md': 'New - Markdown',
+            'markdown': 'New - Markdown',
+            'json': 'New - JSON'
+        }
+        kind_norm = (kind or 'python').lower()
+        title = title_map.get(kind_norm, 'Untitled')
+
+        if open_in_new_tab:
+            tx, fr = create_editor_tab(title, '', filename='')
+            # Insert template into the new text widget
+            try:
+                _apply_template_to_widget(tx, kind_norm)
+                _apply_tag_configs_to_widget(tx)
+                tx.focus_set()
+            except Exception:
+                pass
+            return tx, fr
+
+        # fallback: replace current tab content
+        try:
+            textArea.delete('1.0', 'end')
+            _apply_template_to_widget(textArea, kind_norm)
+            _apply_tag_configs_to_widget(textArea)
+            textArea.focus_set()
+            # ensure per-tab metadata updated
+            sel = editorNotebook.select()
+            if sel:
+                try:
+                    frame = root.nametowidget(sel)
+                    frame.fileName = ''
+                except Exception:
+                    pass
+            root.fileName = ''
+        except Exception:
+            pass
+        return textArea, getattr(root, 'nametowidget', lambda s: None)(editorNotebook.select())
+    except Exception:
+        return None, None
 
 def _ask_template_modal(kind: str, tw):
     """Show modal asking whether to create a template for kind in widget `tw`."""
+    try:
+        if globals().get('suppress_template_prompt_session') and suppress_template_prompt_session.get():
+                return
+    except Exception:
+        pass
     try:
         dlg = Toplevel(root)
         dlg.transient(root)
@@ -4143,7 +4313,7 @@ def _ask_template_modal(kind: str, tw):
         ttk.Label(container, text=msg, justify='left').grid(row=0, column=0, columnspan=2, sticky='w', pady=(0,8))
 
         remember_var = IntVar(value=0)
-        ttk.Checkbutton(container, text="Don't ask again for this tab", variable=remember_var).grid(row=1, column=0, columnspan=2, sticky='w')
+        ttk.Checkbutton(container, text="Don't ask again for this tab", variable=suppress_template_prompt_session).grid(row=1, column=0, columnspan=2, sticky='w')
 
         def do_cancel():
             try:
@@ -4158,8 +4328,22 @@ def _ask_template_modal(kind: str, tw):
                 if remember_var.get():
                     if kind == 'html':
                         setattr(frame, '_template_prompted_html', True)
+                        # also set flag on the Text widget itself to be robust
+                        try:
+                            setattr(tw, '_template_prompted_html', True)
+                        except Exception:
+                            pass
                     else:
                         setattr(frame, '_template_prompted_py', True)
+                        try:
+                            setattr(tw, '_template_prompted_py', True)
+                        except Exception:
+                            pass
+                    # Also suppress all template prompts for this session (modal checkbox => session opt-out)
+                    try:
+                        suppress_template_prompt_session.set(True)
+                    except Exception:
+                        pass
             except Exception:
                 pass
             try:
@@ -4184,6 +4368,18 @@ def _ask_template_modal(kind: str, tw):
 def detect_header_and_prompt(event=None):
     """Detect typed file-header hints (HTML DOCTYPE/HTML or Python shebang/triple-quote) and prompt for templates."""
     try:
+        # Session opt-out: if user checked "Don't ask again" in any modal this session, skip prompting
+        try:
+            if globals().get('suppress_template_prompt_session') and suppress_template_prompt_session.get():
+                return
+        except Exception:
+            pass
+        # Global opt-out: toolbar checkbox 'Suppress Template Prompt' — when checked we skip prompting
+        try:
+            if globals().get('templatePromptVar', BooleanVar(value=False)).get():
+                return
+        except Exception:
+            pass
         if not event or not hasattr(event, 'widget'):
             return
         tw = event.widget
@@ -4196,8 +4392,10 @@ def detect_header_and_prompt(event=None):
             return
 
         # avoid repeated prompting per tab
-        if getattr(frame, '_template_prompted_html', False) and getattr(frame, '_template_prompted_py', False):
-            return
+        # consider flags set on the frame OR the text widget (be robust)
+        html_prompted = getattr(frame, '_template_prompted_html', False) or getattr(tw, '_template_prompted_html', False)
+        py_prompted = getattr(frame, '_template_prompted_py', False) or getattr(tw, '_template_prompted_py', False)
+        if html_prompted and py_prompted:            return
 
         # inspect the start of buffer and the line around insert
         try:
@@ -5425,13 +5623,45 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
     try:
         global persisted_vars, persisted_defs
 
+        # determine current tab frame and any transient syntax
+        trans = None
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                trans = getattr(frame, '_transient_syntax', None)
+            else:
+                trans = getattr(root, '_transient_syntax', None)
+        except Exception:
+            trans = getattr(root, '_transient_syntax', None)
+
+        # select regexes and lists from transient if present, otherwise fall back to globals
+        STRING_RE_loc = trans['regexes'].get('STRING_RE') if (trans and 'STRING_RE' in trans.get('regexes', {})) else STRING_RE
+        COMMENT_RE_loc = trans['regexes'].get('COMMENT_RE') if (trans and 'COMMENT_RE' in trans.get('regexes', {})) else COMMENT_RE
+        NUMBER_RE_loc = trans['regexes'].get('NUMBER_RE') if (trans and 'NUMBER_RE' in trans.get('regexes', {})) else NUMBER_RE
+        DECORATOR_RE_loc = trans['regexes'].get('DECORATOR_RE') if (trans and 'DECORATOR_RE' in trans.get('regexes', {})) else DECORATOR_RE
+        CLASS_RE_loc = trans['regexes'].get('CLASS_RE') if (trans and 'CLASS_RE' in trans.get('regexes', {})) else CLASS_RE
+        VAR_ASSIGN_RE_loc = trans['regexes'].get('VAR_ASSIGN_RE') if (trans and 'VAR_ASSIGN_RE' in trans.get('regexes', {})) else VAR_ASSIGN_RE
+        CONSTANT_RE_loc = trans['regexes'].get('CONSTANT_RE') if (trans and 'CONSTANT_RE' in trans.get('regexes', {})) else CONSTANT_RE
+        ATTRIBUTE_RE_loc = trans['regexes'].get('ATTRIBUTE_RE') if (trans and 'ATTRIBUTE_RE' in trans.get('regexes', {})) else ATTRIBUTE_RE
+        DUNDER_RE_loc = trans['regexes'].get('DUNDER_RE') if (trans and 'DUNDER_RE' in trans.get('regexes', {})) else DUNDER_RE
+        FSTRING_RE_loc = trans['regexes'].get('FSTRING_RE') if (trans and 'FSTRING_RE' in trans.get('regexes', {})) else FSTRING_RE
+
+        # keywords/builtins
+        KEYWORD_RE_loc = trans['keywords'][1] if (trans and trans.get('keywords')) else KEYWORD_RE
+        BUILTIN_RE_loc = trans['builtins'][1] if (trans and trans.get('builtins')) else BUILTIN_RE
+
         # determine region to scan (visible region by default)
         if scan_start is None or scan_end is None:
             try:
+                # compute visible viewport lines and add a small padding margin
                 first_visible = textArea.index('@0,0')
                 last_visible = textArea.index(f'@0,{textArea.winfo_height()}')
                 start_line = int(first_visible.split('.')[0])
                 end_line = int(last_visible.split('.')[0])
+                # add small padding of a couple lines to give context
+                start_line = max(1, start_line - 2)
+                end_line = end_line + 2
                 start = f'{start_line}.0'
                 end = f'{end_line}.0 lineend'
             except Exception:
@@ -5652,6 +5882,20 @@ def color_hex_codes(tw: Text | None = None, scan_start: str = "1.0", scan_end: s
         if not tw or not isinstance(tw, Text):
             return
 
+        # If caller did not request a specific region (defaults), limit to the visible viewport to avoid scanning huge files.
+        if tw is None:
+            tw = globals().get('textArea')
+        # compute viewport when defaults are used (use line numbers so constructed indices are valid)
+        try:
+            if (scan_start == "1.0" and scan_end == "end-1c") and isinstance(tw, Text):
+                first_vis = tw.index('@0,0')
+                last_vis = tw.index(f'@0,{tw.winfo_height()}')
+                first_line = int(first_vis.split('.')[0])
+                last_line = int(last_vis.split('.')[0])
+                scan_start = f"{first_line}.0"
+                scan_end = f"{last_line}.0 lineend"
+        except Exception:
+            pass
         try:
             content = tw.get(scan_start, scan_end)
         except Exception:
@@ -5794,7 +6038,7 @@ def highlightPythonInit():
     if not fullScanEnabled.get():
         statusBar['text'] = "Quick syntax highlight..."
         try:
-            highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+            highlight_python_helper(None)
         except Exception:
             pass
         statusBar['text'] = "Ready"
@@ -5853,6 +6097,205 @@ def highlightPythonInit():
 
     Thread(target=worker, daemon=True).start()
 
+# session-only scheduled detect id (so we can cancel previous scheduled detection when tabs change)
+manual_detect_after_id = None
+
+def apply_syntax_preset_transient(path: str, text_widget: Text | None = None) -> bool:
+    """Apply syntax preset from `path` only for the given Text widget (transient, non-persistent).
+
+    - Does NOT write to the global `config`.
+    - Configures tag colors on the provided widget and compiles per-widget regexes used
+      by `highlight_python_helper` when that tab is active.
+    - Stores compiled regexes and tag-colors on the tab frame as `_transient_syntax`.
+    """
+    try:
+        if not path or not os.path.isfile(path):
+            return False
+        cp = configparser.ConfigParser()
+        cp.read(path)
+        if not cp.has_section('Syntax'):
+            return False
+
+        # Build tag color map (per-tag fg/bg) and compiled regexes/keyword lists
+        tag_colors = {}
+        for tag, defaults in _DEFAULT_TAG_COLORS.items():
+            fg = cp.get('Syntax', f'tag.{tag}.fg', fallback='').strip()
+            bg = cp.get('Syntax', f'tag.{tag}.bg', fallback='').strip()
+            if fg or bg:
+                tag_colors[tag] = {'fg': fg or defaults.get('fg', ''), 'bg': bg or defaults.get('bg', '')}
+
+        # keywords/builtins
+        kw_csv = cp.get('Syntax', 'keywords.csv', fallback=','.join(KEYWORDS))
+        bk_csv = cp.get('Syntax', 'builtins.csv', fallback=','.join(BUILTINS))
+        try:
+            kw_list = [x.strip() for x in kw_csv.split(',') if x.strip()]
+            kw_re = re.compile(r'\b(' + r'|'.join(map(re.escape, kw_list)) + r')\b') if kw_list else re.compile(r'\b\b')
+        except Exception:
+            kw_list, kw_re = [], KEYWORD_RE
+        try:
+            bk_list = [x.strip() for x in bk_csv.split(',') if x.strip()]
+            bk_re = re.compile(r'\b(' + r'|'.join(map(re.escape, bk_list)) + r')\b') if bk_list else re.compile(r'\b\b')
+        except Exception:
+            bk_list, bk_re = [], BUILTIN_RE
+
+        # Generic regex keys
+        compiled = {}
+        for key, default_pattern in _DEFAULT_REGEXES.items():
+            cfg_key = f'regex.{key}'
+            pat = cp.get('Syntax', cfg_key, fallback=default_pattern)
+            if not pat:
+                continue
+            try:
+                if key in ('STRING_RE', 'FSTRING_RE'):
+                    compiled[key] = re.compile(pat, re.DOTALL)
+                else:
+                    compiled[key] = re.compile(pat)
+            except Exception:
+                # fallback to global for this key
+                pass
+
+        # Build transient syntax object
+        trans = {
+            'tag_colors': tag_colors,
+            'regexes': compiled,
+            'keywords': (kw_list, kw_re),
+            'builtins': (bk_list, bk_re)
+        }
+
+        # Find target widget and its tab frame
+        if text_widget is None:
+            try:
+                sel = editorNotebook.select()
+                if sel:
+                    frm = root.nametowidget(sel)
+                    # find the Text widget inside
+                    tw = None
+                    for child in frm.winfo_children():
+                        if isinstance(child, Text):
+                            tw = child
+                            break
+                    text_widget = tw or globals().get('textArea')
+                else:
+                    text_widget = globals().get('textArea')
+            except Exception:
+                text_widget = globals().get('textArea')
+
+        if not text_widget or not isinstance(text_widget, Text):
+            return False
+
+        # Apply tag color config to this widget only (do not touch global config)
+        for tag, cfg in trans['tag_colors'].items():
+            try:
+                kwargs = {}
+                if cfg.get('fg'):
+                    try:
+                        text_widget.tag_config(tag, foreground=cfg.get('fg'))
+                    except Exception:
+                        pass
+                if cfg.get('bg'):
+                    try:
+                        text_widget.tag_config(tag, background=cfg.get('bg'))
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # Store transient syntax on the tab frame so highlighting can pick it up
+        try:
+            # find the parent frame (tab)
+            parent_frame = getattr(text_widget, 'master', None)
+            if parent_frame is None:
+                sel = editorNotebook.select()
+                parent_frame = root.nametowidget(sel) if sel else None
+            if parent_frame is not None:
+                parent_frame._transient_syntax = trans
+            else:
+                # global fallback (least preferred)
+                root._transient_syntax = trans
+        except Exception:
+            root._transient_syntax = trans
+
+        return True
+    except Exception:
+        return False
+
+def manual_detect_syntax(force: bool = False):
+    """Manually detect a syntax preset for the current tab and apply it.
+
+    - Uses a small prefix (2KB) for detection to keep work cheap.
+    - Respects brainless mode and the autoDetectSyntax setting unless `force` is True.
+    - Applies preset transiently to the active tab only (no persistence).
+    """
+    try:
+        # session override
+        if brainless_mode_var.get():
+            return
+        # respect user preference unless forced
+        if not force and not config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+            return
+
+        # get current buffer prefix (safe and cheap)
+        try:
+            # prefer per-tab widget if available
+            snippet = textArea.get("1.0", "1.0 + 2048c")
+        except Exception:
+            snippet = ""
+        if not snippet:
+            return
+
+        # cheap detection
+        preset = None
+        try:
+            preset = detect_syntax_preset_from_content(snippet)
+        except Exception:
+            preset = None
+
+        if not preset:
+            # nothing detected; update status briefly and exit
+            try:
+                statusBar['text'] = "No syntax preset detected."
+                root.after(1200, lambda: statusBar.config(text="Ready"))
+            except Exception:
+                pass
+            return
+
+        # Apply preset transiently to the current tab widget (do NOT persist)
+        applied = False
+        try:
+            # determine active text widget to configure
+            tw = None
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                for child in frame.winfo_children():
+                    if isinstance(child, Text):
+                        tw = child
+                        break
+            if tw is None:
+                tw = globals().get('textArea')
+            applied = apply_syntax_preset_transient(preset, text_widget=tw)
+        except Exception:
+            applied = False
+
+        # If applied, run highlight (quick vs full based on Full Scan)
+        try:
+            if applied:
+                statusBar['text'] = "Applied syntax preset (transient) from autodetect."
+            if updateSyntaxHighlighting.get():
+                if fullScanEnabled.get():
+                    # full initial highlight (may show progress)
+                    highlightPythonInit()
+                else:
+                    # quick bounded highlight to avoid heavy work on large files
+                    # scan only visible viewport (let helper compute it)
+                    highlight_python_helper(None)
+            # clear transient status after a moment
+            root.after(1200, lambda: statusBar.config(text="Ready"))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 # REPLACE existing refresh_full_syntax() with updated version
 def refresh_full_syntax():
     """Manual refresh for syntax highlighting respecting fullScanEnabled."""
@@ -5867,7 +6310,7 @@ def refresh_full_syntax():
     if not fullScanEnabled.get():
         statusBar['text'] = "Quick refresh..."
         try:
-            highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
+            highlight_python_helper(None)
         except Exception:
             pass
         statusBar['text'] = "Ready"
@@ -6536,7 +6979,26 @@ formatButton5 = Button(toolBar, text='Settings', command=lambda: setting_modal()
 formatButton5.pack(side=RIGHT, padx=2, pady=2)
 formatButton6 = Button(toolBar, text='Edit Syntax', command=lambda: setting_syntax_modal())
 formatButton6.pack(side=RIGHT, padx=2, pady=2)
+# Toolbar toggle: "Suppress Template Prompt" (checked = suppress prompts)
+# Persisted config key remains 'promptTemplate' (True means "prompt enabled"), so we invert when storing.
+templatePromptVar = BooleanVar(value=not config.getboolean("Section1", "promptTemplate", fallback=True))
+suppress_template_prompt_session = BooleanVar(value=False)
 
+
+def _on_template_prompt_toggle():
+    try:
+        # invert semantics for stored config: stored 'promptTemplate' should be True when prompting is enabled
+        cfg_val = not bool(templatePromptVar.get())
+        config.set("Section1", "promptTemplate", str(cfg_val))
+        with open(INI_PATH, 'w') as cfgf:
+            config.write(cfgf)
+    except Exception:
+        pass
+try:
+    tpl_chk = ttk.Checkbutton(toolBar, text='Suppress Template Prompt', variable=templatePromptVar, command=_on_template_prompt_toggle)
+    tpl_chk.pack(side=RIGHT, padx=2, pady=2)
+except Exception:
+    pass
 presentToolBar = Frame(topBarContainer, bg=toolBar.cget('bg'))
 presentToolBar.pack(side=TOP, fill=X)
 editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
@@ -6665,10 +7127,23 @@ try:
     add_table_btn.pack(side=RIGHT, padx=2, pady=2)
 except Exception:
     pass
-
+try:
+    templatesBtn = Menubutton(presentToolBar, text='Templates', relief=RAISED)
+    templates_menu = Menu(templatesBtn, tearoff=0)
+    templates_menu.add_command(label='Python', command=lambda: create_template('python', open_in_new_tab=True))
+    templates_menu.add_command(label='HTML', command=lambda: create_template('html', open_in_new_tab=True))
+    templates_menu.add_command(label='Markdown', command=lambda: create_template('md', open_in_new_tab=True))
+    templates_menu.add_command(label='JSON', command=lambda: create_template('json', open_in_new_tab=True))
+    templatesBtn.config(menu=templates_menu)
+    templatesBtn.pack(side=RIGHT, padx=2, pady=2)
+except Exception:
+    pass
 # create refresh button on status bar (lower-right)
 refreshSyntaxButton = Button(statusFrame, text='Refresh Syntax', command=refresh_full_syntax)
 refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
+# Detect Syntax (manual trigger) — runs quick autodetect on current tab
+detectSyntaxButton = Button(statusFrame, text='Detect Syntax', command=lambda: manual_detect_syntax(force=True))
+detectSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
 
 syntaxToggleCheckbox = ttk.Checkbutton(
     statusFrame,
@@ -6734,7 +7209,7 @@ try:
 except Exception:
     textArea.bind('<KeyRelease>', lambda e: (safe_highlight_event(e), detect_header_and_prompt(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace()))
 textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_event(e), highlight_current_line(), redraw_line_numbers(), update_status_bar(), show_trailing_whitespace())))
-textArea.bind('<MouseWheel>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
+textArea.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: save_file())
 
