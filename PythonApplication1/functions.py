@@ -166,6 +166,7 @@ class _SimpleHTMLToTagged(HTMLParser):
         self._ol_counters = []
         self.ranges = {}  # tag -> [[start,end], ...]
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
+        self._recent_br = 0  # count of immediately preceding <br>-generated newlines
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
 
@@ -504,8 +505,12 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(self._reconstruct_startend_tag(tag, attrs))
                 return
             if tag == 'br':
+                # record explicit line break so whitespace collapsers don't over-trim
+                start = self.pos
                 self.out.append('\n')
                 self.pos += 1
+                self._recent_br += 1
+                self.ranges.setdefault('br', []).append([start, self.pos])
                 return
             # Horizontal rule
             if tag == 'hr':
@@ -731,9 +736,52 @@ class _SimpleHTMLToTagged(HTMLParser):
             if self._in_code_capture():
                 self._code_append(data)
                 return
-            # Collapse multiple whitespace inside paragraphs similar to browser? Keep as-is for now.
-            self.out.append(data)
-            self.pos += len(data)
+            # Tighten whitespace like an HTML renderer (outside code/pre):
+            # - Collapse whitespace runs inside text nodes to single spaces.
+            # - Limit vertical gaps between elements to at most two '\n'.
+            # - Preserve explicit <br> vertical spacing (tracked via self._recent_br).
+            s = data
+            # Any chunk that is only whitespace?
+            if s.strip() == '':
+                has_nl = ('\n' in s)
+                if has_nl:
+                    # Add up to two newlines total at the tail, unless just added <br> lines.
+                    tail_nl = self._current_tail_newline_count()
+                    max_allowed = 2
+                    add_nl = max(0, min(max_allowed - tail_nl, s.count('\n')))
+                    if self._recent_br > 0:
+                        # If the vertical space is intentional via <br>, don't add extra.
+                        add_nl = 0
+                    if add_nl > 0:
+                        self.out.append('\n' * add_nl)
+                        self.pos += add_nl
+                else:
+                    # Only spaces/tabs: emit at most a single separating space.
+                    prev_char = ''
+                    if self.out:
+                        last = self.out[-1]
+                        prev_char = last[-1] if last else ''
+                    if self.pos > 0 and prev_char not in (' ', '\n', '\t'):
+                        self.out.append(' ')
+                        self.pos += 1
+                # whitespace-only chunks don't reset <br> intent
+                return
+
+            # Mixed or non-whitespace content: collapse internal whitespace runs to single spaces.
+            # Normalize all whitespace (including newlines) to a single space like HTML flow.
+            s = re.sub(r'\s+', ' ', s)
+            # Avoid leading pad if we're at start or after whitespace already.
+            if s and self.pos == 0:
+                s = s.lstrip()
+            elif s and self.out:
+                last = self.out[-1] or ''
+                if last and last[-1] in (' ', '\n', '\t'):
+                    s = s.lstrip()
+            if not s:
+                return
+            self.out.append(s)
+            self.pos += len(s)
+            self._recent_br = 0
         except Exception:
             pass
 
