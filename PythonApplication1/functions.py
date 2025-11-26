@@ -166,6 +166,7 @@ class _SimpleHTMLToTagged(HTMLParser):
         self._ol_counters = []
         self.ranges = {}  # tag -> [[start,end], ...]
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
+        self._script_suppress_depth = 0  # nested <script> suppression counter
         self._recent_br = 0  # count of immediately preceding <br>-generated newlines
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
@@ -381,6 +382,15 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(self._reconstruct_start_tag(tag, attrs))
                 return
 
+           # Suppress any <script ...> (regardless of language/type attributes)
+            if tag == 'script':
+                # Trim trailing whitespace before script to avoid tall gaps
+                # (lightweight: remove only pure whitespace segments at tail)
+                while self.out and self.out[-1] and self.out[-1].strip() == '':
+                    self.pos -= len(self.out[-1])
+                    self.out.pop()
+                self._script_suppress_depth += 1
+                return
             # Enter code/pre capture (outermost) — do not emit literal tags
             if tag in ('code', 'pre'):
                 self.stack.append(['__code__', self.pos, [], 0])
@@ -505,6 +515,11 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(self._reconstruct_startend_tag(tag, attrs))
                 return
             if tag == 'br':
+                # If inside suppressed script, ignore explicit breaks too
+                if self._script_suppress_depth > 0:
+                    return
+                # record explicit line break so whitespace collapsers don't over-trim
+                start = self.pos
                 # record explicit line break so whitespace collapsers don't over-trim
                 start = self.pos
                 self.out.append('\n')
@@ -560,6 +575,21 @@ class _SimpleHTMLToTagged(HTMLParser):
                     self._code_append(self._reconstruct_end_tag(tag_low))
                     return
 
+            # Closing a suppressed <script>
+            if tag_low == 'script' and self._script_suppress_depth > 0:
+                try:
+                    self._script_suppress_depth -= 1
+                except Exception:
+                    pass
+                # After script removal, prevent large vertical gap: ensure at most one newline
+                if self._current_tail_newline_count() > 1:
+                    # collapse to single newline
+                    while self._current_tail_newline_count() > 1:
+                        # remove one newline char from tail
+                        last = self.out[-1]
+                        self.out[-1] = last[:-1]
+                        self.pos -= 1
+                return
             # Finalize outermost code/pre block (no literal end tag emitted)
             if tag_low in ('code', 'pre'):
                 if not self.stack:
@@ -733,6 +763,9 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             if not data:
                 return
+           # Suppress script contents entirely
+            if self._script_suppress_depth > 0:
+               return
             if self._in_code_capture():
                 self._code_append(data)
                 return
@@ -790,6 +823,8 @@ class _SimpleHTMLToTagged(HTMLParser):
             if self._in_code_capture():
                 self._code_append(f"&{name};")
                 return
+            if self._script_suppress_depth > 0:
+                return
         except Exception:
             pass
 
@@ -798,14 +833,19 @@ class _SimpleHTMLToTagged(HTMLParser):
             if self._in_code_capture():
                 self._code_append(f"&#{name};")
                 return
+            if self._script_suppress_depth > 0:
+                return
         except Exception:
             pass
 
     def handle_comment(self, data):
         try:
+            # Preserve comments inside code/pre blocks; suppress elsewhere.
             if self._in_code_capture():
                 self._code_append(f"<!--{data}-->")
                 return
+            # Outside code capture, drop comments (including inside suppressed <script>)
+            return
         except Exception:
             pass
 
