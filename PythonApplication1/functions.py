@@ -169,6 +169,65 @@ class _SimpleHTMLToTagged(HTMLParser):
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
 
+    # --- Added helpers for block element spacing (<p>, <div>) ---
+    def _current_tail_newline_count(self) -> int:
+        """Return how many consecutive newlines appear at end of current output."""
+        try:
+            if not self.out:
+                return 0
+            s = ''.join(self.out)
+            cnt = 0
+            for ch in reversed(s):
+                if ch == '\n':
+                    cnt += 1
+                else:
+                    break
+            return cnt
+        except Exception:
+            return 0
+
+    def _ensure_leading_block_spacing(self, require_blank: bool):
+        """
+        Ensure appropriate separation before a new block element.
+        require_blank=True -> want at least one blank line (>=2 trailing newlines).
+        """
+        try:
+            if self.pos == 0:
+                return
+            tail_nl = self._current_tail_newline_count()
+            if require_blank:
+                if tail_nl >= 2:
+                    return
+                if tail_nl == 0:
+                    self.out.append('\n\n')
+                    self.pos += 2
+                elif tail_nl == 1:
+                    self.out.append('\n')
+                    self.pos += 1
+            else:
+                if tail_nl == 0:
+                    self.out.append('\n')
+                    self.pos += 1
+        except Exception:
+            pass
+
+    def _ensure_trailing_block_spacing(self, require_blank: bool):
+        """
+        Ensure trailing spacing after closing a block. For paragraphs we keep at least one blank line.
+        """
+        try:
+            tail_nl = self._current_tail_newline_count()
+            if require_blank:
+                if tail_nl < 2:
+                    self.out.append('\n' if tail_nl == 1 else '\n\n')
+                    self.pos += 1 if tail_nl == 1 else 2
+            else:
+                if tail_nl == 0:
+                    self.out.append('\n')
+                    self.pos += 1
+        except Exception:
+            pass
+
     def _normalize_color_to_hex(self, col: str) -> str | None:
         if not col:
             return None
@@ -200,7 +259,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             top = self._code_top()
             if top is None:
                 return
-            # tuple or list shape: ('__code__', start_pos, fragments_list[, depth])
             if len(top) >= 3 and isinstance(top[2], list):
                 top[2].append(s)
         except Exception:
@@ -238,9 +296,9 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             tag = (tag or '').lower()
 
-            # If already inside a code/pre capture, append literal tags and do not parse
+            # If already inside a code/pre capture, adjust behavior
             if self._in_code_capture():
-                # Nested <code>/<pre> -> increase depth, but still treat literally
+                # Nested <code>/<pre> -> increase depth.
                 if tag in ('code', 'pre'):
                     try:
                         # upgrade top tuple to list if needed to mutate depth
@@ -251,17 +309,31 @@ class _SimpleHTMLToTagged(HTMLParser):
                         self.stack[-1][3] = int(self.stack[-1][3]) + 1
                     except Exception:
                         pass
+                    # IMPORTANT: do not append literal <code>/<pre> when inside capture
+                    # Browser semantics: <code> inside <pre> does not introduce extra visible markup.
+                    return
+                # For all other tags inside capture, keep them literally
                 self._code_append(self._reconstruct_start_tag(tag, attrs))
                 return
 
-            # Enter code/pre capture (outermost)
+            # Enter code/pre capture (outermost) — do not emit literal tags
             if tag in ('code', 'pre'):
-                # push with depth counter=0: ('__code__', start_pos, fragments, depth)
                 self.stack.append(['__code__', self.pos, [], 0])
                 return
 
-            # Basic table/list handling
             attrd = dict(attrs or {})
+
+            # Block elements: improved handling for <p> and <div>
+            if tag == 'p':
+                self._ensure_leading_block_spacing(require_blank=True)
+                self.stack.append(('p', self.pos))
+                return
+            if tag == 'div':
+                self._ensure_leading_block_spacing(require_blank=False)
+                self.stack.append(('div', self.pos))
+                return
+
+            # Basic table/list handling
             if tag in ('table', 'tr', 'td', 'th', 'ul', 'ol', 'li'):
                 if tag == 'tr':
                     if self.pos > 0:
@@ -327,7 +399,6 @@ class _SimpleHTMLToTagged(HTMLParser):
                             self.stack.append(('todo', self.pos)); return
                 self.stack.append((None, self.pos)); return
 
-            # fallback sentinel
             self.stack.append((None, self.pos))
         except Exception:
             try:
@@ -339,9 +410,14 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             tag = (tag or '').lower()
             if self._in_code_capture():
+                # Do not emit literal <code/> or <pre/> self-closing inside capture
+                if tag in ('code', 'pre'):
+                    return
                 self._code_append(self._reconstruct_startend_tag(tag, attrs))
                 return
-            # non-code self-closing tags are ignored (no special behavior required)
+            if tag == 'br':
+                self.out.append('\n')
+                self.pos += 1
         except Exception:
             pass
 
@@ -349,7 +425,7 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             tag_low = (tag or '').lower()
 
-            # If currently inside a code/pre capture, treat all tags literally except when closing the outermost code/pre.
+            # If currently inside a code/pre capture
             if self._in_code_capture():
                 top = self._code_top()
                 depth = 0
@@ -359,20 +435,19 @@ class _SimpleHTMLToTagged(HTMLParser):
                     depth = 0
                 if tag_low in ('code', 'pre'):
                     if depth > 0:
-                        # closing a nested literal <code>/<pre>
-                        self._code_append(self._reconstruct_end_tag(tag_low))
+                        # Closing a nested <code>/<pre>: adjust depth but DO NOT emit literal end tag
                         try:
                             top[3] = depth - 1
                         except Exception:
                             pass
                         return
-                    # finalize outer code/pre capture (continue below)
+                    # Finalize outermost capture below (no literal end tag)
                 else:
                     # literal end tag for non-code inside capture
                     self._code_append(self._reconstruct_end_tag(tag_low))
                     return
 
-            # Finalize outermost code/pre block
+            # Finalize outermost code/pre block (no literal end tag emitted)
             if tag_low in ('code', 'pre'):
                 if not self.stack:
                     return
@@ -382,7 +457,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                 fragments = item[2] if len(item) > 2 else []
                 raw_code = ''.join(fragments) if fragments else ''
 
-                # Fenced multi-lang segmentation (keeps previous behavior)
+                # Fenced multi-lang segmentation
                 fence_open_re = re.compile(r"'''[ \t]*([A-Za-z]+)\b[ \t]*")
                 recognized = {'python', 'html', 'markdown', 'md', 'json'}
                 segments = []
@@ -410,14 +485,15 @@ class _SimpleHTMLToTagged(HTMLParser):
                         segments.append({'lang': None, 'text': inner})
                     pos = close_idx + 3
 
-                # Build rendered block: newline + 4-space indent + 60-col wrapped/padded lines
+                # Build rendered block: newline + 4-space indent + wrapped/padded lines
                 width = 60
                 indent = '    '
                 out_parts = ['\n']
                 insert_start = self.pos
                 current_abs_content_cursor = insert_start + 1
                 content_spans = []
-                syntax_segments = []
+                # Collect per-segment per-line absolute starts to accurately map syntax tags
+                syntax_segments = []  # list of {lang, lines:[str], abs_starts:[int]}
 
                 for seg in segments:
                     seg_text = seg['text']
@@ -440,34 +516,43 @@ class _SimpleHTMLToTagged(HTMLParser):
                             i += len(chunk) if chunk else 1
                     padded_lines = [ln.ljust(width, ' ') for ln in wrapped_raw_lines] or [' ' * width]
 
+                    # Track absolute starts for each content line in this segment
+                    seg_abs_starts = []
+
                     for pl in padded_lines:
                         out_parts.append(indent + pl + '\n')
                         line_content_start = current_abs_content_cursor + len(indent)
                         line_content_end = line_content_start + len(pl)
+                        # record global code_block content spans
                         content_spans.append((line_content_start, line_content_end))
+                        # record per-line absolute start (for syntax highlighting)
+                        seg_abs_starts.append(line_content_start)
+                        # move cursor: past content and newline
                         current_abs_content_cursor = line_content_end + 1
 
                     if seg['lang']:
                         syntax_segments.append({
                             'lang': seg['lang'],
-                            'padded_text': '\n'.join(padded_lines) + '\n',
-                            'segment_first_line_content_start': content_spans[-len(padded_lines)][0]
+                            'lines': padded_lines,
+                            'abs_starts': seg_abs_starts
                         })
 
                 block_text = ''.join(out_parts)
                 self.out.append(block_text)
                 self.pos += len(block_text)
 
-                # Tag content area only
+                # Tag the code_block content areas
                 for s_abs, e_abs in content_spans:
                     self.ranges.setdefault('code_block', []).append([s_abs, e_abs])
 
-                # Apply language-specific cb_* tags
+                # Apply language-specific syntax tags per line to keep offsets exact
                 for seg in syntax_segments:
-                    try:
-                        self._cb_apply_syntax(seg['lang'], seg['padded_text'], seg['segment_first_line_content_start'])
-                    except Exception:
-                        pass
+                    lang = seg['lang']
+                    for line_text, base_start in zip(seg['lines'], seg['abs_starts']):
+                        try:
+                            self._cb_apply_syntax(lang, line_text, base_start)
+                        except Exception:
+                            pass
                 return
 
             # Normal non-code behavior
@@ -499,6 +584,12 @@ class _SimpleHTMLToTagged(HTMLParser):
                     pass
                 return
 
+            # Closing block elements spacing
+            if tag_low == 'p':
+                self._ensure_trailing_block_spacing(require_blank=True)
+            elif tag_low == 'div':
+                self._ensure_trailing_block_spacing(require_blank=False)
+
             tagname = item[0] if len(item) > 0 else None
             start = item[1] if len(item) > 1 else None
             if not tagname or start is None:
@@ -516,6 +607,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             if self._in_code_capture():
                 self._code_append(data)
                 return
+            # Collapse multiple whitespace inside paragraphs similar to browser? Keep as-is for now.
             self.out.append(data)
             self.pos += len(data)
         except Exception:
@@ -547,19 +639,13 @@ class _SimpleHTMLToTagged(HTMLParser):
 
     def get_result(self):
         try:
-            # Build full plain text
             full = ''.join(self.out)
-
-            # Detect Markdown links [text](url) outside code blocks and add as hyperlinks
             try:
-                # Accept http/https, file:///, or www. links; ignore bare (url) partials
                 md_link_re = re.compile(
                     r'\[([^\]]+)\]\('
                     r'(https?://[^\s)]+|file:///[^\s)]+|www\.[^\s)]+)'
                     r'\)'
                 )
-
-                # Protected spans: do not create links inside code blocks
                 protected = list(self.ranges.get('code_block', [])) if isinstance(self.ranges.get('code_block', []), list) else []
                 existing_links = list(self.ranges.get('hyperlink', [])) if isinstance(self.ranges.get('hyperlink', []), list) else []
 
@@ -569,9 +655,6 @@ class _SimpleHTMLToTagged(HTMLParser):
                             return True
                     return False
 
-                # --- PATCH START ---
-                # Instead of tagging only the [title], replace the whole [title](link) with just title in output
-                # and tag that range as a hyperlink.
                 new_out = []
                 last = 0
                 new_ranges = self.ranges.copy()
@@ -582,22 +665,17 @@ class _SimpleHTMLToTagged(HTMLParser):
                     href = m.group(2).strip()
                     title = m.group(1).strip()
 
-                    # Skip if inside code block or already covered by another hyperlink
                     if _overlaps_any(s_text, e_text, protected) or _overlaps_any(s_text, e_text, existing_links):
                         continue
 
-                    # Append text before the link
                     new_out.append(full[last:s_full])
-                    # Append just the title (no markdown syntax)
                     link_start = sum(len(part) for part in new_out)
                     new_out.append(title)
                     link_end = link_start + len(title)
 
-                    # Record hyperlink tag range
                     new_ranges.setdefault('hyperlink', []).append([link_start, link_end])
                     existing_links.append([link_start, link_end])
 
-                    # Record link metadata (so UI can restore clickable mapping)
                     try:
                         rec = {'start': link_start, 'end': link_end, 'href': href}
                         if title:
@@ -611,7 +689,6 @@ class _SimpleHTMLToTagged(HTMLParser):
                 full = ''.join(new_out)
                 self.ranges = new_ranges
                 self.hrefs = new_hrefs
-                # --- PATCH END ---
             except Exception:
                 pass
 
@@ -623,7 +700,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
     # --- Codeblock syntax helpers (isolated tags: cb_*) ----------------------
     def _cb_apply_syntax(self, lang: str, text: str, base_off: int):
-        """Apply minimal syntax token tags inside a code block."""
         lang = (lang or '').lower()
         if lang == 'python':
             self._cb_python(text, base_off)
@@ -633,7 +709,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             self._cb_html(text, base_off)
         elif lang == 'markdown':
             self._cb_markdown(text, base_off)
-        # unknown -> no extra tags
 
     def _cb_add(self, tag: str, s: int, e: int):
         if e > s:
@@ -656,7 +731,6 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._cb_add('cb_comment', base + m.start(), base + m.end())
             for m in num_re.finditer(text):
                 self._cb_add('cb_number', base + m.start(), base + m.end())
-            # Avoid tagging inside strings/comments by a simple overlap check
             prot = self.ranges.get('cb_string', []) + self.ranges.get('cb_comment', [])
             def _overlaps(s, e):
                 for ps, pe in prot:
@@ -675,7 +749,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             str_re = re.compile(r'"(?:\\.|[^"\\])*"')
             num_re = re.compile(r'\b-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\b')
             kw_re = re.compile(r'\b(true|false|null)\b', re.IGNORECASE)
-            com_re = None  # JSON has no comments; keep for symmetry
             for m in str_re.finditer(text):
                 self._cb_add('cb_string', base + m.start(), base + m.end())
             for m in num_re.finditer(text):
@@ -705,7 +778,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             pass
 
     def _cb_markdown(self, text: str, base: int):
-        # Minimal: headings and inline code spans as keywords/strings for a quick visual.
         try:
             head_re = re.compile(r'(?m)^(#{1,6}\s+.+)$')
             code_inline = re.compile(r'`([^`]+)`')
@@ -721,7 +793,6 @@ def get_hex_color(color_tuple):
     if not color_tuple:
         return ""
     if isinstance(color_tuple, tuple) and len(color_tuple) >= 2:
-        # colorchooser returns ((r,g,b), '#rrggbb')
         return color_tuple[1]
     m = re.search(r'#\w+', str(color_tuple))
     return m.group(0) if m else ""
@@ -780,7 +851,6 @@ def _contrast_text_color(hexcolor: str) -> str:
         r = int(s[0:2], 16)
         g = int(s[2:4], 16)
         b = int(s[4:6], 16)
-        # perceived luminance (0..1)
         lum = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255.0
         return '#000000' if lum > 0.56 else '#FFFFFF'
     except Exception:
@@ -788,13 +858,11 @@ def _contrast_text_color(hexcolor: str) -> str:
 
 def wrap_segment_by_tags(seg_text: str, active_tags: set):
     """Wrap a text segment according to active tag set into Markdown/HTML."""
-    # Determine boolean flags considering explicit combo tags and 'all'
     has_bold = any(t in active_tags for t in ('bold', 'bolditalic', 'boldunderline', 'all'))
     has_italic = any(t in active_tags for t in ('italic', 'bolditalic', 'underlineitalic', 'all'))
     has_underline = any(t in active_tags for t in ('underline', 'boldunderline', 'underlineitalic', 'all'))
     has_small = 'small' in active_tags
     inner = seg_text
-    # Prefer Markdown bold+italic triple-star where supported
     if has_bold and has_italic:
         inner = f"***{inner}***"
     elif has_bold:
@@ -803,11 +871,9 @@ def wrap_segment_by_tags(seg_text: str, active_tags: set):
         inner = f"*{inner}*"
 
     if has_underline:
-        # Markdown doesn't have native underline; use HTML <u> for compatibility
         inner = f"<u>{inner}</u>"
 
     if has_small:
-        # wrap in <small> so exported HTML/MD keeps the visual reduction
         inner = f"<small>{inner}</small>"
     return inner
 
@@ -825,11 +891,9 @@ def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
             r = int(s[0:2], 16)
             g = int(s[2:4], 16)
             b = int(s[4:6], 16)
-            # simple complement
             cr = 255 - r
             cg = 255 - g
             cb = 255 - b
-            # nudge if equals background color
             try:
                 bg = (backgroundColor or "").strip()
                 if bg and bg.startswith('#'):
@@ -841,7 +905,6 @@ def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
                         bg_ = int(bgc[2:4], 16)
                         bb = int(bgc[4:6], 16)
                         if (cr, cg, cb) == (br, bg_, bb):
-                            # rotate the complement slightly
                             cr = max(0, min(255, cr - 16))
                             cg = max(0, min(255, cg - 8))
                             cb = max(0, min(255, cb - 4))
@@ -863,12 +926,10 @@ def _parse_html_and_apply(raw) -> tuple[str, dict]:
         parser = _SimpleHTMLToTagged()
         parser.feed(fragment)
         plain, meta = parser.get_result()
-        # meta already shaped as {'tags': {...}, 'links': [...]}
         return plain, meta
     except Exception:
         return raw, {}
 
-# --- URL history (persisted) -------------------------------------------------
 def _ensure_url_section(cfg):
     """Ensure the 'URLHistory' section exists."""
     if not cfg.has_section("URLHistory"):
@@ -899,7 +960,6 @@ def add_url_history(cfg, ini_path: str, url: str, max_items: int = 50) -> None:
         if not url:
             return
         lst = load_url_history(cfg)
-        # normalize as string
         u = str(url)
         if u in lst:
             lst.remove(u)
@@ -931,17 +991,11 @@ def _serialize_tags(tags_dict):
 
 def get_result(self):
     try:
-        # Build the plain-text output
         full = ''.join(self.out)
-
-        # If there are table ranges, post-process each table to compute column widths
-        # and replace the plain segment with a padded version for nicer in-editor alignment.
         table_ranges = list(self.ranges.get('table', [])) if isinstance(self.ranges.get('table', []), list) else []
         if table_ranges:
-            # Sort by start so adjustments can accumulate
             table_ranges = sorted(table_ranges, key=lambda r: r[0])
             offset_shift = 0
-            # Remove existing structural table tags -- we'll rebuild them to match padded layout
             for t in ('table', 'tr', 'td', 'th'):
                 if t in self.ranges:
                     self.ranges.pop(t, None)
@@ -954,21 +1008,18 @@ def get_result(self):
                         continue
                     end = min(end, len(full))
                     seg = full[start:end]
-                    # Split into rows then cells (parser uses '\n' between rows and '\t' between cells)
                     rows = seg.split('\n')
                     cells_by_row = [r.split('\t') if r != '' else [''] for r in rows]
 
                     if not cells_by_row:
                         continue
 
-                    # compute column widths across all rows
                     max_cols = max(len(row) for row in cells_by_row)
                     col_widths = [0] * max_cols
                     for row in cells_by_row:
                         for ci, cell in enumerate(row):
                             col_widths[ci] = max(col_widths[ci], len(cell))
 
-                    # build new padded rows using spaces to align columns; preserve tabs as separators
                     new_rows = []
                     for row in cells_by_row:
                         padded_cells = []
@@ -979,57 +1030,39 @@ def get_result(self):
                         new_rows.append('\t'.join(padded_cells))
                     new_seg = '\n'.join(new_rows)
 
-                    # replace full text segment
                     full = full[:start] + new_seg + full[end:]
                     delta = len(new_seg) - (end - start)
                     offset_shift += delta
 
-                    # Recreate table/tr/td/th ranges for this table using new_seg geometry
                     table_start = start
                     table_end = start + len(new_seg)
                     self.ranges.setdefault('table', []).append([table_start, table_end])
 
-                    # compute per-row/per-cell positions and record tr/td/th ranges
                     cursor = table_start
                     for ridx, rtext in enumerate(new_rows):
                         row_start = cursor
-                        # iterate cells separated by '\t'
                         cell_cursor = row_start
                         cells = rtext.split('\t')
                         for cidx, cell_text in enumerate(cells):
                             cs = cell_cursor
                             ce = cs + len(cell_text)
-                            # treat first row as header if original parser had any 'th' within original table range
                             is_header = False
-                            # If original had 'th' ranges, prefer them. Check overlap with original table orig_start..orig_end
-                            th_ranges = self.ranges.get('th', []) if isinstance(self.ranges.get('th', []), list) else []
-                            # But we removed 'th' earlier; instead infer header if first row or if any <th> existed originally
-                            # Heuristic: if the original segment included any '<th>' we will mark first row as header
-                            # Use the original parser info: if there was any 'th' in original ranges list of table region
-                            # Since we removed earlier, we can't reliably inspect; fallback to making first row header only if it contains non-empty cells and original first-row likely header
                             if ridx == 0:
-                                # Make header if any cell had non-empty and original segment contained "<th" or if every cell is non-empty.
-                                # We can attempt to detect original th occurrences by searching for '<th' in the original (non-escaped) seg,
-                                # but parser already stripped tags. So practical heuristic: treat first row as header only if any original row started with capital or it's the only indicator.
-                                # For safety, do not force header unless a 'th' tag originally existed - best-effort: skip header detection here.
                                 is_header = False
                             if is_header:
                                 self.ranges.setdefault('th', []).append([cs, ce])
                             else:
                                 self.ranges.setdefault('td', []).append([cs, ce])
-                            cell_cursor = ce + 1  # skip the tab that follows in new layout
+                            cell_cursor = ce + 1
                         row_end = cursor + len(rtext)
                         self.ranges.setdefault('tr', []).append([row_start, row_end])
-                        cursor = row_end + 1  # move past newline
+                        cursor = row_end + 1
                 except Exception:
-                    # On any per-table error continue to next table
                     continue
 
-            # Replace out and pos with updated full
             self.out = [full]
             self.pos = len(full)
 
-        # Build meta based on (possibly updated) ranges
         meta = {'tags': self.ranges}
         if self.hrefs:
             meta['links'] = list(self.hrefs)
@@ -1045,22 +1078,18 @@ def _parse_simple_markdown(md_text):
     Very small markdown parser to extract bold/italic/underline markers and return plain text
     plus a tags dict compatible with _apply_formatting_from_meta (i.e. {tag: [[start,end], ...]}).
     Supports: ***bolditalic***, **bold**, *italic*, and <u>underline</u>.
-    This is intentionally simple and not a full markdown implementation.
     """
     tags = {'bold': [], 'italic': [], 'underline': [], 'bolditalic': []}
     plain_parts = []
     last = 0
     out_index = 0
 
-    # pattern captures groups: g1=***text***, g2=**text**, g3=*text*, g4=<u>text</u>
     pattern = re.compile(r'\*\*\*([^\*]+?)\*\*\*|\*\*([^\*]+?)\*\*|\*([^\*]+?)\*|<u>(.*?)</u>', re.DOTALL)
     for m in pattern.finditer(md_text):
         start, end = m.span()
-        # append intermediate plain text
         seg = md_text[last:start]
         plain_parts.append(seg)
         out_index += len(seg)
-        # choose which group matched and its content
         content = None
         tag_name = None
         if m.group(1) is not None:
@@ -1081,30 +1110,24 @@ def _parse_simple_markdown(md_text):
 
         if content is None:
             content = ''
-        # append content and record tag range
         plain_parts.append(content)
         if tag_name:
             tags.setdefault(tag_name, []).append([out_index, out_index + len(content)])
         out_index += len(content)
         last = end
 
-    # append tail
     tail = md_text[last:]
     plain_parts.append(tail)
     plain_text = ''.join(plain_parts)
-
-    # remove empty tag lists
     tags = {k: v for k, v in tags.items() if v}
     return plain_text, tags
 
 def _collect_all_tag_ranges(textArea):
     """Collect ranges for both formatting and syntax tags as absolute offsets."""
     tags_to_save = (
-        # formatting tags
         'bold', 'italic', 'underline', 'all',
         'underlineitalic', 'boldunderline', 'bolditalic',
         'small',
-        # syntax/highlight tags
         'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
         'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'
     )
@@ -1118,7 +1141,6 @@ def _collect_all_tag_ranges(textArea):
             for i in range(0, len(ranges), 2):
                 s = ranges[i]
                 e = ranges[i + 1]
-                # compute char offsets relative to buffer start
                 start = len(textArea.get('1.0', s))
                 end = len(textArea.get('1.0', e))
                 if end > start:
@@ -1129,23 +1151,18 @@ def _collect_all_tag_ranges(textArea):
         pass
     return data
 
-# --- Convert buffer to HTML fragment (used for .md and .html outputs) ---
 def _convert_buffer_to_html_fragment(textArea):
     """
-    Produce HTML fragment. Special-case: reconstruct real <table>...</table> elements
-    when 'table'/'tr'/'td'/'th' tags are present in the tag ranges. For other regions
-    we fall back to the existing span/class approach.
+    Produce HTML fragment. Special-case: reconstruct real <table>...</table> elements,
+    wrap code blocks into <pre>, and turn marked div/p ranges into actual HTML blocks.
     """
     try:
         content = textArea.get('1.0', 'end-1c')
         if not content:
             return ''
 
-        tags_by_name = _collect_all_tag_ranges(textArea)  # dict tag -> [[s,e], ...]
-        # If no table tags present, keep existing rendering path (fast path)
+        tags_by_name = _collect_all_tag_ranges(textArea)
         if 'table' not in tags_by_name:
-            # reuse original conversion logic (escape plain text with inline spans)
-            # build events list as before
             events = []
             for tag, ranges in tags_by_name.items():
                 for s, e in ranges:
@@ -1232,29 +1249,22 @@ def _convert_buffer_to_html_fragment(textArea):
 
             return ''.join(out_parts)
 
-        # If tables exist: produce output by slicing plain content and substituting table HTML for table ranges.
         table_ranges = sorted(tags_by_name.get('table', []), key=lambda r: r[0])
         out_parts = []
         last = 0
         for tstart, tend in table_ranges:
-            # append escaped content before table
             if last < tstart:
                 out_parts.append(html.escape(content[last:tstart]))
-            # build table HTML for this table segment
             seg = content[tstart:tend]
-            # split into rows and cells (parser uses '\n' and '\t')
             rows = [r for r in seg.split('\n') if r is not None]
             out_parts.append('<table border="1" cellpadding="4" cellspacing="0">')
             for ridx, row in enumerate(rows):
-                # skip empty trailing lines
                 if row == '' and len(rows) == 1:
                     continue
                 out_parts.append('<tr>')
                 cells = row.split('\t')
-                # for each cell determine whether it was originally a header by checking th ranges overlap
                 for cell_text in cells:
                     cell_text_escaped = html.escape(cell_text)
-                    # simple heuristic: treat first row as header if 'th' tag exists anywhere in table tags
                     is_header = bool('th' in tags_by_name and tags_by_name['th'])
                     if is_header and ridx == 0:
                         out_parts.append(f'<th>{cell_text_escaped}</th>')
@@ -1263,7 +1273,6 @@ def _convert_buffer_to_html_fragment(textArea):
                 out_parts.append('</tr>')
             out_parts.append('</table>')
             last = tend
-        # append remainder
         if last < len(content):
             out_parts.append(html.escape(content[last:]))
 
@@ -1277,7 +1286,6 @@ def _convert_buffer_to_html_fragment(textArea):
 def _generate_css():
     """Return CSS text used for inline-block or external export modes."""
     try:
-        # Base wrapper class to preserve whitespace and colors
         parts = []
         parts.append(".simpleedit-export{")
         parts.append(f"background: {backgroundColor};")
@@ -1286,14 +1294,12 @@ def _generate_css():
         parts.append("white-space: pre-wrap;")
         parts.append("padding: 8px;")
         parts.append("}")
-        # map tag classes to colors/backgrounds
         for tag, color in _TAG_COLOR_MAP.items():
             cls = f".se-{tag}"
             if tag == 'todo':
                 parts.append(f"{cls}{{ color:#ffffff; background:#B22222; }}")
             else:
                 parts.append(f"{cls}{{ color: {color}; }}")
-        # formatting classes
         parts.append(".se-bold{ font-weight: bold; }")
         parts.append(".se-italic{ font-style: italic; }")
         parts.append(".se-underline{ text-decoration: underline; }")
@@ -1316,9 +1322,8 @@ _TAG_COLOR_MAP = {
     'string': '#C9CA6B',
     'operator': '#AAAAAA',
     'comment': '#75715E',
-    'todo': '#FFFFFF',  # todo uses white text on red background - background handled specially
+    'todo': '#FFFFFF',
 }
-# reverse map for parsing spans back to tag names (normalized to lower hex)
 _COLOR_TO_TAG = {v.lower(): k for k, v in _TAG_COLOR_MAP.items()}
 
 def save_as_markdown(textArea):
@@ -1345,10 +1350,8 @@ def save_as_markdown(textArea):
     try:
         fragment = _convert_buffer_to_html_fragment(textArea)
 
-        # Prepare wrapper that always preserves whitespace and base styling (but for inline-block/external actual colors come from CSS)
         wrapper_attrs = []
         if exportCssMode == 'inline-element':
-            # keep previous inline wrapper style for background/text/font
             wrapper_style = (
                 f"background:{backgroundColor};"
                 f"color:{fontColor};"
@@ -1358,20 +1361,16 @@ def save_as_markdown(textArea):
             )
             wrapped_fragment = f'<div style="{wrapper_style}">{fragment}</div>'
         else:
-            # class-based wrapper; CSS provides colors
             wrapped_fragment = f'<div class="simpleedit-export">{fragment}</div>'
 
         if fileName.lower().endswith('.html'):
             if exportCssMode == 'external':
-                # determine css path: prefer explicit exportCssPath or same-name .css next to file
                 css_path = exportCssPath or os.path.splitext(fileName)[0] + '.css'
-                # write css file
                 try:
                     with open(css_path, 'w', encoding='utf-8') as cssf:
                         cssf.write(_generate_css())
                 except Exception:
                     pass
-                # compute relative link href (use basename if in same directory)
                 href = os.path.relpath(css_path, os.path.dirname(fileName))
                 head_includes = f'<link rel="stylesheet" href="{href}">'
             elif exportCssMode == 'inline-block':
@@ -1391,7 +1390,6 @@ def save_as_markdown(textArea):
                 f.write(html_doc)
 
         else:
-            # .md: Markdown engines vary, but raw HTML is allowed in many viewers.
             if exportCssMode == 'external':
                 css_path = exportCssPath or os.path.splitext(fileName)[0] + '.css'
                 try:
@@ -1399,7 +1397,6 @@ def save_as_markdown(textArea):
                         cssf.write(_generate_css())
                 except Exception:
                     pass
-                # add link tag at top (may or may not be respected by renderer)
                 md_prefix = f'<link rel="stylesheet" href="{os.path.basename(css_path)}">\n\n'
                 md_body = md_prefix + wrapped_fragment
             elif exportCssMode == 'inline-block':
