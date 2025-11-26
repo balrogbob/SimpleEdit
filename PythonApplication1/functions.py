@@ -227,6 +227,31 @@ class _SimpleHTMLToTagged(HTMLParser):
                     self.pos += 1
         except Exception:
             pass
+    # --- Extra helpers to fine-tune block spacing (used for headings/.nav/.content) ---
+    def _ensure_leading_newlines(self, required: int):
+        """Ensure at least `required` trailing newlines exist before starting a block."""
+        try:
+            if self.pos == 0 or required <= 0:
+                return
+            tail = self._current_tail_newline_count()
+            add = max(0, required - tail)
+            if add:
+                self.out.append('\n' * add)
+                self.pos += add
+        except Exception:
+            pass
+
+    def _ensure_trailing_newlines(self, required: int):
+        """Ensure at least `required` trailing newlines exist after closing a block."""
+        try:
+            if required <= 0:
+                return
+            tail = self._current_tail_newline_count()
+            add = max(0, required - tail)
+            if add:
+                self.out.append('\n' * add); self.pos += add
+        except Exception:
+            pass
 
     def _normalize_color_to_hex(self, col: str) -> str | None:
         if not col:
@@ -318,19 +343,31 @@ class _SimpleHTMLToTagged(HTMLParser):
 
             attrd = dict(attrs or {})
             cls = (attrd.get('class') or '').strip().lower()
-
+            # Headings and blockquote (block-level)
+            if tag in ('h1', 'h2', 'h3', 'h4', 'h5', 'h6'):
+                # Give H1/H2 a blank line before, others at least one newline
+                self._ensure_leading_newlines(2 if tag in ('h1', 'h2') else 1)
+                self.stack.append((tag, self.pos))
+                return
+            if tag == 'blockquote':
+                self._ensure_leading_newlines(1)
+                self.stack.append(('blockquote', self.pos))
+                return
             # Block elements: improved handling for <p> and <div>
             if tag == 'p':
                 self._ensure_leading_block_spacing(require_blank=True)
                 self.stack.append(('p', self.pos))
                 return
             if tag == 'div':
-                self._ensure_leading_block_spacing(require_blank=False)
+                # Class-aware spacing
                 if 'nav' in cls.split():
+                    self._ensure_leading_newlines(2)
                     self.stack.append(('div_nav', self.pos))
                 elif 'content' in cls.split():
+                    self._ensure_leading_newlines(1)
                     self.stack.append(('div_content', self.pos))
                 else:
+                    self._ensure_leading_block_spacing(require_blank=False)
                     self.stack.append(('div', self.pos))
                 return
 
@@ -365,7 +402,10 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self.stack.append(('italic', self.pos)); return
             if tag == 'u':
                 self.stack.append(('underline', self.pos)); return
-
+            if tag == 'mark':
+                self.stack.append(('mark', self.pos)); return
+            if tag == 'kbd':
+                self.stack.append(('kbd', self.pos)); return
             if tag == 'font':
                 color = (attrd.get('color') or attrd.get('colour') or '').strip()
                 hexcol = self._normalize_color_to_hex(color)
@@ -422,6 +462,26 @@ class _SimpleHTMLToTagged(HTMLParser):
             if tag == 'br':
                 self.out.append('\n')
                 self.pos += 1
+                return
+            # Horizontal rule
+            if tag == 'hr':
+                self._ensure_leading_newlines(1)
+                start = self.pos
+                line = '-' * 40 + '\n'
+                self.out.append(line)
+                self.pos += len(line)
+                self.ranges.setdefault('hr', []).append([start, self.pos])
+                return
+            # Image placeholder using alt text
+            if tag == 'img':
+                attrd = dict(attrs or {})
+                alt = (attrd.get('alt') or '').strip()
+                placeholder = f"[img: {alt}]" if alt else "[img]"
+                start = self.pos
+                self.out.append(placeholder)
+                self.pos += len(placeholder)
+                self.ranges.setdefault('img', []).append([start, self.pos])
+                return
         except Exception:
             pass
 
@@ -590,6 +650,22 @@ class _SimpleHTMLToTagged(HTMLParser):
 
             # Closing block elements spacing
             if tag_low == 'p':
+                self._ensure_trailing_block_spacing(require_blank=True)
+            elif tag_low == 'div':
+                self._ensure_trailing_block_spacing(require_blank=False)
+
+            kind = item[0] if len(item) > 0 else None
+            if kind in ('h1', 'h2'):
+                # Ensure a blank line after H1/H2
+                self._ensure_trailing_newlines(2)
+            elif kind in ('h3', 'h4', 'h5', 'h6', 'blockquote'):
+                self._ensure_trailing_newlines(1)
+            elif kind == 'div_nav':
+                # Give nav more breathing room
+                self._ensure_trailing_newlines(2)
+            elif kind == 'div_content':
+                self._ensure_trailing_newlines(1)
+            elif tag_low == 'p':
                 self._ensure_trailing_block_spacing(require_blank=True)
             elif tag_low == 'div':
                 self._ensure_trailing_block_spacing(require_blank=False)
@@ -1168,11 +1244,19 @@ def _convert_buffer_to_html_fragment(textArea):
         tags_by_name = _collect_all_tag_ranges(textArea)
 
         # If we have structural ranges (table | code_block | div_* | p), we slice and rebuild HTML blocks.
-        structural_present = any(k in tags_by_name for k in ('table', 'code_block', 'div', 'div_nav', 'div_content', 'p'))
+        structural_present = any(
+            k in tags_by_name for k in (
+                'table', 'code_block',
+                'div', 'div_nav', 'div_content', 'p',
+                'h1','h2','h3','h4','h5','h6','hr','blockquote'
+            )
+        )
         if structural_present:
             # Build a combined list of segments to render specially
             special_keys = []
-            for k in ('table', 'code_block', 'div_nav', 'div_content', 'div', 'p'):
+            for k in ('table','code_block','div_nav','div_content','div','p',
+                      'h1','h2','h3','h4','h5','h6','hr','blockquote'):
+
                 if k in tags_by_name:
                     for s, e in tags_by_name[k]:
                         special_keys.append((s, e, k))
@@ -1233,6 +1317,19 @@ def _convert_buffer_to_html_fragment(textArea):
                     out_parts.append('<p>')
                     out_parts.append(html.escape(block_text))
                     out_parts.append('</p>')
+
+                elif kind in ('h1','h2','h3','h4','h5','h6'):
+                    out_parts.append(f'<{kind}>')
+                    out_parts.append(html.escape(block_text))
+                    out_parts.append(f'</{kind}>')
+
+                elif kind == 'hr':
+                    out_parts.append('<hr />')
+
+                elif kind == 'blockquote':
+                    out_parts.append('<blockquote>')
+                    out_parts.append(html.escape(block_text))
+                    out_parts.append('</blockquote>')
 
                 last = e
 
@@ -1365,6 +1462,15 @@ def _generate_css():
         parts.append("table{ border-collapse:collapse; margin-top:8px; }")
         parts.append("th,td{ border:1px solid #ccc; padding:8px; }")
         parts.append(".todo{ color:#fff; background:#B22222; padding:2px 6px; border-radius:3px; }")
+        # Extra styles for newly supported elements
+        parts.append("blockquote{ border-left:4px solid #ddd; margin:8px 0; padding:4px 8px; }")
+        parts.append("h1{ font-size:1.6em; margin:0.8em 0 0.4em; }")
+        parts.append("h2{ font-size:1.4em; margin:0.7em 0 0.35em; }")
+        parts.append("h3{ font-size:1.2em; margin:0.6em 0 0.3em; }")
+        parts.append("hr{ border:none; border-top:1px solid #ddd; margin:12px 0; }")
+        parts.append("mark{ background:#fff59d; }")
+        parts.append("kbd{ font-family:Consolas, monospace; background:#eee; border:1px solid #ccc; border-radius:3px; padding:1px 4px; }")
+        
         return "\n".join(parts)
     except Exception:
         return ""
