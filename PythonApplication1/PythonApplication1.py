@@ -1684,6 +1684,28 @@ def _apply_tag_configs_to_widget(tw):
         except Exception:
             pass
 
+        # Code-block (from HTML <code>/<pre>) styling and isolated cb_* token tags
+        try:
+            # Base block: white background, black text, monospace font
+            mono_font = ("Courier New", max(6, int(fontSize - 1)))
+            tw.tag_config("code_block", font=mono_font, background="#FFFFFF", foreground="#000000")
+            # Token tags inherit block background; set only foregrounds
+            def _fg_for(tag_fallback):
+                try:
+                    return _DEFAULT_TAG_COLORS.get(tag_fallback, {}).get('fg', '#000000') or '#000000'
+                except Exception:
+                    return '#000000'
+            tw.tag_config("cb_keyword", foreground=_fg_for("keyword"))
+            tw.tag_config("cb_string", foreground=_fg_for("string"))
+            tw.tag_config("cb_comment", foreground=_fg_for("comment"))
+            tw.tag_config("cb_number", foreground=_fg_for("number"))
+            # HTML-like inside code
+            tw.tag_config("cb_tag", foreground=_fg_for("html_tag"))
+            tw.tag_config("cb_attr", foreground=_fg_for("html_attr"))
+            tw.tag_config("cb_attr_value", foreground=_fg_for("html_attr_value"))
+        except Exception:
+            pass
+
         # Basic table/list visual styling so parsed tags are visible in editor
         try:
             # table container (no strong visual, but ensures presence)

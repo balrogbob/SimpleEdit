@@ -32,6 +32,7 @@ from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from tkinter import ttk
 from typing import Callable, Iterable, List, Optional
 import shutil, sys, os
+import textwrap
 
 RECENT_MAX = 10
 
@@ -165,6 +166,8 @@ class _SimpleHTMLToTagged(HTMLParser):
         self._ol_counters = []
         self.ranges = {}  # tag -> [[start,end], ...]
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
+        # code block capture: push ('__code__', start_pos, list_of_fragments)
+        # We treat both <code> and <pre> as code blocks (best-effort).
 
     def _normalize_color_to_hex(self, col: str) -> str | None:
         if not col:
@@ -181,49 +184,102 @@ class _SimpleHTMLToTagged(HTMLParser):
         if re.match(r'^#[0-9a-f]{6}$', c):
             return c
         return None
+    # Helpers to manage literal capture inside <code>/<pre>
+    def _in_code_capture(self) -> bool:
+        try:
+            return bool(self.stack and isinstance(self.stack[-1], (tuple, list)) and self.stack[-1][0] == '__code__')
+        except Exception:
+            return False
+    def _code_top(self):
+        try:
+            return self.stack[-1] if self._in_code_capture() else None
+        except Exception:
+            return None
+    def _code_append(self, s: str):
+        try:
+            top = self._code_top()
+            if top is None:
+                return
+            # tuple or list shape: ('__code__', start_pos, fragments_list[, depth])
+            if len(top) >= 3 and isinstance(top[2], list):
+                top[2].append(s)
+        except Exception:
+            pass
+    def _reconstruct_start_tag(self, tag: str, attrs) -> str:
+        try:
+            parts = ['<', tag]
+            for k, v in (attrs or []):
+                if v is None:
+                    parts.append(f' {k}')
+                else:
+                    val = str(v).replace('&', '&amp;').replace('"', '&quot;')
+                    parts.append(f' {k}="{val}"')
+            parts.append('>')
+            return ''.join(parts)
+        except Exception:
+            return f"<{tag}>"
+    def _reconstruct_end_tag(self, tag: str) -> str:
+        return f"</{tag}>"
+    def _reconstruct_startend_tag(self, tag: str, attrs) -> str:
+        try:
+            parts = ['<', tag]
+            for k, v in (attrs or []):
+                if v is None:
+                    parts.append(f' {k}')
+                else:
+                    val = str(v).replace('&', '&amp;').replace('"', '&quot;')
+                    parts.append(f' {k}="{val}"')
+            parts.append(' />')
+            return ''.join(parts)
+        except Exception:
+            return f"<{tag} />"
 
     def handle_starttag(self, tag, attrs):
         try:
             tag = (tag or '').lower()
-            attrd = dict(attrs or {})
 
-            # Basic table/list handling: produce readable plain-text layout and record ranges.
+            # If already inside a code/pre capture, append literal tags and do not parse
+            if self._in_code_capture():
+                # Nested <code>/<pre> -> increase depth, but still treat literally
+                if tag in ('code', 'pre'):
+                    try:
+                        # upgrade top tuple to list if needed to mutate depth
+                        if isinstance(self.stack[-1], tuple):
+                            self.stack[-1] = list(self.stack[-1]) + [0]
+                        if len(self.stack[-1]) < 4:
+                            self.stack[-1].append(0)
+                        self.stack[-1][3] = int(self.stack[-1][3]) + 1
+                    except Exception:
+                        pass
+                self._code_append(self._reconstruct_start_tag(tag, attrs))
+                return
+
+            # Enter code/pre capture (outermost)
+            if tag in ('code', 'pre'):
+                # push with depth counter=0: ('__code__', start_pos, fragments, depth)
+                self.stack.append(['__code__', self.pos, [], 0])
+                return
+
+            # Basic table/list handling
+            attrd = dict(attrs or {})
             if tag in ('table', 'tr', 'td', 'th', 'ul', 'ol', 'li'):
-                # row -> newline before starting a row (if not at start)
                 if tag == 'tr':
                     if self.pos > 0:
-                        # ensure a newline separating rows
-                        self.out.append('\n')
-                        self.pos += 1
-                # cells -> separate with a tab so table columns remain aligned in plain text
+                        self.out.append('\n'); self.pos += 1
                 elif tag in ('td', 'th'):
                     prev_text = ''.join(self.out) if self.out else ''
                     if prev_text and not prev_text.endswith('\n'):
-                        # insert a cell separator
-                        self.out.append('\t')
-                        self.pos += 1
-                # list item -> newline + bullet (unordered) or dash (ordered fallback)
+                        self.out.append('\t'); self.pos += 1
                 elif tag == 'li':
-                    # ensure newline, then a bullet + space
                     if self.pos > 0 and not ''.join(self.out).endswith('\n'):
-                        self.out.append('\n')
-                        self.pos += 1
-                    # use a bullet for unordered lists; if inside an <ol> use numbering
+                        self.out.append('\n'); self.pos += 1
                     if self._ol_counters:
-                        # use current counter from the top of the ol stack
-                        n = self._ol_counters[-1]
-                        s_n = f"{n}. "
-                        self.out.append(s_n)
-                        self.pos += len(s_n)
-                        # increment counter for next item
+                        n = self._ol_counters[-1]; s_n = f"{n}. "
+                        self.out.append(s_n); self.pos += len(s_n)
                         self._ol_counters[-1] = n + 1
                     else:
-                        # unordered list bullet
-                        self.out.append('\u2022 ')
-                        self.pos += 2                # push the tag onto stack so handle_endtag will emit ranges
-                # special-case <ol> to start a numbering counter
+                        self.out.append('\u2022 '); self.pos += 2
                 if tag == 'ol':
-                    # start numbering at 1
                     self._ol_counters.append(1)
                 self.stack.append((tag, self.pos))
                 return
@@ -241,14 +297,12 @@ class _SimpleHTMLToTagged(HTMLParser):
                 color = (attrd.get('color') or attrd.get('colour') or '').strip()
                 hexcol = self._normalize_color_to_hex(color)
                 if hexcol:
-                    tagname = f"font_{hexcol.lstrip('#')}"
-                    self.stack.append((tagname, self.pos)); return
+                    self.stack.append((f"font_{hexcol.lstrip('#')}", self.pos)); return
                 self.stack.append((None, self.pos)); return
 
             if tag == 'marquee':
                 self.stack.append(('marquee', self.pos)); return
 
-            # <a href="...">  record href and optional title on stack
             if tag == 'a':
                 href = (attrd.get('href') or '').strip()
                 title = (attrd.get('title') or '').strip() or None
@@ -265,8 +319,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                     if m:
                         hexcol = self._normalize_color_to_hex(m.group(1))
                         if hexcol:
-                            tagname = f"font_{hexcol.lstrip('#')}"
-                            self.stack.append((tagname, self.pos)); return
+                            self.stack.append((f"font_{hexcol.lstrip('#')}", self.pos)); return
                     m2 = re.search(r'background(?:-color)?\s*:\s*(#[0-9A-Fa-f]{3,6}|[A-Za-z]+)', style)
                     if m2:
                         bg = m2.group(1).lower()
@@ -274,7 +327,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                             self.stack.append(('todo', self.pos)); return
                 self.stack.append((None, self.pos)); return
 
-            # fallback sentinel so handle_endtag can pop
+            # fallback sentinel
             self.stack.append((None, self.pos))
         except Exception:
             try:
@@ -282,22 +335,153 @@ class _SimpleHTMLToTagged(HTMLParser):
             except Exception:
                 pass
 
+    def handle_startendtag(self, tag, attrs):
+        try:
+            tag = (tag or '').lower()
+            if self._in_code_capture():
+                self._code_append(self._reconstruct_startend_tag(tag, attrs))
+                return
+            # non-code self-closing tags are ignored (no special behavior required)
+        except Exception:
+            pass
+
     def handle_endtag(self, tag):
         try:
+            tag_low = (tag or '').lower()
+
+            # If currently inside a code/pre capture, treat all tags literally except when closing the outermost code/pre.
+            if self._in_code_capture():
+                top = self._code_top()
+                depth = 0
+                try:
+                    depth = int(top[3]) if len(top) >= 4 else 0
+                except Exception:
+                    depth = 0
+                if tag_low in ('code', 'pre'):
+                    if depth > 0:
+                        # closing a nested literal <code>/<pre>
+                        self._code_append(self._reconstruct_end_tag(tag_low))
+                        try:
+                            top[3] = depth - 1
+                        except Exception:
+                            pass
+                        return
+                    # finalize outer code/pre capture (continue below)
+                else:
+                    # literal end tag for non-code inside capture
+                    self._code_append(self._reconstruct_end_tag(tag_low))
+                    return
+
+            # Finalize outermost code/pre block
+            if tag_low in ('code', 'pre'):
+                if not self.stack:
+                    return
+                item = self.stack.pop()
+                if not item or item[0] != '__code__':
+                    return
+                fragments = item[2] if len(item) > 2 else []
+                raw_code = ''.join(fragments) if fragments else ''
+
+                # Fenced multi-lang segmentation (keeps previous behavior)
+                fence_open_re = re.compile(r"'''[ \t]*([A-Za-z]+)\b[ \t]*")
+                recognized = {'python', 'html', 'markdown', 'md', 'json'}
+                segments = []
+                pos = 0
+                L = len(raw_code)
+                while pos < L:
+                    m = fence_open_re.search(raw_code, pos)
+                    if not m:
+                        if pos < L:
+                            segments.append({'lang': None, 'text': raw_code[pos:]})
+                        break
+                    if m.start() > pos:
+                        segments.append({'lang': None, 'text': raw_code[pos:m.start()]})
+                    lang_token = m.group(1).lower()
+                    lang_norm = 'markdown' if lang_token == 'md' else lang_token
+                    content_start = m.end()
+                    close_idx = raw_code.find("'''", content_start)
+                    if close_idx == -1:
+                        segments.append({'lang': None, 'text': raw_code[m.start():]})
+                        break
+                    inner = raw_code[content_start:close_idx]
+                    if lang_norm in recognized:
+                        segments.append({'lang': lang_norm, 'text': inner})
+                    else:
+                        segments.append({'lang': None, 'text': inner})
+                    pos = close_idx + 3
+
+                # Build rendered block: newline + 4-space indent + 60-col wrapped/padded lines
+                width = 60
+                indent = '    '
+                out_parts = ['\n']
+                insert_start = self.pos
+                current_abs_content_cursor = insert_start + 1
+                content_spans = []
+                syntax_segments = []
+
+                for seg in segments:
+                    seg_text = seg['text']
+                    raw_lines = seg_text.splitlines() or ['']
+                    wrapped_raw_lines = []
+                    for line in raw_lines:
+                        if line == '':
+                            wrapped_raw_lines.append('')
+                            continue
+                        i = 0
+                        while i < len(line):
+                            chunk = line[i:i + width]
+                            if len(chunk) == width and i + width < len(line):
+                                sp = chunk.rfind(' ')
+                                if sp > 0:
+                                    wrapped_raw_lines.append(chunk[:sp].rstrip())
+                                    i += sp + 1
+                                    continue
+                            wrapped_raw_lines.append(chunk)
+                            i += len(chunk) if chunk else 1
+                    padded_lines = [ln.ljust(width, ' ') for ln in wrapped_raw_lines] or [' ' * width]
+
+                    for pl in padded_lines:
+                        out_parts.append(indent + pl + '\n')
+                        line_content_start = current_abs_content_cursor + len(indent)
+                        line_content_end = line_content_start + len(pl)
+                        content_spans.append((line_content_start, line_content_end))
+                        current_abs_content_cursor = line_content_end + 1
+
+                    if seg['lang']:
+                        syntax_segments.append({
+                            'lang': seg['lang'],
+                            'padded_text': '\n'.join(padded_lines) + '\n',
+                            'segment_first_line_content_start': content_spans[-len(padded_lines)][0]
+                        })
+
+                block_text = ''.join(out_parts)
+                self.out.append(block_text)
+                self.pos += len(block_text)
+
+                # Tag content area only
+                for s_abs, e_abs in content_spans:
+                    self.ranges.setdefault('code_block', []).append([s_abs, e_abs])
+
+                # Apply language-specific cb_* tags
+                for seg in syntax_segments:
+                    try:
+                        self._cb_apply_syntax(seg['lang'], seg['padded_text'], seg['segment_first_line_content_start'])
+                    except Exception:
+                        pass
+                return
+
+            # Normal non-code behavior
             if not self.stack:
                 return
             item = self.stack.pop()
             if not item:
                 return
 
-            # hyperlink entries are ('hyperlink', start, href, title)
             if isinstance(item, tuple) and item[0] == 'hyperlink':
                 _, start, href, title = item
                 end = self.pos
                 if end > start:
-                    # record visible range for hyperlink (so tag ranges still work)
                     self.ranges.setdefault('hyperlink', []).append([start, end])
-                    # also record link metadata so callers can restore clickable mappings
                     try:
                         rec = {'start': start, 'end': end, 'href': href}
                         if title:
@@ -307,8 +491,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                         pass
                 return
 
-            # if closing an ordered list, pop the counter stack
-            if tag.lower() == 'ol':
+            if tag_low == 'ol':
                 try:
                     if self._ol_counters:
                         self._ol_counters.pop()
@@ -316,7 +499,6 @@ class _SimpleHTMLToTagged(HTMLParser):
                     pass
                 return
 
-            # normal tags (tagname, start)
             tagname = item[0] if len(item) > 0 else None
             start = item[1] if len(item) > 1 else None
             if not tagname or start is None:
@@ -331,9 +513,35 @@ class _SimpleHTMLToTagged(HTMLParser):
         try:
             if not data:
                 return
-            # HTMLParser with convert_charrefs=True already converts char refs; keep data as-is
+            if self._in_code_capture():
+                self._code_append(data)
+                return
             self.out.append(data)
             self.pos += len(data)
+        except Exception:
+            pass
+
+    def handle_entityref(self, name):
+        try:
+            if self._in_code_capture():
+                self._code_append(f"&{name};")
+                return
+        except Exception:
+            pass
+
+    def handle_charref(self, name):
+        try:
+            if self._in_code_capture():
+                self._code_append(f"&#{name};")
+                return
+        except Exception:
+            pass
+
+    def handle_comment(self, data):
+        try:
+            if self._in_code_capture():
+                self._code_append(f"<!--{data}-->")
+                return
         except Exception:
             pass
 
@@ -345,6 +553,101 @@ class _SimpleHTMLToTagged(HTMLParser):
             return ''.join(self.out), meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
+
+    # --- Codeblock syntax helpers (isolated tags: cb_*) ----------------------
+    def _cb_apply_syntax(self, lang: str, text: str, base_off: int):
+        """Apply minimal syntax token tags inside a code block."""
+        lang = (lang or '').lower()
+        if lang == 'python':
+            self._cb_python(text, base_off)
+        elif lang == 'json':
+            self._cb_json(text, base_off)
+        elif lang == 'html':
+            self._cb_html(text, base_off)
+        elif lang == 'markdown':
+            self._cb_markdown(text, base_off)
+        # unknown -> no extra tags
+
+    def _cb_add(self, tag: str, s: int, e: int):
+        if e > s:
+            self.ranges.setdefault(tag, []).append([s, e])
+
+    def _cb_python(self, text: str, base: int):
+        try:
+            kw = (
+                'if','else','elif','while','for','return','def','from','import','class','try','except',
+                'finally','with','as','lambda','in','is','not','and','or','yield','raise','global',
+                'nonlocal','assert','del','async','await','pass','break','continue','match','case','True','False','None'
+            )
+            kw_re = re.compile(r'\b(' + '|'.join(map(re.escape, kw)) + r')\b')
+            str_re = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|\'[^\'\n]*\')')
+            com_re = re.compile(r'#[^\n]*')
+            num_re = re.compile(r'\b(?:0b[01_]+|0o[0-7_]+|0x[0-9A-Fa-f_]+|\d[\d_]*(?:\.\d[\d_]*)?(?:[eE][+-]?\d+)?)\b')
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end())
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end())
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            # Avoid tagging inside strings/comments by a simple overlap check
+            prot = self.ranges.get('cb_string', []) + self.ranges.get('cb_comment', [])
+            def _overlaps(s, e):
+                for ps, pe in prot:
+                    if not (e <= ps or s >= pe):
+                        return True
+                return False
+            for m in kw_re.finditer(text):
+                s, e = base + m.start(), base + m.end()
+                if not _overlaps(s, e):
+                    self._cb_add('cb_keyword', s, e)
+        except Exception:
+            pass
+
+    def _cb_json(self, text: str, base: int):
+        try:
+            str_re = re.compile(r'"(?:\\.|[^"\\])*"')
+            num_re = re.compile(r'\b-?(?:0|[1-9]\d*)(?:\.\d+)?(?:[eE][+-]?\d+)?\b')
+            kw_re = re.compile(r'\b(true|false|null)\b', re.IGNORECASE)
+            com_re = None  # JSON has no comments; keep for symmetry
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end())
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            for m in kw_re.finditer(text):
+                self._cb_add('cb_keyword', base + m.start(), base + m.end())
+        except Exception:
+            pass
+
+    def _cb_html(self, text: str, base: int):
+        try:
+            com_re = re.compile(r'<!--[\s\S]*?-->')
+            tagname_re = re.compile(r'</?([A-Za-z][A-Za-z0-9:\-]*)')
+            attr_re = re.compile(r'([A-Za-z_:][A-Za-z0-9_:.\-]*)\s*=')
+            aval_re = re.compile(r'=\s*(?:"([^"]*?)"|\'([^\']*?)\'|([^\s>]+))')
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end())
+            for m in tagname_re.finditer(text):
+                self._cb_add('cb_tag', base + m.start(1), base + m.end(1))
+            for m in attr_re.finditer(text):
+                self._cb_add('cb_attr', base + m.start(1), base + m.end(1))
+            for m in aval_re.finditer(text):
+                g = 1 if m.group(1) is not None else (2 if m.group(2) is not None else (3 if m.group(3) is not None else None))
+                if g:
+                    self._cb_add('cb_attr_value', base + m.start(g), base + m.end(g))
+        except Exception:
+            pass
+
+    def _cb_markdown(self, text: str, base: int):
+        # Minimal: headings and inline code spans as keywords/strings for a quick visual.
+        try:
+            head_re = re.compile(r'(?m)^(#{1,6}\s+.+)$')
+            code_inline = re.compile(r'`([^`]+)`')
+            for m in head_re.finditer(text):
+                self._cb_add('cb_keyword', base + m.start(1), base + m.end(1))
+            for m in code_inline.finditer(text):
+                self._cb_add('cb_string', base + m.start(1), base + m.end(1))
+        except Exception:
+            pass
 
 def get_hex_color(color_tuple):
     """Return a hex string from a colorchooser return value."""
@@ -584,7 +887,7 @@ def get_result(self):
                         continue
                     end = min(end, len(full))
                     seg = full[start:end]
-                    # Split into rows then cells (parser used '\n' between rows and '\t' between cells)
+                    # Split into rows then cells (parser uses '\n' between rows and '\t' between cells)
                     rows = seg.split('\n')
                     cells_by_row = [r.split('\t') if r != '' else [''] for r in rows]
 
