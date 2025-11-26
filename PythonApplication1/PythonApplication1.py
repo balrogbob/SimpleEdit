@@ -825,6 +825,24 @@ def _ensure_style_tag(tag: str, bold: bool, italic: bool, underline: bool, font_
     except Exception:
         pass
 
+def _raise_hex_tags_above(tw: Text):
+    """Ensure any `hex_XXXXXX` tags are raised above other tags in the widget."""
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+        for t in tw.tag_names():
+            try:
+                if isinstance(t, str) and t.startswith('hex_'):
+                    # try to place hex tag above everything (best-effort)
+                    try:
+                        tw.tag_raise(t)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+    except Exception:
+        pass
+
 def _raise_tag_over_marquee(tag: str):
     """Raise `tag` above marquee so its fg/bg win visually."""
     try:
@@ -1378,6 +1396,116 @@ def _hex_to_rgb(h: str) -> tuple[int, int, int]:
 def _rgb_to_hex(r: int, g: int, b: int) -> str:
     return funcs._rgb_to_hex(r, g, b)
 
+_CLS_CLOSEST_COLOR_CACHE: dict[str, str] = {}
+# Web-safe component steps (00,33,66,99,CC,FF) produce 216 colors — good compromise between variety & performance.
+_WEBSAFE_STEPS = ['00', '33', '66', '99', 'cc', 'ff']
+_WEBSAFE_PALETTE = [f"#{r}{g}{b}" for r in _WEBSAFE_STEPS for g in _WEBSAFE_STEPS for b in _WEBSAFE_STEPS]
+
+def _normalize_hex_color(s: str) -> str | None:
+    """Normalize input to '#rrggbb' lowercase or return None if invalid-looking."""
+    try:
+        if not s:
+            return None
+        s2 = str(s).strip()
+        if s2.startswith('#'):
+            s2 = s2[1:]
+        # allow values like 'fff' or 'ffffff' or with extra whitespace
+        if re.fullmatch(r'[0-9A-Fa-f]{3}', s2):
+            s2 = ''.join(ch*2 for ch in s2)
+        if not re.fullmatch(r'[0-9A-Fa-f]{6}', s2):
+            return None
+        return f"#{s2.lower()}"
+    except Exception:
+        return None
+
+def _rgb_distance(a: tuple[int,int,int], b: tuple[int,int,int]) -> int:
+    """Squared Euclidean distance (sufficient for nearest color)."""
+    try:
+        return (a[0]-b[0])**2 + (a[1]-b[1])**2 + (a[2]-b[2])**2
+    except Exception:
+        return 10**9
+
+def _closest_websafe_color(hexcol: str) -> str:
+    """Return the nearest web-safe color string (e.g. '#rrggbb'). Caches results."""
+    try:
+        if not hexcol:
+            return _WEBSAFE_PALETTE[0]
+        normalized = _normalize_hex_color(hexcol) or hexcol
+        cached = _CLS_CLOSEST_COLOR_CACHE.get(normalized)
+        if cached:
+            return cached
+        try:
+            target = _hex_to_rgb(normalized)
+        except Exception:
+            # fall back to first websafe color
+            return _WEBSAFE_PALETTE[0]
+        best = None
+        bestd = None
+        for cand in _WEBSAFE_PALETTE:
+            try:
+                cr = _hex_to_rgb(cand)
+                d = _rgb_distance(target, cr)
+                if best is None or d < bestd:
+                    best = cand
+                    bestd = d
+            except Exception:
+                continue
+        if not best:
+            best = _WEBSAFE_PALETTE[0]
+        _CLS_CLOSEST_COLOR_CACHE[normalized] = best
+        return best
+    except Exception:
+        return _WEBSAFE_PALETTE[0]
+
+def _safe_tag_config(tw: Text, tag: str, foreground: str | None = None, background: str | None = None):
+    """
+    Robust wrapper around `Text.tag_config` that:
+      - Normalizes hex strings to '#rrggbb'.
+      - If Tk rejects a color, substitutes nearest web-safe color.
+    """
+    try:
+        if tw is None:
+            return
+        kwargs = {}
+        if foreground:
+            try:
+                fg = _normalize_hex_color(foreground) or foreground
+                # validate with root.winfo_rgb; if it raises, compute nearest
+                try:
+                    root.winfo_rgb(fg)
+                except Exception:
+                    fg = _closest_websafe_color(fg)
+                kwargs['foreground'] = fg
+            except Exception:
+                pass
+        if background:
+            try:
+                bg = _normalize_hex_color(background) or background
+                try:
+                    root.winfo_rgb(bg)
+                except Exception:
+                    bg = _closest_websafe_color(bg)
+                kwargs['background'] = bg
+            except Exception:
+                pass
+        if kwargs:
+            try:
+                tw.tag_config(tag, **kwargs)
+            except Exception:
+                # final fallback: try individual options to avoid a combined failure
+                try:
+                    if 'foreground' in kwargs:
+                        tw.tag_config(tag, foreground=kwargs['foreground'])
+                except Exception:
+                    pass
+                try:
+                    if 'background' in kwargs:
+                        tw.tag_config(tag, background=kwargs['background'])
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
 def _lighten_color(hexcol: str, factor: float = 0.15) -> str:
     return funcs._lighten_color(hexcol, factor)
 
@@ -1462,27 +1590,45 @@ def _apply_tag_configs_to_widget(tw):
             tw.tag_config("small", font=(fontName, small_size))
         except Exception:
             pass
-        # mark: highlight background
+
+        # mark/code/kbd: prefer colors from Syntax config, fallback to _DEFAULT_TAG_COLORS defaults
         try:
-            tw.tag_config("mark", background="#FFF177")
-        except Exception:
-            pass
-        # sub/sup: use a slightly smaller font
-        try:
-            subsz = max(6, int(fontSize - 2))
-            tw.tag_config("sub", font=(fontName, subsz))
-            tw.tag_config("sup", font=(fontName, subsz))
-        except Exception:
-            pass
-        # code/kbd: monospace inset
-        try:
+            def _cfg_tag_values(tag):
+                fg_cfg = config.get('Syntax', f'tag.{tag}.fg', fallback='').strip() if config and config.has_section('Syntax') else ''
+                bg_cfg = config.get('Syntax', f'tag.{tag}.bg', fallback='').strip() if config and config.has_section('Syntax') else ''
+                if not fg_cfg:
+                    fg_cfg = _DEFAULT_TAG_COLORS.get(tag, {}).get('fg', '') or ''
+                if not bg_cfg:
+                    bg_cfg = _DEFAULT_TAG_COLORS.get(tag, {}).get('bg', '') or ''
+                return (fg_cfg or None, bg_cfg or None)
+
+            # mark
+            m_fg, m_bg = _cfg_tag_values('mark')
+            kwargs = {}
+            if m_fg:
+                kwargs['foreground'] = m_fg
+            if m_bg:
+                kwargs['background'] = m_bg
+            if kwargs:
+                tw.tag_config("mark", **kwargs)
+
+            # code / kbd: enforce monospace font and configurable colors
             mono_font = ("Courier New", max(6, int(fontSize - 1)))
-            tw.tag_config("code", font=mono_font, background="#F5F5F5")
-            tw.tag_config("kbd", font=mono_font, background="#F5F5F5")
+            for t in ('code', 'kbd'):
+                fg, bg = _cfg_tag_values(t)
+                cfg = {'font': mono_font}
+                if fg:
+                    cfg['foreground'] = fg
+                if bg:
+                    cfg['background'] = bg
+                try:
+                    tw.tag_config(t, **cfg)
+                except Exception:
+                    pass
         except Exception:
             pass
 
-                # HTML-specific visual tags
+        # HTML-specific visual tags
         try:
             tw.tag_config("html_tag", foreground=_DEFAULT_TAG_COLORS["html_tag"]["fg"])
             tw.tag_config("html_attr", foreground=_DEFAULT_TAG_COLORS["html_attr"]["fg"])
@@ -1670,21 +1816,17 @@ def _apply_tag_configs_to_widget(tw):
                                 except Exception:
                                     pass
 
-                                                                # Optimistically push the clicked target onto the back-stack
-                                # so the Back button enables immediately (fetch/persist may happen async).
+                                # Optimistically push the clicked target onto the back-stack
                                 try:
                                     if href:
-                                        # prefer non-persistent push initially so menu won't show a dead entry
                                         _push_back_stack(href)
                                 except Exception:
                                     pass
 
                                 try:
-                                    # OPEN IN CURRENT TAB (changed from new-tab behavior)
                                     _open_maybe_url(href, open_in_new_tab=False)
                                 except Exception:
                                     try:
-                                        # fallback: also open in current tab
                                         fetch_and_open_url(href, open_in_new_tab=False)
                                     except Exception:
                                         pass
@@ -3462,7 +3604,7 @@ def load_syntax_config():
 
             if kwargs:
                 try:
-                    textArea.tag_config(tag, **kwargs)
+                    _safe_tag_config(textArea, tag, foreground=kwargs.get('foreground'), background=kwargs.get('background'))
                 except Exception:
                     pass
 
@@ -4730,7 +4872,7 @@ def _apply_formatting_from_meta(meta):
                                 kwargs[opt] = v
                         if kwargs:
                             # apply per-widget so visuals survive round-trip
-                            textArea.tag_config(tag, **kwargs)
+                            _safe_tag_config(textArea, tag, foreground=kwargs.get('foreground'), background=kwargs.get('background'))
                     except Exception:
                         pass
         except Exception:
@@ -4981,11 +5123,6 @@ def safe_highlight_event(event=None):
       status bar and trailing-whitespace) so the editor remains responsive.
     """
     try:
-        # Always color literal hex codes even if syntax highlighting is off
-        try:
-            color_hex_codes()
-        except Exception:
-            pass
         # only run the (potentially expensive) syntax pass when enabled
         if updateSyntaxHighlighting.get():
             try:
@@ -5008,6 +5145,15 @@ def safe_highlight_event(event=None):
             pass
         try:
             show_trailing_whitespace()
+        except Exception:
+            pass
+        # Always color literal hex codes even if syntax highlighting is off
+        try:
+            color_hex_codes()
+        except Exception:
+            pass
+        try:
+            _raise_hex_tags_above(textArea)
         except Exception:
             pass
     except Exception:
@@ -5831,7 +5977,11 @@ def open_file_threaded():
         messagebox.showerror("Error", str(e))
 
 def _on_status_syntax_toggle():
-    """Persist the syntax highlighting toggle immediately and apply change."""
+    """Persist the syntax highlighting toggle immediately and apply change.
+
+    When disabling: remove all syntax and HTML-specific tags from every open Text widget
+    (so parser-applied html_tag/html_attr/html_comment/ table/hyperlink ranges do not remain).
+    """
     try:
         # persist change to config immediately
         config.set("Section1", "syntaxHighlighting", str(bool(updateSyntaxHighlighting.get())))
@@ -5846,10 +5996,90 @@ def _on_status_syntax_toggle():
             highlightPythonInit()
             statusBar['text'] = "Syntax highlighting enabled."
         else:
-            # disable -> clear tags and update status
-            for t in ('string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
-                      'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo'):
-                textArea.tag_remove(t, "1.0", "end")
+            # disable -> clear tags across all text widgets and update status
+            SYNTAX_TAGS = (
+                'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+                'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo',
+                # HTML / markup specific tags
+                'html_tag', 'html_attr', 'html_attr_value', 'html_comment',
+                # tables and separators used by HTML parser
+                'table', 'tr', 'td', 'th', 'table_sep',
+                # presentational tags that were applied by parser (keep other presentational tags if desired)
+                'hyperlink', 'marquee'
+            )
+            try:
+                # iterate every open tab and the global textArea to remove tags and hyperlink maps
+                widgets = []
+                # current global textArea (if available)
+                try:
+                    if 'textArea' in globals() and isinstance(globals().get('textArea'), Text):
+                        widgets.append(globals().get('textArea'))
+                except Exception:
+                    pass
+                # all tabs' widgets
+                try:
+                    for tab_id in editorNotebook.tabs():
+                        try:
+                            frame = root.nametowidget(tab_id)
+                        except Exception:
+                            continue
+                        for child in frame.winfo_children():
+                            if isinstance(child, Text):
+                                widgets.append(child)
+                except Exception:
+                    pass
+
+                for tw in widgets:
+                    try:
+                        # remove explicitly named tags
+                        for t in SYNTAX_TAGS:
+                            try:
+                                tw.tag_remove(t, "1.0", "end")
+                            except Exception:
+                                pass
+                        # remove any hex_ tags? keep them so color tokens still show; if you want to remove, uncomment:
+                        # for t in list(tw.tag_names()):
+                        #     if t.startswith('hex_'):
+                        #         try:
+                        #             tw.tag_remove(t, "1.0", "end")
+                        #         except Exception:
+                        #             pass
+                        # stop any marquee loops if present in this widget (global marquee loop checks tag ranges)
+                        try:
+                            tw.tag_remove('marquee', "1.0", "end")
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
+
+                # Ensure UI-level refresh so removed tags vanish immediately
+                try:
+                    # refresh each tab's line numbers and the active caret highlight
+                    for tab_id in editorNotebook.tabs():
+                        try:
+                            frame = root.nametowidget(tab_id)
+                            _draw_line_numbers_for(frame)
+                        except Exception:
+                            pass
+                    # global refresh helpers
+                    try:
+                        highlight_current_line()
+                    except Exception:
+                        pass
+                    try:
+                        redraw_line_numbers()
+                    except Exception:
+                        pass
+                    try:
+                        update_status_bar()
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+
+            except Exception:
+                pass
+
             statusBar['text'] = "Syntax highlighting disabled."
     except Exception:
         pass
@@ -6550,7 +6780,7 @@ def color_hex_codes(tw: Text | None = None, scan_start: str = "1.0", scan_end: s
                     cur_fg = ''
                 if not cur_fg:
                     try:
-                        tw.tag_config(tag, foreground=f"#{hex6}")
+                        _safe_tag_config(tw, tag, foreground=f"#{hex6}")
                     except Exception:
                         pass
                 # ensure color tags visually win over marquee
