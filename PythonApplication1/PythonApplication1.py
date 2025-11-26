@@ -111,7 +111,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                         try:
                             editorNotebook.tab(sel, text=os.path.basename(path) or path)
                         except Exception:
-                            pass                
+                            pass             
                 except Exception:
                     pass
                 _apply_tag_configs_to_widget(textArea)
@@ -184,6 +184,11 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                             frame._raw_html_plain = raw
                             frame._raw_html_tags_meta = None
                             frame._view_raw = True
+                            # update tab title for in-place open
+                            try:
+                                editorNotebook.tab(sel, text=os.path.basename(path) or path)
+                            except Exception:
+                                pass
                             try:
                                 root.after(0, update_view_status_indicator)
                             except Exception:
@@ -236,6 +241,11 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                         frame._raw_html_plain = plain
                         frame._raw_html_tags_meta = tags_meta
                         frame._view_raw = False
+                        # update tab title for in-place open
+                        try:
+                            editorNotebook.tab(sel, text=os.path.basename(path) or path)
+                        except Exception:
+                            pass
                 except Exception:
                     pass
                 try:
@@ -283,6 +293,12 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 if sel:
                     frame = root.nametowidget(sel)
                     frame._opened_as_source = False
+                    frame.fileName = path
+                    # update tab title for in-place open
+                    try:
+                        editorNotebook.tab(sel, text=os.path.basename(path) or path)
+                    except Exception:
+                        pass
             except Exception:
                 pass
 
@@ -843,6 +859,16 @@ def _raise_hex_tags_above(tw: Text):
     except Exception:
         pass
 
+def _close_all_tabs():
+    """Close all tabs."""
+    try:
+        tabs = list(editorNotebook.tabs())
+        for tab_id in tabs:
+            frame = root.nametowidget(tab_id)
+            _close_tab(frame)
+    except Exception:
+        pass
+
 def _raise_tag_over_marquee(tag: str):
     """Raise `tag` above marquee so its fg/bg win visually."""
     try:
@@ -968,6 +994,10 @@ fileMenu.add_command(label='Save', command=lambda: save_file())
 fileMenu.add_command(label='Save As', command=lambda: save_file_as())
 fileMenu.add_command(label='Save as Markdown', command=lambda: save_as_markdown(textArea))
 fileMenu.add_separator()
+fileMenu.add_command(label='Close Tab', command=lambda: _close_tab(root.nametowidget(editorNotebook.select())) if editorNotebook.select() else None, accelerator='Ctrl+W')
+fileMenu.add_command(label='Close Other Tabs', command=lambda: _close_other_tabs(root.nametowidget(editorNotebook.select())) if editorNotebook.select() else None)
+fileMenu.add_command(label='Close All Tabs', command=_close_all_tabs)
+fileMenu.add_separator()
 fileMenu.add_command(label='Exit', command=root.destroy)
 
 menuBar.add_cascade(label="Edit", menu=editMenu)
@@ -981,7 +1011,19 @@ editMenu.add_command(label='Find/Replace', command=lambda: open_find_replace())
 editMenu.add_command(label='Go To Line', command=lambda: go_to_line(), accelerator='Ctrl+G')
 root.bind('<Control-g>', lambda e: go_to_line())
 
-
+ # Settings menu (keeps Settings accessible when toolbars are hidden)
+settingsMenu = Menu(menuBar, tearoff=False)
+menuBar.add_cascade(label="Settings", menu=settingsMenu)
+settingsMenu.add_command(label="Settings...", command=lambda: setting_modal())
+settingsMenu.add_command(label="Edit Syntax...", command=lambda: setting_syntax_modal())
+settingsMenu.add_separator()
+def _toggle_browsing_mode_from_menu():
+    try:
+        browsingModeVar.set(0 if browsingModeVar.get() else 1)
+        _apply_browsing_mode_for_current_tab()
+    except Exception:
+        pass
+settingsMenu.add_command(label="Toggle Browsing Mode", command=_toggle_browsing_mode_from_menu)
 
 # Helper to return a nicely formatted parameter count string for the loaded model
 def _get_model_param_text():
@@ -2666,26 +2708,421 @@ def create_editor_tab(title='Untitled', content='', filename=''):
     # metadata: keep filename per-tab on the frame object
     frame.fileName = filename
 
-        # record opened location (file path or URL) into history/back-stack
+    # record opened location (file path or URL) into history/back-stack
     try:
         if filename:
             _record_location_opened(filename, push_stack=True)
     except Exception:
         pass
 
+    # Track initial content for modified detection
+    frame._initial_content = content
+    frame._is_modified = False
+
+    # Add the tab with a close button
     editorNotebook.add(frame, text=title)
+    _add_close_button_to_tab(frame, title)
     editorNotebook.select(frame)
+
+    # Bind text changes to track modifications
+    tx.bind('<<Modified>>', lambda e: _on_tab_content_modified(tx, frame))
 
     # ensure global references update
     _on_tab_changed(None)
     return tx, frame
 
+def _on_tab_content_modified(text_widget, frame):
+    """Track when tab content is modified."""
+    try:
+        if text_widget.edit_modified():
+            current_content = text_widget.get('1.0', 'end-1c')
+            initial_content = getattr(frame, '_initial_content', '')
+            frame._is_modified = (current_content != initial_content)
+            text_widget.edit_modified(False)
+    except Exception:
+        pass
+
+def _enable_notebook_close_buttons():
+    """Add a real clickable close button to each ttk.Notebook tab via a custom style."""
+    try:
+        style = ttk.Style(root)
+        style_name = 'Closable.TNotebook'
+        tab_style = f'{style_name}.Tab'
+
+        def _to_hex_color(c: str, fallback: str = "#f0f0f0") -> str:
+            try:
+                if not c:
+                    return fallback
+                r16, g16, b16 = root.winfo_rgb(c)
+                return f"#{r16//256:02x}{g16//256:02x}{b16//256:02x}"
+            except Exception:
+                m = re.fullmatch(r'#?([0-9a-fA-F]{3}|[0-9a-fA-F]{6})', str(c).strip())
+                if m:
+                    h = m.group(1)
+                    if len(h) == 3:
+                        h = ''.join(ch*2 for ch in h)
+                    return f"#{h.lower()}"
+                return fallback
+
+        def _make_close_img(fg='#666666'):
+            sz = 12
+            img = PhotoImage(width=sz, height=sz)
+            try:
+                tab_bg_raw = style.lookup('TNotebook.Tab', 'background') or style.lookup('TNotebook', 'background') or root.cget('bg')
+            except Exception:
+                tab_bg_raw = root.cget('bg')
+            tab_bg = _to_hex_color(tab_bg_raw, fallback="#f0f0f0")
+            img.put(tab_bg, to=(0, 0, sz, sz))
+            fg_hex = _to_hex_color(fg, fallback="#666666")
+            for i in range(2, sz - 2):
+                for t in (-1, 0, 1):
+                    try:
+                        img.put(fg_hex, to=(i, i + t))
+                        img.put(fg_hex, to=(i, (sz - 1) - i + t))
+                    except Exception:
+                        pass
+            return img, sz
+
+        # Close button color scheme:
+        #   normal: red, hover(active): blue, pressed: darker red
+        img_n, sz_n = _make_close_img('#cc0000')     # normal (non-hover) red
+        img_a, _    = _make_close_img('#0066ff')     # hover blue
+        img_p, _    = _make_close_img('#990000')     # pressed darker
+
+        editorNotebook._img_close_n = img_n
+        editorNotebook._img_close_a = img_a
+        editorNotebook._img_close_p = img_p
+        editorNotebook._close_img_size = int(sz_n)
+
+        try:
+            style.element_create('close', 'image', img_n, ('active', img_a), ('pressed', img_p))
+        except Exception:
+            pass
+
+        layout_with_close = [
+            ('Notebook.tab', {'sticky': 'nswe', 'children': [
+                ('Notebook.padding', {'side': 'top', 'sticky': 'nswe', 'children': [
+                    ('Notebook.focus', {'side': 'top', 'sticky': 'nswe', 'children': [
+                        ('Notebook.label', {'side': 'left', 'sticky': ''}),
+                        ('close', {'side': 'right', 'sticky': ''})
+                    ]})
+                ]})
+            ]})
+        ]
+
+        try:
+            base_nb_layout = style.layout('TNotebook')
+            if base_nb_layout:
+                style.layout(style_name, base_nb_layout)
+        except Exception:
+            pass
+        style.layout(tab_style, layout_with_close)
+        editorNotebook.configure(style=style_name)
+
+        # Corrected hit-test: use Notebook.identify(x, y)
+        def _hit_test_close(px: int, py: int):
+            # 1) exact element hit-test via ttk.Notebook.identify(x, y)
+            try:
+                elem = editorNotebook.identify(px, py)
+                if elem == 'close':
+                    idx = editorNotebook.index(f'@{px},{py}')
+                    return True, idx
+            except Exception:
+                pass
+            # 2) fallback bbox check near the right edge of the tab
+            try:
+                idx = editorNotebook.index(f'@{px},{py}')
+                bx, by, bw, bh = editorNotebook.bbox(idx)
+                pad = 6
+                icon_w = int(getattr(editorNotebook, '_close_img_size', 12)) + pad
+                if bx <= px <= bx + bw and by <= py <= by + bh:
+                    if px >= (bx + bw - icon_w):
+                        return True, idx
+            except Exception:
+                pass
+            return False, None
+
+        def _on_nb_click(e):
+            hit, idx = _hit_test_close(e.x, e.y)
+            if hit and idx is not None:
+                try:
+                    tab_id = editorNotebook.tabs()[idx]
+                    frame = root.nametowidget(tab_id)
+                    _close_tab(frame)
+                except Exception:
+                    pass
+                return 'break'
+            return None
+
+        def _on_nb_motion(e):
+            hit, _ = _hit_test_close(e.x, e.y)
+            try:
+                editorNotebook.configure(cursor='hand2' if hit else '')
+            except Exception:
+                pass
+
+        editorNotebook.bind('<Button-1>', _on_nb_click, add='+')
+        editorNotebook.bind('<Motion>', _on_nb_motion, add='+')
+    except Exception:
+        pass
+
+def _add_close_button_to_tab(frame, title):
+    """Set the tab's title; the close button is provided by the custom Notebook style."""
+    try:
+        editorNotebook.tab(str(frame), text=title)
+        frame._tab_base_title = title
+    except Exception:
+        editorNotebook.tab(str(frame), text=title)
+
+
+def _close_tab(frame):
+    """Close a tab with confirmation:
+       - URL or unmodified: ask Yes/No to close.
+       - Modified: ask Save/Don't Save/Cancel."""
+    try:
+        # Get the text widget
+        text_widget = None
+        for child in frame.winfo_children():
+            if isinstance(child, Text):
+                text_widget = child
+                break
+
+        filename = getattr(frame, 'fileName', '') or ''
+        base_title = getattr(frame, '_tab_base_title', None)
+        display_name = os.path.basename(filename) if filename else (base_title or "Untitled")
+        is_url = False
+        try:
+            is_url = _is_likely_url(filename) or filename.lower().startswith('http') or filename.lower().startswith('file:///')
+        except Exception:
+            is_url = False
+
+        is_modified = bool(getattr(frame, '_is_modified', False))
+
+        # URL or unmodified -> simple Yes/No confirmation
+        if is_url or not is_modified:
+            try:
+                ok = messagebox.askyesno("Close Tab", f"Close '{display_name}'?", parent=root, default=messagebox.NO)
+            except Exception:
+                ok = True  # fallback
+            if ok:
+                _close_tab_immediate(frame)
+            return
+
+        # Modified -> Save / Don't Save / Cancel
+        resp = messagebox.askyesnocancel(
+            "Save Changes?",
+            f"Do you want to save changes to '{display_name}'?\n\n"
+            "Yes = Save and close\n"
+            "No = Close without saving\n"
+            "Cancel = Don't close",
+            parent=root
+        )
+
+        if resp is None:  # Cancel
+            return
+        if resp:  # Yes = Save
+            try:
+                # Select this tab before saving so global state points to it
+                editorNotebook.select(frame)
+                _on_tab_changed(None)
+                # Save to file (Save As if needed)
+                if not getattr(root, 'fileName', ''):
+                    save_file_as()
+                else:
+                    save_file()
+                _close_tab_immediate(frame)
+            except Exception as e:
+                messagebox.showerror("Save Error", f"Failed to save: {e}")
+            return
+
+        # No = Close without saving
+        _close_tab_immediate(frame)
+
+    except Exception:
+        # On error, try to close anyway
+        try:
+            _close_tab_immediate(frame)
+        except Exception:
+            pass
+
+def _on_notebook_button_click(event):
+    """Handle clicks on notebook tabs to detect close button clicks."""
+    try:
+        # Get the tab that was clicked
+        clicked_tab = editorNotebook.tk.call(editorNotebook._w, "identify", "tab", event.x, event.y)
+        
+        if clicked_tab == '':
+            return
+        
+        # Get the frame for this tab
+        tab_id = editorNotebook.tabs()[int(clicked_tab)]
+        frame = root.nametowidget(tab_id)
+        
+        # Get the tab text and base title
+        tab_text = editorNotebook.tab(tab_id, "text")
+        base_title = getattr(frame, '_tab_base_title', tab_text.replace('  ×', ''))
+        
+        # Calculate approximate position of close button (×)
+        # The × is at the end of the text, roughly the last 20 pixels
+        tab_bbox = editorNotebook.tk.call(editorNotebook._w, "identify", "element", event.x, event.y)
+        
+        # If click is in the right portion of the tab (where × would be), trigger close
+        tab_x = int(editorNotebook.tk.call(editorNotebook._w, "identify", "tab", event.x, event.y))
+        if tab_x >= 0:
+            # Get tab dimensions
+            try:
+                import tkinter.font as tkFont
+                font = tkFont.Font(font=editorNotebook.cget("font") or tkFont.nametofont("TkDefaultFont"))
+                text_width = font.measure(base_title)
+                total_width = font.measure(tab_text)
+                
+                # Get relative x position within the tab
+                # This is approximate - if click is in the last ~30 pixels, consider it a close click
+                tabs = editorNotebook.tabs()
+                tab_idx = tabs.index(tab_id)
+                
+                # Estimate: if we're near the right edge of the tab text, it's a close click
+                # Simple heuristic: last 25% of tab or last 30 pixels
+                close_button_width = max(30, total_width * 0.25)
+                
+                # For a more accurate detection, we'd need platform-specific code
+                # For now, we'll use middle-click or a keyboard shortcut instead
+                
+            except Exception as e:
+                response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+                    parent=root
+                )
+                pass
+        
+    except Exception as e:
+        response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+            parent=root
+        )
+        pass
+
+def _on_tab_button_click(event):
+    """Handle clicks on notebook tabs to detect close button clicks."""
+    try:
+        # Get the tab that was clicked
+        clicked_tab = editorNotebook.tk.call(editorNotebook._w, "identify", "tab", event.x, event.y)
+        
+        if clicked_tab == '':
+            return
+        
+        # Get the frame for this tab
+        tab_id = editorNotebook.tabs()[int(clicked_tab)]
+        frame = root.nametowidget(tab_id)
+        
+        # Get the tab text and base title
+        tab_text = editorNotebook.tab(tab_id, "text")
+        base_title = getattr(frame, '_tab_base_title', tab_text.replace('  ×', ''))
+        
+        # Simple heuristic: if click is in the right ~20% of tab, treat as close click
+        # Get all tabs and estimate position
+        try:
+            import tkinter.font as tkFont
+            font = tkFont.Font(font=editorNotebook.cget("font") or tkFont.nametofont("TkDefaultFont"))
+            text_width = font.measure(tab_text)
+            
+            # If we have the × symbol, clicking in the last 30 pixels should trigger close
+            # This is approximate since we can't get exact tab boundaries easily
+            # For better UX, we'll just check if the click X coordinate suggests right side
+            
+            # Note: This is a best-effort heuristic. The × is visible and clickable.
+        except Exception as e:
+            response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+                parent=root
+            )
+            pass
+            
+    except Exception as e:
+        response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+            parent=root
+        )
+        pass
+
+
+def _on_tab_right_click(event):
+    """Show context menu on tab right-click with close options."""
+    try:
+        # Identify which tab was right-clicked
+        clicked_tab = editorNotebook.tk.call(editorNotebook._w, "identify", "tab", event.x, event.y)
+        if clicked_tab == '':
+            return
+            
+        tab_id = editorNotebook.tabs()[int(clicked_tab)]
+        frame = root.nametowidget(tab_id)
+        
+        # Build context menu
+        menu = Menu(root, tearoff=0)
+        menu.add_command(label="Close Tab", command=lambda: _close_tab(frame))
+        menu.add_command(label="Close Other Tabs", command=lambda: _close_other_tabs(frame))
+        menu.add_command(label="Close All Tabs", command=_close_all_tabs)
+        
+        menu.tk_popup(event.x_root, event.y_root)
+    except Exception as e:
+        response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+            parent=root
+        )
+        pass
+    finally:
+        try:
+            menu.grab_release()
+        except:
+            pass
+
+
+def _close_other_tabs(keep_frame):
+    """Close all tabs except the specified one."""
+    try:
+        tabs = list(editorNotebook.tabs())
+        for tab_id in tabs:
+            frame = root.nametowidget(tab_id)
+            if frame != keep_frame:
+                _close_tab(frame)
+    except Exception as e:
+        response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+            parent=root
+        )
+        pass
+
+
+
+
+
+def _close_tab_immediate(frame):
+    """Immediately close a tab without prompting."""
+    try:
+        # Get all tabs
+        tabs = editorNotebook.tabs()
+        
+        # Don't close if it's the last tab - create a new one instead
+        if len(tabs) <= 1:
+            # Create new blank tab before closing
+            create_editor_tab('Untitled', content='', filename='')
+        
+        # Destroy the frame (removes the tab)
+        frame.destroy()
+        
+        # Update UI
+        try:
+            _on_tab_changed(None)
+        except Exception as e:
+            response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+                parent=root
+            )
+            pass
+            
+    except Exception as e:
+        response = messagebox.showerror("It FAILED",f"{e}'!\n\n",
+            parent=root
+        )
+        pass
+
 def _on_tab_changed(event):
-    """Synchronize global state when the selected tab changes."""
     try:
         sel = editorNotebook.select()
         if not sel:
-            # clear URL when no selection
             try:
                 if 'url_var' in globals():
                     url_var.set('')
@@ -2693,7 +3130,6 @@ def _on_tab_changed(event):
                 pass
             return
         frame = root.nametowidget(sel)
-        # find the Text widget inside the selected frame
         child_text = None
         for child in frame.winfo_children():
             if isinstance(child, Text):
@@ -2701,53 +3137,37 @@ def _on_tab_changed(event):
                 break
         if child_text is None:
             return
-        # update global reference used throughout the file
         global textArea, lineNumbersCanvas
         textArea = child_text
-
-        # use the frame's per-tab line-numbers canvas
         lineNumbersCanvas = getattr(frame, 'lineNumbersCanvas', None)
-
-        # update root.fileName to reflect current tab
         root.fileName = getattr(frame, 'fileName', '')
-
-        # Update toolbar URL field to reflect current tab (if toolbar exists)
         try:
             if 'url_var' in globals():
                 fn = getattr(frame, 'fileName', '') or ''
                 if fn:
-                    # If it's already a URL, show as-is. Otherwise show file://<abs>
                     if re.match(r'^[a-zA-Z][a-zA-Z0-9+\-.]*://', fn):
                         url_var.set(fn)
                     else:
                         try:
-                            p = os.path.abspath(fn)
-                            # Convert to a file:// URI (use forward slashes)
-                            p_posix = p.replace('\\', '/')
-                            if re.match(r'^[A-Za-z]:', p_posix):
-                                # Windows absolute path -> file:///C:/path
-                                url_var.set('file:///' + p_posix)
+                            p = os.path.abspath(fn).replace('\\', '/')
+                            if re.match(r'^[A-Za-z]:', p):
+                                url_var.set('file:///' + p)
                             else:
-                                url_var.set('file://' + p_posix)
+                                url_var.set('file://' + p)
                         except Exception:
                             url_var.set(fn)
                 else:
                     url_var.set('')
         except Exception:
             pass
-
-        # refresh UI elements which depend on active textArea
         highlight_current_line()
         redraw_line_numbers()
         update_status_bar()
         show_trailing_whitespace()
-        # update view-state indicator (raw vs rendered / source)
         try:
             update_view_status_indicator()
         except Exception:
             pass
-
-
         try:
             prev = getattr(root, '_manual_detect_after_id', None)
             if prev:
@@ -2755,17 +3175,19 @@ def _on_tab_changed(event):
                     root.after_cancel(manual_detect_after_id)
                 except Exception:
                     pass
-            # run after 1 second so UI settle and any initial insertions complete
             manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
         except Exception:
             pass
+        # NEW: Apply browsing mode after tab change
+        _apply_browsing_mode_for_current_tab()
     except Exception:
         pass
 
 # Editor notebook for tabbed editing (ensure this exists earlier where it was created)
 editorNotebook = ttk.Notebook(root)
 editorNotebook.bind('<<NotebookTabChanged>>', _on_tab_changed)
-
+editorNotebook.bind('<Button-3>', _on_tab_right_click)
+_enable_notebook_close_buttons()
 # create initial tab (replaces original single textArea creation)
 textArea, _initial_tab_frame = create_editor_tab('Untitled', '')
 textArea['bg'] = backgroundColor
@@ -4497,7 +4919,12 @@ def _serialize_formatting():
         return ''
 
 def _apply_template_to_widget(tw, kind: str):
-    """Replace widget content with a standard template for `kind` ('html'|'python'|'md'|'json')."""
+    """Replace widget content with a standard template for `kind` and initialize raw-view metadata.
+
+    Raw view is always shown initially for all templates.
+    HTML / Markdown store a parsed/plain version for later toggle.
+    Python / JSON remain simple raw text (not marked as 'source').
+    """
     try:
         if kind == 'html':
             tpl = (
@@ -4526,9 +4953,9 @@ def _apply_template_to_widget(tw, kind: str):
                 "  </header>\n"
                 "  <section class=\"content\">\n"
                 "    <h2>Elements & Attributes</h2>\n"
-                "    <p>Tag name example: <code>&lt;section&gt;</code>, attribute examples below:</p>\n                \n                "  
-                "<div data-info=demo disabled title='A single-quoted title' custom-flag>\n"
-                "      <p>Unquoted attribute: <code>data-info=demo</code></p>\n                "
+                "    <p>Tag name example: <code>&lt;section&gt;</code>, attribute examples below:</p>\n"
+                "    <div data-info=demo disabled title='A single-quoted title' custom-flag>\n"
+                "      <p>Unquoted attribute: <code>data-info=demo</code></p>\n"
                 "      <p>Double-quoted attribute: <code>class=\"content\"</code></p>\n"
                 "      <p>Single-quoted attribute: <code>title='A single-quoted title'</code></p>\n"
                 "    </div>\n"
@@ -4541,7 +4968,7 @@ def _apply_template_to_widget(tw, kind: str):
                 "    <p><img src=\"https://via.placeholder.com/120\" alt=\"placeholder\" width=120 height=80></p>\n"
                 "\n"
                 "    <h3>Links</h3>\n"
-                "    <p><a href=\"https://example.com\" title=\"Example site\">Visit Example.com</a> — anchor with href + title.</p>\n"
+                "    <p><a href=\"https://example.com\" title=\"Example site\">Visit Example.com</a></p>\n"
                 "    <p>Markdown-style link example: <code>[Example](https://example.com)</code></p>\n"
                 "\n"
                 "    <h3>Comments & TODO</h3>\n"
@@ -4564,21 +4991,17 @@ def _apply_template_to_widget(tw, kind: str):
                 "&lt;div class=&quot;widget&quot;&gt;Hello&lt;/div&gt;\n"
                 "</code></pre>\n"
                 "\n"
-                "    <h3>Script & Style blocks</h3>\n"
                 "    <style>/* inline css example */ .widget{color:#FF5733}</style>\n"
                 "    <script>/* inline JS example */ console.log('hello from demo');</script>\n"
                 "\n"
                 "    <p>Example hex color literal: <code>#FF5733</code></p>\n"
-                "\n"
-                "    <p>Back-to-top: <a href=\"#\">Top</a></p>\n"
-                "\n"
                 "    <hr />\n"
-                "    <footer><small>Generated by SimpleEdit — template demonstrates parser features: html_tag, html_attr, html_attr_value, html_comment, font_*, todo, table ranges, hyperlinks.</small></footer>\n"
+                "    <footer><small>Generated by SimpleEdit.</small></footer>\n"
                 "  </section>\n"
                 "</body>\n"
                 "</html>\n"
             )
-        elif kind == 'md' or kind == 'markdown':
+        elif kind in ('md', 'markdown'):
             tpl = (
                 "# Title\n\n"
                 "A short description paragraph.\n\n"
@@ -4617,15 +5040,56 @@ def _apply_template_to_widget(tw, kind: str):
                 "if __name__ == \"__main__\":\n"
                 "    main()\n"
             )
+
         tw.delete('1.0', 'end')
         tw.insert('1.0', tpl)
+
+        # Apply tag configs & quick highlight (kept from original implementation)
         try:
-            # ensure tags/configs applied to this widget after replacing text
             _apply_tag_configs_to_widget(tw)
-            # best-effort re-highlight (Python/Markdown may benefit)
             highlight_python_helper(None, scan_start="1.0", scan_end="end-1c")
         except Exception:
             pass
+
+        # ---------------- New raw-mode initialization ----------------
+        try:
+            frame = getattr(tw, 'master', None)
+            raw_buf = tw.get('1.0', 'end-1c')
+            if frame:
+                if kind in ('html', 'md', 'markdown'):
+                    # Parse to store a rendered/plain version for later toggle, but keep raw visible now.
+                    try:
+                        plain, tags_meta = funcs._parse_html_and_apply(raw_buf)
+                    except Exception:
+                        plain, tags_meta = raw_buf, None
+                    frame._raw_html = raw_buf
+                    frame._raw_html_plain = plain
+                    frame._raw_html_tags_meta = tags_meta
+                    frame._view_raw = True          # show raw immediately
+                    frame._opened_as_source = True  # mark as source
+                    try:
+                        statusBar['text'] = f"New {kind.upper()} template (raw source)"
+                    except Exception:
+                        pass
+                else:
+                    # Python / JSON: simple raw text; do not mark opened_as_source.
+                    frame._raw_html = None
+                    frame._raw_html_plain = None
+                    frame._raw_html_tags_meta = None
+                    frame._view_raw = True
+                    frame._opened_as_source = False
+                    try:
+                        statusBar['text'] = f"New {kind.upper()} template (raw)"
+                    except Exception:
+                        pass
+            try:
+                update_view_status_indicator()
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # -------------------------------------------------------------
+
     except Exception:
         pass
 
@@ -4654,6 +5118,34 @@ def create_template(kind: str, open_in_new_tab: bool = True):
                 tx.focus_set()
             except Exception:
                 pass
+
+            # NEW: for HTML templates, default to RAW mode immediately
+            try:
+                if kind_norm == 'html':
+                    # capture current buffer as raw HTML
+                    raw_buf = tx.get('1.0', 'end-1c')
+                    fr._raw_html = raw_buf
+                    fr._raw_html_plain = raw_buf
+                    fr._raw_html_tags_meta = None
+                    fr._opened_as_source = True
+                    fr._view_raw = True
+
+                    # ensure UI shows raw state (reinsert raw to be explicit)
+                    tx.delete('1.0', 'end')
+                    tx.insert('1.0', raw_buf or '')
+                    _apply_tag_configs_to_widget(tx)
+
+                    try:
+                        update_view_status_indicator()
+                    except Exception:
+                        pass
+                    try:
+                        statusBar['text'] = "New HTML template (raw source)"
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
             return tx, fr
 
         # fallback: replace current tab content
@@ -4673,6 +5165,36 @@ def create_template(kind: str, open_in_new_tab: bool = True):
             root.fileName = ''
         except Exception:
             pass
+
+        # NEW: for HTML templates inserted in current tab, default to RAW mode
+        try:
+            if kind_norm == 'html':
+                sel = editorNotebook.select()
+                if sel:
+                    frame = root.nametowidget(sel)
+                    raw_buf = textArea.get('1.0', 'end-1c')
+                    frame._raw_html = raw_buf
+                    frame._raw_html_plain = raw_buf
+                    frame._raw_html_tags_meta = None
+                    frame._opened_as_source = True
+                    frame._view_raw = True
+
+                    # reinsert raw explicitly
+                    textArea.delete('1.0', 'end')
+                    textArea.insert('1.0', raw_buf or '')
+                    _apply_tag_configs_to_widget(textArea)
+
+                    try:
+                        update_view_status_indicator()
+                    except Exception:
+                        pass
+                    try:
+                        statusBar['text'] = "New HTML template (raw source)"
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         return textArea, getattr(root, 'nametowidget', lambda s: None)(editorNotebook.select())
     except Exception:
         return None, None
@@ -4967,25 +5489,24 @@ def _apply_formatting_from_meta(meta):
             color_hex_codes()
         except Exception:
             pass
+        # If marquee spans exist, ensure trailing space and start loop when visible
+        try:
+            if textArea.tag_ranges('marquee'):
+                _ensure_marquee_trailing_space()
+                if _is_marquee_visible():
+                    _start_marquee_loop()
+        except Exception:
+            pass
 
     except Exception:
         pass
 
 def toggle_raw_rendered():
-    """Toggle current tab between raw HTML and rendered (parsed/plain + tags).
-
-    Behavior improvements:
-    - When switching FROM Raw -> Rendered we parse the *current* buffer contents (so edits made
-      in Raw view are immediately re-rendered without needing to save/reload).
-    - When switching FROM Rendered -> Raw we prefer the stored raw source (if any); otherwise
-      show the current rendered/plain text as a fallback raw representation.
-    """
     try:
         sel = editorNotebook.select()
         if not sel:
             return
         frame = root.nametowidget(sel)
-        # find the Text widget inside frame
         tw = None
         for child in frame.winfo_children():
             if isinstance(child, Text):
@@ -4993,44 +5514,31 @@ def toggle_raw_rendered():
                 break
         if tw is None:
             return
-
-        # If there's no stored raw at all and no parsed data, nothing to do
         raw_stored = getattr(frame, '_raw_html', None)
         currently_raw = bool(getattr(frame, '_view_raw', False))
-
         if currently_raw:
-            # User is viewing/editing raw HTML. Re-parse the *current* buffer content and render it.
             try:
                 raw_text = tw.get('1.0', 'end-1c')
             except Exception:
                 raw_text = raw_stored or ''
-
-            # Persist the edited raw into frame so future toggles keep it
             try:
                 frame._raw_html = raw_text
             except Exception:
                 pass
-
-            # Parse the current raw text into plain + tag meta (this re-renders from edits)
             try:
                 plain, tags_meta = funcs._parse_html_and_apply(raw_text)
             except Exception:
                 plain, tags_meta = raw_text, None
-
-            # Store parsed results on the frame for toggling back later
             try:
                 frame._raw_html_plain = plain
                 frame._raw_html_tags_meta = tags_meta
             except Exception:
                 pass
-
-            # Replace widget content with parsed plain text and apply tag configs/meta
             try:
                 tw.delete('1.0', 'end')
                 tw.insert('1.0', plain or '')
                 _apply_tag_configs_to_widget(tw)
                 if tags_meta and tags_meta.get('tags'):
-                    # Ensure _apply_formatting_from_meta operates on the correct widget
                     prev_ta = globals().get('textArea', None)
                     try:
                         globals()['textArea'] = tw
@@ -5038,31 +5546,14 @@ def toggle_raw_rendered():
                     finally:
                         if prev_ta is not None:
                             globals()['textArea'] = prev_ta
-                        else:
-                            try:
-                                del globals()['textArea']
-                            except Exception:
-                                pass
+                frame._view_raw = False
+                statusBar['text'] = "Rendered HTML view (from current raw buffer)"
             except Exception:
                 pass
-
-            frame._view_raw = False
-            statusBar['text'] = "Rendered HTML view (from current raw buffer)"
         else:
-            # Currently rendered -> switch to raw. Prefer stored original raw if present,
-            # otherwise fall back to the current text widget contents.
             try:
-                raw_to_show = getattr(frame, '_raw_html', None)
-                if not raw_to_show:
-                    # If there is no stored raw, use the visible buffer as a reasonable raw fallback
-                    raw_to_show = tw.get('1.0', 'end-1c')
-                # persist to frame so toggles remain consistent
-                try:
-                    frame._raw_html = raw_to_show
-                except Exception:
-                    pass
-
-                # show raw text
+                raw_to_show = getattr(frame, '_raw_html', None) or tw.get('1.0', 'end-1c')
+                frame._raw_html = raw_to_show
                 tw.delete('1.0', 'end')
                 tw.insert('1.0', raw_to_show or '')
                 _apply_tag_configs_to_widget(tw)
@@ -5070,16 +5561,16 @@ def toggle_raw_rendered():
                 statusBar['text'] = "Raw HTML view"
             except Exception:
                 statusBar['text'] = "Failed to switch to Raw view"
-        # refresh lightweight highlighting and UI
         try:
             safe_highlight_event(None)
         except Exception:
             pass
-        # update toolbar/status indicator for current tab view
         try:
             update_view_status_indicator()
         except Exception:
             pass
+        # NEW: Re-apply browsing mode logic (whitespace indicator may change)
+        _apply_browsing_mode_for_current_tab()
     except Exception:
         pass
 
@@ -5123,6 +5614,35 @@ def safe_highlight_event(event=None):
       status bar and trailing-whitespace) so the editor remains responsive.
     """
     try:
+        if _is_browsing_mode_active():
+            # Minimal status update only; remove volatile visual tags.
+            try:
+                textArea.tag_remove('currentLine', '1.0', 'end')
+            except Exception:
+                pass
+            # If rendered view (not raw) remove trailingWhitespace and skip recompute
+            try:
+                sel = editorNotebook.select()
+                if sel:
+                    frame = root.nametowidget(sel)
+                    if not getattr(frame, '_view_raw', False):
+                        textArea.tag_remove('trailingWhitespace', '1.0', 'end')
+            except Exception:
+                pass
+            # Keep marquee animation running regardless of syntax toggle
+            try:
+                if textArea.tag_ranges('marquee') and _is_marquee_visible():
+                    _ensure_marquee_trailing_space()
+                    _start_marquee_loop()
+                else:
+                    _stop_marquee_loop()
+            except Exception:
+                pass
+            update_status_bar()
+            return
+    except Exception:
+        pass
+    try:
         # only run the (potentially expensive) syntax pass when enabled
         if updateSyntaxHighlighting.get():
             try:
@@ -5154,6 +5674,15 @@ def safe_highlight_event(event=None):
             pass
         try:
             _raise_hex_tags_above(textArea)
+        except Exception:
+            pass
+        # Manage marquee loop independent of syntax highlighting
+        try:
+            if textArea.tag_ranges('marquee') and _is_marquee_visible():
+                _ensure_marquee_trailing_space()
+                _start_marquee_loop()
+            else:
+                _stop_marquee_loop()
         except Exception:
             pass
     except Exception:
@@ -6004,8 +6533,6 @@ def _on_status_syntax_toggle():
                 'html_tag', 'html_attr', 'html_attr_value', 'html_comment',
                 # tables and separators used by HTML parser
                 'table', 'tr', 'td', 'th', 'table_sep',
-                # presentational tags that were applied by parser (keep other presentational tags if desired)
-                'hyperlink', 'marquee'
             )
             try:
                 # iterate every open tab and the global textArea to remove tags and hyperlink maps
@@ -6044,11 +6571,6 @@ def _on_status_syntax_toggle():
                         #             tw.tag_remove(t, "1.0", "end")
                         #         except Exception:
                         #             pass
-                        # stop any marquee loops if present in this widget (global marquee loop checks tag ranges)
-                        try:
-                            tw.tag_remove('marquee', "1.0", "end")
-                        except Exception:
-                            pass
                     except Exception:
                         pass
 
@@ -6378,6 +6900,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
 updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
 fullScanEnabled = IntVar(value=config.getboolean("Section1", "fullScanEnabled", fallback=True))
 openHtmlAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
+browsingModeVar = IntVar(value=0)
 
 def _on_open_as_source_toggle():
     """Persist the 'Open HTML/MD as source' toggle and update status text."""
@@ -6404,6 +6927,162 @@ def match_case_like_this(start, end):
 
 match_string = r'\b\b'
 
+def _is_browsing_mode_active() -> bool:
+    """Return True if global Browsing Mode is enabled."""
+    try:
+        return bool(browsingModeVar.get())
+    except Exception:
+        return False
+
+
+def _current_tab_text_widgets():
+    """Return list of Text widgets in currently selected tab."""
+    out = []
+    try:
+        sel = editorNotebook.select()
+        if not sel:
+            return out
+        frame = root.nametowidget(sel)
+        for child in frame.winfo_children():
+            if isinstance(child, Text):
+                out.append(child)
+    except Exception:
+        pass
+    return out
+
+
+def _enter_browsing_mode():
+    """Activate browsing (read-only) mode visuals and restrictions for current tab."""
+    try:
+        # Hide the entire toolbar container so the editor area expands (no blank space)
+        try:
+            if topBarContainer.winfo_ismapped():
+                topBarContainer.pack_forget()
+        except Exception:
+            pass
+        root._browsing_toolbars_hidden = True
+
+        # Hide syntax-related controls (refresh/detect/toggle) if present
+        try:
+            if refreshSyntaxButton and refreshSyntaxButton.winfo_ismapped():
+                refreshSyntaxButton.pack_forget()
+        except Exception:
+            pass
+        try:
+            if syntaxToggleCheckbox and syntaxToggleCheckbox.winfo_ismapped():
+                syntaxToggleCheckbox.pack_forget()
+        except Exception:
+            pass
+        try:
+            if detectSyntaxButton and detectSyntaxButton.winfo_ismapped():
+                detectSyntaxButton.pack_forget()
+        except Exception:
+            pass
+        root._browsing_syntax_buttons_hidden = True
+
+        # Make current tab's Text widgets read-only
+        for tw in _current_tab_text_widgets():
+            try:
+                tw.config(state='disabled', cursor='arrow')
+                # Strip line highlight & trailing whitespace tags
+                try:
+                    tw.tag_remove('currentLine', '1.0', 'end')
+                except Exception:
+                    pass
+                try:
+                    tw.tag_remove('trailingWhitespace', '1.0', 'end')
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        # Suspend syntax highlighting without changing the stored preference
+        if not getattr(root, '_browsing_prev_highlighting', None):
+            try:
+                root._browsing_prev_highlighting = int(updateSyntaxHighlighting.get())
+                updateSyntaxHighlighting.set(0)
+            except Exception:
+                pass
+
+        # Status indicator
+        try:
+            statusBar['text'] = "Browsing Mode (read-only)"
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _exit_browsing_mode():
+    """Restore editing mode visuals and behavior."""
+    try:
+        # Restore syntax highlighting setting if we suspended it
+        prev = getattr(root, '_browsing_prev_highlighting', None)
+        if prev is not None:
+            try:
+                updateSyntaxHighlighting.set(prev)
+            except Exception:
+                pass
+            root._browsing_prev_highlighting = None
+            # Light re-highlight if re-enabled
+            try:
+                if updateSyntaxHighlighting.get():
+                    highlight_python_helper(None)
+            except Exception:
+                pass
+
+        # Restore the entire toolbar container (so button row returns)
+        if getattr(root, '_browsing_toolbars_hidden', False):
+            try:
+                if not topBarContainer.winfo_ismapped():
+                    # pack above the editorNotebook to avoid being pushed to the right
+                    topBarContainer.pack(in_=root, side=TOP, fill=X, before=editorNotebook)
+            except Exception:
+                pass
+            root._browsing_toolbars_hidden = False
+
+        # Restore syntax buttons
+        if getattr(root, '_browsing_syntax_buttons_hidden', False):
+            try:
+                if not refreshSyntaxButton.winfo_ismapped():
+                    refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
+                if not syntaxToggleCheckbox.winfo_ismapped():
+                    syntaxToggleCheckbox.pack(side=RIGHT, padx=(4,0), pady=2)
+                if not detectSyntaxButton.winfo_ismapped():
+                    detectSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
+            except Exception:
+                pass
+            root._browsing_syntax_buttons_hidden = False
+
+        # Re-enable Text widgets
+        for tw in _current_tab_text_widgets():
+            try:
+                tw.config(state='normal', cursor='')
+            except Exception:
+                pass
+        try:
+            statusBar['text'] = "Editing Mode"
+        except Exception:
+            pass
+        # Reapply lightweight UI refresh (line numbers, highlight line, whitespace)
+        try:
+            highlight_current_line()
+            show_trailing_whitespace()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _apply_browsing_mode_for_current_tab():
+    """Apply or clear browsing mode for the active tab."""
+    try:
+        if _is_browsing_mode_active():
+            _enter_browsing_mode()
+        else:
+            _exit_browsing_mode()
+    except Exception:
+        pass
 
 def highlight_python_helper(event=None, scan_start=None, scan_end=None):
     """Highlight a local region near the current cursor.
@@ -7291,6 +7970,18 @@ def refresh_full_syntax():
 # -------------------------
 def show_trailing_whitespace():
     try:
+        if _is_browsing_mode_active():
+            # Keep indicators only if raw view (frame._view_raw True)
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                if not getattr(frame, '_view_raw', False):
+                    # Remove existing and skip
+                    textArea.tag_remove('trailingWhitespace', '1.0', 'end')
+                    return
+    except Exception:
+        pass
+    try:
         first_visible = textArea.index('@0,0')
         last_visible = textArea.index(f'@0,{textArea.winfo_height()}')
         start_line = int(first_visible.split('.')[0])
@@ -7500,16 +8191,20 @@ def update_status_bar(event=None):
 
 def highlight_current_line(event=None):
     try:
+        if _is_browsing_mode_active():
+            # Ensure line highlight removed when browsing
+            try:
+                textArea.tag_remove('currentLine', '1.0', 'end')
+            except Exception:
+                pass
+            return
         textArea.tag_remove('currentLine', '1.0', 'end')
         line = textArea.index('insert').split('.')[0]
         textArea.tag_add('currentLine', f'{line}.0', f'{line}.0 lineend+1c')
-        # Ensure the currentLine highlight is rendered beneath the selection so selections remain visually on top.
         try:
-            # Lower currentLine below 'sel' and raise 'sel' to guarantee selection visibility.
             textArea.tag_lower('currentLine', 'sel')
             textArea.tag_raise('sel')
         except Exception:
-            # If 'sel' doesn't exist yet or platform doesn't support, ignore silently.
             pass
     except Exception:
         pass
@@ -8071,7 +8766,7 @@ textArea.bind('<Button-1>', lambda e: root.after_idle(lambda: (safe_highlight_ev
 textArea.bind('<MouseWheel>', lambda e: (safe_highlight_event(e), redraw_line_numbers(), show_trailing_whitespace()))
 textArea.bind('<Configure>', lambda e: (redraw_line_numbers(), show_trailing_whitespace()))
 root.bind('<Control-Key-s>', lambda event: save_file())
-
+root.bind('<Control-w>', lambda e: _close_tab(root.nametowidget(editorNotebook.select())) if editorNotebook.select() else None)
 # -------------------------
 # Settings modal
 # -------------------------
@@ -8287,6 +8982,7 @@ def create_config_window():
         # persist new open-as-source option
         config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
         config.set("Section1", "promptOnRecentOpen", str(bool(promptRecentOpenVar.get())))
+
         try:
             with open(INI_PATH, 'w') as configfile:
                 config.write(configfile)
@@ -8406,7 +9102,6 @@ def nonlocal_values_reload():
     # load css export settings
     exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
-
     # load open-as-source setting
     openHtmlAsSource = config.getboolean("Section1", "openHtmlAsSource", fallback=False)
     try:
@@ -8429,7 +9124,10 @@ def nonlocal_values_reload():
 def setting_modal():
     create_config_window()
 
-
+try:
+    _apply_browsing_mode_for_current_tab()
+except Exception:
+    pass
 # -------------------------
 # Misc helpers / periodic tasks
 # -------------------------
