@@ -66,7 +66,7 @@ else:
     config.read(INI_PATH)
 
 RECENT_MAX = getattr(funcs, 'RECENT_MAX', 10)
-
+manual_detect_after_id = None
 
 def load_recent_files():
     return funcs.load_recent_files(config)
@@ -120,6 +120,17 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             root.fileName = path
             add_recent_file(path)
             refresh_recent_menu()
+            # schedule one-shot autodetect for in-place opens so detection behaves like new-tab opens
+            try:
+                prev = getattr(root, '_manual_detect_after_id', None)
+                if prev:
+                    try:
+                        root.after_cancel(prev)
+                    except Exception:
+                        pass
+                root._manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+            except Exception:
+                pass
             root.after(0, lambda: _apply_formatting_from_meta(meta))
             try:
                 if _ML_AVAILABLE and loadAIOnOpen and not _model_loaded and not _model_loading:
@@ -148,14 +159,51 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 if open_in_new_tab:
                     tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
                     _apply_tag_configs_to_widget(tx)
+                    try:
+                        fr._opened_as_source = True
+                        fr._raw_html = raw
+                        fr._raw_html_plain = raw
+                        fr._raw_html_tags_meta = None
+                        fr._view_raw = True
+                        try:
+                            root.after(0, update_view_status_indicator)
+                        except Exception:
+                            pass
+                    except Exception:
+                        pass
                 else:
                     textArea.delete('1.0', 'end')
                     textArea.insert('1.0', raw)
                     _apply_tag_configs_to_widget(textArea)
+                    try:
+                        sel = editorNotebook.select()
+                        if sel:
+                            frame = root.nametowidget(sel)
+                            frame._opened_as_source = True
+                            frame._raw_html = raw
+                            frame._raw_html_plain = raw
+                            frame._raw_html_tags_meta = None
+                            frame._view_raw = True
+                            try:
+                                root.after(0, update_view_status_indicator)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
                 statusBar['text'] = f"'{path}' opened (raw source)!"
                 root.fileName = path
                 add_recent_file(path)
                 refresh_recent_menu()
+                try:
+                    prev = getattr(root, '_manual_detect_after_id', None)
+                    if prev:
+                        try:
+                            root.after_cancel(manual_detect_after_id)
+                        except Exception:
+                            pass
+                    manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+                except Exception:
+                    pass
                 if updateSyntaxHighlighting.get():
                     root.after(0, highlightPythonInit)
                 return
@@ -164,14 +212,54 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             if open_in_new_tab:
                 tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", plain, filename=path)
                 _apply_tag_configs_to_widget(tx)
+                # keep original raw HTML and parsed meta on the tab so we can toggle view later
+                try:
+                    fr._raw_html = raw
+                    fr._raw_html_plain = plain
+                    fr._raw_html_tags_meta = tags_meta
+                    fr._view_raw = False
+                except Exception:
+                    pass
+                try:
+                    fr._opened_as_source = False
+                except Exception:
+                    pass
             else:
                 textArea.delete('1.0', 'end')
                 textArea.insert('1.0', plain)
                 _apply_tag_configs_to_widget(textArea)
+                try:
+                    sel = editorNotebook.select()
+                    if sel:
+                        frame = root.nametowidget(sel)
+                        frame._raw_html = raw
+                        frame._raw_html_plain = plain
+                        frame._raw_html_tags_meta = tags_meta
+                        frame._view_raw = False
+                except Exception:
+                    pass
+                try:
+                    sel = editorNotebook.select()
+                    if sel:
+                        frame = root.nametowidget(sel)
+                        frame._opened_as_source = False
+                except Exception:
+                    pass
             statusBar['text'] = f"'{path}' opened (HTML/MD parsed)!"
             root.fileName = path
             add_recent_file(path)
             refresh_recent_menu()
+            # schedule one-shot autodetect after replacing current tab content
+            try:
+                prev = getattr(root, '_manual_detect_after_id', None)
+                if prev:
+                    try:
+                        root.after_cancel(manual_detect_after_id)
+                    except Exception:
+                        pass
+                manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+            except Exception:
+                pass
             if tags_meta and tags_meta.get('tags'):
                 root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
             if updateSyntaxHighlighting.get():
@@ -182,10 +270,21 @@ def _open_path(path: str, open_in_new_tab: bool = True):
         if open_in_new_tab:
             tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
             _apply_tag_configs_to_widget(tx)
+            try:
+                fr._opened_as_source = False
+            except Exception:
+                pass
         else:
             textArea.delete('1.0', 'end')
             textArea.insert('1.0', raw)
             _apply_tag_configs_to_widget(textArea)
+            try:
+                sel = editorNotebook.select()
+                if sel:
+                    frame = root.nametowidget(sel)
+                    frame._opened_as_source = False
+            except Exception:
+                pass
 
         statusBar['text'] = f"'{path}' opened successfully!"
         root.fileName = path
@@ -197,6 +296,16 @@ def _open_path(path: str, open_in_new_tab: bool = True):
 
         add_recent_file(path)
         refresh_recent_menu()
+        try:
+            prev = getattr(root, '_manual_detect_after_id', None)
+            if prev:
+                try:
+                    root.after_cancel(manual_detect_after_id)
+                except Exception:
+                    pass
+            manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+        except Exception:
+            pass
         if updateSyntaxHighlighting.get():
             root.after(0, highlightPythonInit)
     except Exception as e:
@@ -814,6 +923,7 @@ def clear_font_from_selection():
 # Tkinter UI - create root and widgets
 # -------------------------
 root = Tk()
+root._manual_detect_after_id = None
 url_var = StringVar(value='')
 root.geometry("800x600")
 root.title('SimpleEdit')
@@ -1352,6 +1462,20 @@ def _apply_tag_configs_to_widget(tw):
             mono_font = ("Courier New", max(6, int(fontSize - 1)))
             tw.tag_config("code", font=mono_font, background="#F5F5F5")
             tw.tag_config("kbd", font=mono_font, background="#F5F5F5")
+        except Exception:
+            pass
+
+                # HTML-specific visual tags
+        try:
+            tw.tag_config("html_tag", foreground=_DEFAULT_TAG_COLORS["html_tag"]["fg"])
+            tw.tag_config("html_attr", foreground=_DEFAULT_TAG_COLORS["html_attr"]["fg"])
+            tw.tag_config("html_attr_value", foreground=_DEFAULT_TAG_COLORS["html_attr_value"]["fg"])
+            tw.tag_config("html_comment", foreground=_DEFAULT_TAG_COLORS["html_comment"]["fg"])
+            # ensure html_comment sits below other presentational tags so it retains comment look
+            try:
+                tw.tag_lower("html_comment")
+            except Exception:
+                pass
         except Exception:
             pass
 
@@ -2344,6 +2468,8 @@ def create_editor_tab(title='Untitled', content='', filename=''):
     frame._template_prompted_py = False
     frame._template_prompted_md = False
     frame._template_prompted_json = False
+    frame._opened_as_source = False
+    frame._view_raw = False
 
     # per-tab line numbers canvas (left) - use configured bg
     ln_canvas = Canvas(frame, width=40, bg=lineNumberBg, highlightthickness=0)
@@ -2456,11 +2582,16 @@ def _on_tab_changed(event):
         redraw_line_numbers()
         update_status_bar()
         show_trailing_whitespace()
+        # update view-state indicator (raw vs rendered / source)
+        try:
+            update_view_status_indicator()
+        except Exception:
+            pass
 
 
         try:
-            global manual_detect_after_id
-            if manual_detect_after_id:
+            prev = getattr(root, '_manual_detect_after_id', None)
+            if prev:
                 try:
                     root.after_cancel(manual_detect_after_id)
                 except Exception:
@@ -2580,6 +2711,12 @@ FSTRING_RE = re.compile(r"(?:[fF][rRuU]?|[rR][fF]?)(\"\"\"[\s\S]*?\"\"\"|'''[\s\
 DUNDER_RE = re.compile(r'\b__\w+__\b')
 CLASS_BASES_RE = re.compile(r'(?m)^[ \t]*class\s+[A-Za-z_]\w*\s*\(([^)]*)\)')
 
+# HTML-specific regexes for tag/attr/value/comment highlighting
+HTML_TAG_RE = re.compile(r'</?([A-Za-z][A-Za-z0-9:\-]*)')  # group 1 is tag name
+HTML_ATTR_RE = re.compile(r'([A-Za-z_:][A-Za-z0-9_:.\-]*)\s*=')  # attribute name before =
+HTML_ATTR_VAL_RE = re.compile(r'=\s*(?:"([^"]*?)"|\'([^\']*?)\'|([^\s>]+))')  # captures value in one of groups 1/2/3
+HTML_COMMENT_RE = re.compile(r'<!--([\s\S]*?)-->')
+
 # -------------------------
 # Runtime-editable syntax defaults and loader
 # -------------------------
@@ -2609,7 +2746,12 @@ _DEFAULT_TAG_COLORS = {
     "kbd": {"fg": "#000000", "bg": "#F5F5F5"},
     "sub": {"fg": "", "bg": ""},
     "sup": {"fg": "", "bg": ""},
-    "small": {"fg": "", "bg": ""}
+    "small": {"fg": "", "bg": ""},
+    # HTML element/attribute colors
+    "html_tag": {"fg": "#569CD6", "bg": ""},            # element names
+    "html_attr": {"fg": "#9CDCFE", "bg": ""},           # attribute names
+    "html_attr_value": {"fg": "#CE9178", "bg": ""},     # attribute values (strings)
+    "html_comment": {"fg": "#6A9955", "bg": ""}         # HTML comments
 }
 
 def open_url_action():
@@ -2711,6 +2853,13 @@ def open_url_action():
                                 tx, fr = create_editor_tab(title, plain, filename=url2)
                                 tx.focus_set()
                                 _apply_tag_configs_to_widget(tx)
+                                try:
+                                    fr._raw_html = raw
+                                    fr._raw_html_plain = plain
+                                    fr._raw_html_tags_meta = tags_meta
+                                    fr._view_raw = False
+                                except Exception:
+                                    pass
                             else:
                                 # When navigating in the current tab, record the previous URL (if any)
                                 try:
@@ -2739,6 +2888,11 @@ def open_url_action():
                                     if sel:
                                         frame = root.nametowidget(sel)
                                         frame.fileName = url2
+                                        # store raw/parsed for toggle
+                                        frame._raw_html = raw
+                                        frame._raw_html_plain = plain
+                                        frame._raw_html_tags_meta = tags_meta
+                                        frame._view_raw = False
                                     root.fileName = url2
                                 except Exception:
                                     root.fileName = url2
@@ -3569,30 +3723,45 @@ def open_syntax_editor():
     ttk.Label(tab_tags, text=" ").grid(row=row, column=4, sticky='w')  # swatch column
     row += 1
 
-    for tag, defaults in _DEFAULT_TAG_COLORS.items():
-        ttk.Label(tab_tags, text=tag).grid(row=row, column=0, sticky='w', padx=(0,8), pady=4)
+    # Render tags in 4 blocks across to avoid vertical overflow
+    tags_list = list(_DEFAULT_TAG_COLORS.items())
+    per_row = 4  # number of tag blocks per visual row
+    block_width = 5  # columns per block (Tag, FG, swatch, BG, swatch)
+    start_row = row
+    for idx, (tag, defaults) in enumerate(tags_list):
+        r = start_row + (idx // per_row)
+        block = idx % per_row
+        base_col = block * block_width
+
+        ttk.Label(tab_tags, text=tag).grid(row=r, column=base_col, sticky='w', padx=(0,8), pady=4)
 
         # FG entry + swatch (clickable)
-        ent_fg = ttk.Entry(tab_tags, width=18)
-        ent_fg.grid(row=row, column=1, sticky='w', pady=4)
+        ent_fg = ttk.Entry(tab_tags, width=14)
+        ent_fg.grid(row=r, column=base_col + 1, sticky='w', pady=4)
         ent_val_fg = config.get('Syntax', f'tag.{tag}.fg', fallback=defaults.get('fg', ''))
         ent_fg.insert(0, ent_val_fg)
         sw_fg = build_clickable_swatch(tab_tags, ent_val_fg, ent_fg)
-        sw_fg.grid(row=row, column=2, padx=(6,0))
+        sw_fg.grid(row=r, column=base_col + 2, padx=(6,0))
 
         # BG entry + swatch (clickable)
-        ent_bg = ttk.Entry(tab_tags, width=18)
-        ent_bg.grid(row=row, column=3, sticky='w', pady=4)
+        ent_bg = ttk.Entry(tab_tags, width=14)
+        ent_bg.grid(row=r, column=base_col + 3, sticky='w', pady=4)
         ent_val_bg = config.get('Syntax', f'tag.{tag}.bg', fallback=defaults.get('bg', ''))
         ent_bg.insert(0, ent_val_bg)
         sw_bg = build_clickable_swatch(tab_tags, ent_val_bg, ent_bg)
-        sw_bg.grid(row=row, column=4, padx=(6,0))
+        sw_bg.grid(row=r, column=base_col + 4, padx=(6,0))
 
         swatches_fg[tag] = sw_fg
         swatches_bg[tag] = sw_bg
         inputs_fg[tag] = ent_fg
         inputs_bg[tag] = ent_bg
-        row += 1
+    # ensure columns can expand reasonably (give some weight so widgets don't collapse)
+    try:
+        max_cols = per_row * block_width
+        for c in range(max_cols):
+            tab_tags.grid_columnconfigure(c, weight=1 if c % block_width != 0 else 0)
+    except Exception:
+        pass
 
     # Regex / lists tab
     tab_regex = ttk.Frame(nb, padding=8)
@@ -4173,31 +4342,75 @@ def _apply_template_to_widget(tw, kind: str):
                 "<head>\n"
                 "  <meta charset=\"utf-8\">\n"
                 "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n"
-                "  <title>My 90's Style Page</title>\n"
+                "  <title>SimpleEdit — HTML Template (demo)</title>\n"
+                "  <!-- demo CSS to show semantic classes and colors used by the editor export -->\n"
                 "  <style>\n"
-                "    body { background:#f8f0d6; color:#000; font-family: 'Times New Roman', serif; }\n"
-                "    .nav { background:#ffcc00; padding:8px; }\n"
-                "    .content { margin:16px; }\n"
+                "    body { background:#ffffff; color:#111; font-family:Segoe UI, Roboto, Arial, sans-serif; padding:16px; }\n"
+                "    .nav { background:#f3f4f6; padding:8px; border-radius:4px; }\n"
+                "    .content { margin-top:12px; }\n"
+                "    pre { background:#f5f5f5; padding:8px; border-radius:4px; overflow:auto }\n"
+                "    table { border-collapse:collapse; margin-top:8px }\n"
+                "    th, td { border:1px solid #ccc; padding:8px }\n"
+                "    .todo { color:#fff; background:#B22222; padding:2px 6px; border-radius:3px }\n"
                 "  </style>\n"
                 "</head>\n"
-                "<body bgcolor=\"#ffe4b5\">\n"
-                "  <center>\n"
-                "    <h1>Welcome to My 90's Page</h1>\n"
-                "    <marquee behavior=\"scroll\" direction=\"left\">Bringing back the web of the 90's!</marquee>\n"
-                "    <p><font color=\"red\">This site uses some vintage HTML for demonstration:</font></p>\n"
-                "    <img src=\"https://via.placeholder.com/200\" alt=\"placeholder\" />\n"
-                "    <hr/>\n"
-                "    <table border=\"1\" cellpadding=\"6\" cellspacing=\"0\">\n"
-                "      <tr><th>Feature</th><th>Example</th></tr>\n"
-                "      <tr><td>Marquee</td><td>&lt;marquee&gt;</td></tr>\n"
-                "      <tr><td>Font tag</td><td>&lt;font color=&quot;red&quot;&gt;old-school&lt;/font&gt;</td></tr>\n"
+                "<body>\n"
+                "  <!-- HTML comment: top-of-file demo -->\n"
+                "  <header class=\"nav\">\n"
+                "    <h1>SimpleEdit HTML demo</h1>\n"
+                "    <p><small>Shows element names, attributes, attribute-values, comments and special cases.</small></p>\n"
+                "  </header>\n"
+                "  <section class=\"content\">\n"
+                "    <h2>Elements & Attributes</h2>\n"
+                "    <p>Tag name example: <code>&lt;section&gt;</code>, attribute examples below:</p>\n                \n                "  
+                "<div data-info=demo disabled title='A single-quoted title' custom-flag>\n"
+                "      <p>Unquoted attribute: <code>data-info=demo</code></p>\n                "
+                "      <p>Double-quoted attribute: <code>class=\"content\"</code></p>\n"
+                "      <p>Single-quoted attribute: <code>title='A single-quoted title'</code></p>\n"
+                "    </div>\n"
+                "\n"
+                "    <h3>Inline styles & font tag</h3>\n"
+                "    <p><span style=\"color:#CE9178\">Span with inline style (color) — should map to font_xxxxxx</span></p>\n"
+                "    <p><font color=\"#ff0000\">Legacy &lt;font&gt; tag (color)</font> — parser maps this to font_xxxxxx too.</p>\n"
+                "\n"
+                "    <h3>Attribute value styles</h3>\n"
+                "    <p><img src=\"https://via.placeholder.com/120\" alt=\"placeholder\" width=120 height=80></p>\n"
+                "\n"
+                "    <h3>Links</h3>\n"
+                "    <p><a href=\"https://example.com\" title=\"Example site\">Visit Example.com</a> — anchor with href + title.</p>\n"
+                "    <p>Markdown-style link example: <code>[Example](https://example.com)</code></p>\n"
+                "\n"
+                "    <h3>Comments & TODO</h3>\n"
+                "    <!-- This is an HTML comment and should be highlighted as such -->\n"
+                "    <p>Inline TODO example: <span style=\"background:#B22222;color:#ffffff\" class=\"todo\">TODO: update content</span></p>\n"
+                "\n"
+                "    <h3>Table (parsed to td/th ranges)</h3>\n"
+                "    <table>\n"
+                "      <thead>\n"
+                "        <tr><th>Feature</th><th>Example</th></tr>\n"
+                "      </thead>\n"
+                "      <tbody>\n"
+                "        <tr><td>Marquee</td><td>&lt;marquee&gt; — legacy but supported in demo</td></tr>\n"
+                "        <tr><td>Attributes</td><td>single/double/unquoted</td></tr>\n"
+                "      </tbody>\n"
                 "    </table>\n"
-                "    <p>Links: <a href=\"https://example.com\">Example</a> | <a href=\"#\">Back to top</a></p>\n"
-                "    <hr/>\n"
-                "    <center>\n"
-                "      <small>Made with nostalgia &amp; HTML 4.01</small>\n"
-                "    </center>\n"
-                "  </center>\n"
+                "\n"
+                "    <h3>Code & pre</h3>\n"
+                "    <pre><code>&lt;!-- Example snippet --&gt;\n"
+                "&lt;div class=&quot;widget&quot;&gt;Hello&lt;/div&gt;\n"
+                "</code></pre>\n"
+                "\n"
+                "    <h3>Script & Style blocks</h3>\n"
+                "    <style>/* inline css example */ .widget{color:#FF5733}</style>\n"
+                "    <script>/* inline JS example */ console.log('hello from demo');</script>\n"
+                "\n"
+                "    <p>Example hex color literal: <code>#FF5733</code></p>\n"
+                "\n"
+                "    <p>Back-to-top: <a href=\"#\">Top</a></p>\n"
+                "\n"
+                "    <hr />\n"
+                "    <footer><small>Generated by SimpleEdit — template demonstrates parser features: html_tag, html_attr, html_attr_value, html_comment, font_*, todo, table ranges, hyperlinks.</small></footer>\n"
+                "  </section>\n"
                 "</body>\n"
                 "</html>\n"
             )
@@ -4591,6 +4804,103 @@ def _apply_formatting_from_meta(meta):
         except Exception:
             pass
 
+    except Exception:
+        pass
+
+def toggle_raw_rendered():
+    """Toggle current tab between raw HTML and rendered (parsed/plain + tags)."""
+    try:
+        sel = editorNotebook.select()
+        if not sel:
+            return
+        frame = root.nametowidget(sel)
+        # find the Text widget inside frame
+        tw = None
+        for child in frame.winfo_children():
+            if isinstance(child, Text):
+                tw = child
+                break
+        if tw is None:
+            return
+
+        raw = getattr(frame, '_raw_html', None)
+        if raw is None:
+            statusBar['text'] = "No raw/HTML content available for this tab."
+            return
+
+        currently_raw = bool(getattr(frame, '_view_raw', False))
+        if currently_raw:
+            # switch to rendered: use parsed plain + tags if available, otherwise parse now
+            plain = getattr(frame, '_raw_html_plain', None)
+            tags_meta = getattr(frame, '_raw_html_tags_meta', None)
+            if plain is None:
+                plain, tags_meta = funcs._parse_html_and_apply(raw)
+                frame._raw_html_plain = plain
+                frame._raw_html_tags_meta = tags_meta
+            tw.delete('1.0', 'end')
+            tw.insert('1.0', frame._raw_html_plain or '')
+            _apply_tag_configs_to_widget(tw)
+            if getattr(frame, '_raw_html_tags_meta', None):
+                # apply saved meta to this widget (ensure helpers use this widget while applying)
+                prev_ta = globals().get('textArea', None)
+                try:
+                    globals()['textArea'] = tw
+                    _apply_formatting_from_meta(frame._raw_html_tags_meta)
+                finally:
+                    if prev_ta is not None:
+                        globals()['textArea'] = prev_ta
+                    else:
+                        try:
+                            del globals()['textArea']
+                        except Exception:
+                            pass
+            frame._view_raw = False
+            statusBar['text'] = "Rendered HTML view"
+        else:
+            # switch to raw HTML text
+            tw.delete('1.0', 'end')
+            tw.insert('1.0', raw)
+            _apply_tag_configs_to_widget(tw)
+            frame._view_raw = True
+            statusBar['text'] = "Raw HTML view"
+        # refresh lightweight highlighting and UI
+        safe_highlight_event(None)
+        # update toolbar/status indicator for current tab view
+        try:
+            update_view_status_indicator()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def update_view_status_indicator():
+    """Update the small status label indicating Raw/Rendered and source/URL state for current tab."""
+    try:
+        # If viewIndicator doesn't exist (older UI), skip
+        if 'viewIndicator' not in globals():
+            return
+        sel = editorNotebook.select()
+        if not sel:
+            viewIndicator.config(text='View: —')
+            return
+        frame = root.nametowidget(sel)
+        view_raw = bool(getattr(frame, '_view_raw', False))
+        opened_src = bool(getattr(frame, '_opened_as_source', False))
+        fn = getattr(frame, 'fileName', '') or ''
+        if view_raw:
+            txt = 'View: Raw'
+        else:
+            txt = 'View: Rendered'
+        if opened_src:
+            txt += ' (source)'
+        else:
+            # annotate URL tabs
+            try:
+                if _is_likely_url(fn) or (isinstance(fn, str) and (fn.lower().startswith('http') or fn.lower().startswith('file:///') or fn.lower().startswith('www.'))):
+                    txt += ' (URL)'
+            except Exception:
+                pass
+        viewIndicator.config(text=txt)
     except Exception:
         pass
 
@@ -5222,10 +5532,63 @@ def save_file_as2():
 
 
 def save_file():
-    if not root.fileName:
-        save_file_as()
-        return
+    # If current tab points to a URL, prefer Save-as-Markdown flow (respect open-as-source)
     try:
+        fn = getattr(root, 'fileName', '') or ''
+        # prefer frame.fileName when available (keeps per-tab behavior correct)
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                fn = getattr(frame, 'fileName', '') or fn
+        except Exception:
+            pass
+        if not fn:
+            save_file_as()
+            return
+        if _is_likely_url(fn) or fn.lower().startswith('http') or fn.lower().startswith('file:///') or fn.lower().startswith('www.'):
+            # remote page -> show Save-as-Markdown dialog (preserves open-as-source behavior)
+            save_as_markdown(textArea)
+            return
+    except Exception:
+        # fallback to original flow
+        if not root.fileName:
+            save_file_as()
+            return
+    try:
+        # If the current tab is showing RAW view, prefer saving the raw HTML source directly to file
+        try:
+            sel = editorNotebook.select()
+            frame = root.nametowidget(sel) if sel else None
+            view_raw = bool(getattr(frame, '_view_raw', False)) if frame is not None else False
+        except Exception:
+            view_raw = False
+
+        # If viewing raw and target is a local file, write raw content directly
+        if view_raw and fn and not _is_likely_url(fn):
+            try:
+                raw_content = getattr(frame, '_raw_html', None) or textArea.get('1.0', 'end-1c')
+                with open(fn, 'w', errors='replace', encoding='utf-8') as f:
+                    f.write(raw_content)
+                statusBar['text'] = f"'{fn}' saved (raw source)!"
+                add_recent_file(fn)
+                refresh_recent_menu()
+                # update tab/frame metadata
+                try:
+                    if sel:
+                        frame.fileName = fn
+                        editorNotebook.tab(sel, text=os.path.basename(fn) or fn)
+                    root.fileName = fn
+                except Exception:
+                    pass
+                return
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return
+
+        # Otherwise default save behavior (may include formatting header)
+
+    
         content = textArea.get('1.0', 'end-1c')
         # automatically embed formatting header for .set files,
         # or if the user explicitly enabled the option in settings.
@@ -5447,11 +5810,57 @@ def _wrap_segment_by_tags(seg_text: str, active_tags: set):
     return funcs.wrap_segment_by_tags(seg_text, active_tags)
 
 def save_as_markdown(textArea):
-    fileName = funcs.save_as_markdown(textArea)
-    statusBar['text'] = f"'{fileName}' saved successfully!"
-    root.fileName = fileName
-    add_recent_file(fileName)
-    refresh_recent_menu()
+    try:
+        # determine current tab frame and whether it was opened as source
+        opened_as_source = False
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                opened_as_source = bool(getattr(frame, '_opened_as_source', False))
+        except Exception:
+            opened_as_source = False
+
+        if opened_as_source:
+            # Save raw content (no HTML/MD tagging conversion)
+            fileName = filedialog.asksaveasfilename(
+                initialdir=os.path.expanduser("~"),
+                title="Save file (raw)",
+                defaultextension='.md',
+                filetypes=(
+                    ("Markdown files", "*.md"),
+                    ("HTML files", "*.html"),
+                    ("Text files", "*.txt"),
+                    ("All files", "*.*"),
+                )
+            )
+            if not fileName:
+                return None
+            try:
+                content = textArea.get('1.0', 'end-1c')
+                with open(fileName, 'w', errors='replace', encoding='utf-8') as fh:
+                    fh.write(content)
+                statusBar['text'] = f"'{fileName}' saved successfully!"
+                root.fileName = fileName
+                add_recent_file(fileName)
+                refresh_recent_menu()
+                return fileName
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                return None
+        else:
+            fileName = funcs.save_as_markdown(textArea)
+            try:
+                if fileName:
+                    statusBar['text'] = f"'{fileName}' saved successfully!"
+                    root.fileName = fileName
+                    add_recent_file(fileName)
+                    refresh_recent_menu()
+            except Exception:
+                pass
+            return fileName
+    except Exception:
+        return None
 
 def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: bool = True):
     """Fetch `url` on a background thread and open parsed HTML in a tab (reusable helper).
@@ -5509,6 +5918,21 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                         tx, fr = create_editor_tab(title, plain, filename=url2)
                         tx.focus_set()
                         _apply_tag_configs_to_widget(tx)
+                        # store raw/parsed data and view flags on the new tab like _open_path does
+                        try:
+                            fr._raw_html = raw
+                            fr._raw_html_plain = plain
+                            fr._raw_html_tags_meta = tags_meta
+                            # If tags_meta contains tags -> parsed/rendered view; otherwise treat as "opened as source"
+                            is_source = not bool(tags_meta and tags_meta.get('tags'))
+                            fr._opened_as_source = bool(is_source)
+                            fr._view_raw = bool(is_source)
+                        except Exception:
+                            pass
+                        try:
+                            root.after(0, update_view_status_indicator)
+                        except Exception:
+                            pass
                     else:
                         # When navigating in the current tab, record the previous URL (if any)
                         try:
@@ -5536,6 +5960,20 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             if sel:
                                 frame = root.nametowidget(sel)
                                 frame.fileName = url2
+                                # store raw/parsed for toggle and source flag
+                                try:
+                                    frame._raw_html = raw
+                                    frame._raw_html_plain = plain
+                                    frame._raw_html_tags_meta = tags_meta
+                                    frame._view_raw = not bool(tags_meta and tags_meta.get('tags'))  # show raw if no parsed tags
+                                    frame._opened_as_source = not bool(tags_meta and tags_meta.get('tags'))
+                                except Exception:
+                                    pass
+                                # mark whether this tab contains raw source (no tags) or parsed HTML
+                                try:
+                                    frame._opened_as_source = not bool(tags_meta and tags_meta.get('tags'))
+                                except Exception:
+                                    pass
                                    # update visible tab title to reflect the loaded page immediately
                                 try:
                                     editorNotebook.tab(sel, text=title)
@@ -5544,6 +5982,18 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             root.fileName = url2
                         except Exception:
                             root.fileName = url2
+
+                        # schedule one-shot autodetect after in-place URL load/refresh
+                        try:
+                            prev = getattr(root, '_manual_detect_after_id', None)
+                            if prev:
+                                try:
+                                    root.after_cancel(manual_detect_after_id)
+                                except Exception:
+                                    pass
+                            manual_detect_after_id = root.after(1000, lambda: manual_detect_syntax(force=False))
+                        except Exception:
+                            pass
 
                         # record opened URL into history/back-stack (only URLs are stored)
                         try:
@@ -5718,6 +6168,52 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 if not (e <= ps or s >= pe):
                     return True
             return False
+
+        # HTML-specific tagging: tag comments, element names, attributes and attribute values.
+        # Run early so html_comment spans become protected for later passes.
+        try:
+            if '<' in content and '>' in content:
+                # HTML comments
+                for m in HTML_COMMENT_RE.finditer(content):
+                    s, e = m.span()
+                    if not overlaps_protected(s, e):
+                        textArea.tag_add("html_comment", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+                    # Always protect HTML comments from other tagging
+                    protected_spans.append((s, e))
+                # Tag element names (e.g. <div, </a)
+                for m in HTML_TAG_RE.finditer(content):
+                    try:
+                        s, e = m.span(1)
+                        if not overlaps_protected(s, e):
+                            textArea.tag_add("html_tag", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+                    except Exception:
+                        pass
+                # Tag attribute names
+                for m in HTML_ATTR_RE.finditer(content):
+                    try:
+                        s, e = m.span(1)
+                        if not overlaps_protected(s, e):
+                            textArea.tag_add("html_attr", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+                    except Exception:
+                        pass
+                # Tag attribute values (captured in group 1/2/3)
+                for m in HTML_ATTR_VAL_RE.finditer(content):
+                    try:
+                        # find which group matched (1,2 or 3). m.start(n) works only if group matched
+                        for gi in (1, 2, 3):
+                            try:
+                                if m.group(gi) is not None:
+                                    s = m.start(gi)
+                                    e = m.end(gi)
+                                    if not overlaps_protected(s, e):
+                                        textArea.tag_add("html_attr_value", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+                                    break
+                            except Exception:
+                                continue
+                    except Exception:
+                        pass
+        except Exception:
+            pass
 
         # numbers
         for m in NUMBER_RE.finditer(content):
@@ -6108,8 +6604,7 @@ def highlightPythonInit():
 
     Thread(target=worker, daemon=True).start()
 
-# session-only scheduled detect id (so we can cancel previous scheduled detection when tabs change)
-manual_detect_after_id = None
+
 
 def apply_syntax_preset_transient(path: str, text_widget: Text | None = None) -> bool:
     """Apply syntax preset from `path` only for the given Text widget (transient, non-persistent).
@@ -6974,7 +7469,7 @@ btn1 = Button(toolBar, text='New', command=lambda: newFile())
 btn1.pack(side=LEFT, padx=2, pady=2)
 btn2 = Button(toolBar, text='Open', command=lambda: open_file_action())
 btn2.pack(side=LEFT, padx=2, pady=2)
-btn3 = Button(toolBar, text='Save', command=lambda: save_file_as())
+btn3 = Button(toolBar, text='Save', command=lambda: save_file())
 btn3.pack(side=LEFT, padx=2, pady=2)
 btnSaveMD = Button(toolBar, text='Save MD', command=lambda: save_as_markdown(textArea))
 btnSaveMD.pack(side=LEFT, padx=2, pady=2)
@@ -7164,6 +7659,11 @@ refreshSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
 # Detect Syntax (manual trigger) — runs quick autodetect on current tab
 detectSyntaxButton = Button(statusFrame, text='Detect Syntax', command=lambda: manual_detect_syntax(force=True))
 detectSyntaxButton.pack(side=RIGHT, padx=4, pady=2)
+btnToggleRaw = Button(statusFrame, text='Toggle Raw', command=toggle_raw_rendered)
+btnToggleRaw.pack(side=RIGHT, padx=4, pady=2)
+# small view-state indicator (updates with active tab)
+viewIndicator = Label(statusFrame, text='View: —', bd=1, relief=SUNKEN, anchor=W, width=18)
+viewIndicator.pack(side=RIGHT, padx=4, pady=2)
 
 syntaxToggleCheckbox = ttk.Checkbutton(
     statusFrame,

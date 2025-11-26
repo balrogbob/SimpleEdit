@@ -46,12 +46,27 @@
   </ItemGroup>
   <ItemGroup>
     <Folder Include="out\" />
+    <Folder Include="syntax\" />
+    <Folder Include="worker_logs\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="out\ckpt.pt">
       <Publish>True</Publish>
     </Content>
     <Content Include="requirements.txt" />
+    <Content Include="syntax\html_dark.ini" />
+    <Content Include="syntax\html_light.ini" />
+    <Content Include="syntax\json.ini" />
+    <Content Include="syntax\markdown.ini" />
+    <Content Include="syntax\python.ini" />
+    <Content Include="worker_logs\syntax_worker_19916.stderr.log" />
+    <Content Include="worker_logs\syntax_worker_19916.worker.log" />
+    <Content Include="worker_logs\syntax_worker_24880.stderr.log" />
+    <Content Include="worker_logs\syntax_worker_24880.worker.log" />
+    <Content Include="worker_logs\syntax_worker_25148.stderr.log" />
+    <Content Include="worker_logs\syntax_worker_25148.worker.log" />
+    <Content Include="worker_logs\syntax_worker_26332.stderr.log" />
+    <Content Include="worker_logs\syntax_worker_26332.worker.log" />
   </ItemGroup>
   <Import Project="$(MSBuildExtensionsPath32)\Microsoft\VisualStudio\v$(VisualStudioVersion)\Python Tools\Microsoft.PythonTools.targets" />
   <!-- Uncomment the CoreCompile target to enable the Build command in
