@@ -417,6 +417,7 @@ cursorColor = config.get('Section1', 'cursorColor')
 # line-number colors (user-configurable)
 lineNumberFg = config.get('Section1', 'lineNumberFg', fallback='#555555')
 lineNumberBg = config.get('Section1', 'lineNumberBg', fallback='#000000')
+currentLineBg = config.get('Section1', 'currentLineBg', fallback='#222222')
 aiMaxContext = int(config.get('Section1', 'aiMaxContext'))
 temperature = float(config.get('Section1', 'temperature'))
 top_k = int(config.get('Section1', 'top_k'))
@@ -1436,7 +1437,23 @@ def _apply_tag_configs_to_widget(tw):
         tw.tag_config("underlineitalic", font=(fontName, fontSize, "italic", "underline"))
         tw.tag_config("boldunderline", font=(fontName, fontSize, "bold", "underline"))
         tw.tag_config("bolditalic", font=(fontName, fontSize, "bold", "italic"))
-        tw.tag_config("currentLine", background="#222222")
+        try:
+            tw.tag_config("currentLine", background=currentLineBg)
+        except Exception:
+            # fallback to hard-coded default if config value invalid
+            try:
+                tw.tag_config("currentLine", background="#222222")
+            except Exception:
+                pass
+
+        # Ensure currentLine sits behind the selection so selection highlight remains visible
+        try:
+            # Lower the currentLine tag beneath the 'sel' tag (selection). If 'sel' doesn't exist yet this is a no-op.
+            tw.tag_lower("currentLine", "sel")
+            # Also raise the selection tag to top to be sure it visually wins.
+            tw.tag_raise("sel")
+        except Exception:
+            pass
         tw.tag_config("trailingWhitespace", background="#331111")
         tw.tag_config("find_match", background="#444444", foreground='white')
         # small formatting: reduce font size relative to editor fontSize
@@ -3725,7 +3742,7 @@ def open_syntax_editor():
 
     # Render tags in 4 blocks across to avoid vertical overflow
     tags_list = list(_DEFAULT_TAG_COLORS.items())
-    per_row = 4  # number of tag blocks per visual row
+    per_row = 3  # number of tag blocks per visual row
     block_width = 5  # columns per block (Tag, FG, swatch, BG, swatch)
     start_row = row
     for idx, (tag, defaults) in enumerate(tags_list):
@@ -3783,9 +3800,14 @@ def open_syntax_editor():
 
     # Generic regexes: show a few common ones in multi-line entries
     regex_entries = {}
-    for key in ('STRING_RE', 'COMMENT_RE', 'NUMBER_RE', 'DECORATOR_RE', 'CLASS_RE', 'VAR_ASSIGN_RE', 'ATTRIBUTE_RE', 'TODO_RE'):
+    regex_keys = (
+        'STRING_RE', 'COMMENT_RE', 'NUMBER_RE', 'DECORATOR_RE', 'CLASS_RE',
+        'VAR_ASSIGN_RE', 'ATTRIBUTE_RE', 'TODO_RE', 'CONSTANT_RE', 'VAR_ANNOT_RE',
+        'FSTRING_RE', 'DUNDER_RE', 'CLASS_BASES_RE'
+    )
+    for key in regex_keys:
         ttk.Label(tab_regex, text=key).grid(row=r, column=0, sticky='nw', pady=(6,0))
-        ent = Text(tab_regex, height=2, width=60)
+        ent = Text(tab_regex, height=2 if key not in ('FSTRING_RE','CLASS_BASES_RE') else 3, width=60)
         ent.grid(row=r, column=1, pady=(6,0))
         ent.insert('1.0', config.get('Syntax', f'regex.{key}', fallback=_DEFAULT_REGEXES.get(key, '')))
         regex_entries[key] = ent
@@ -4808,7 +4830,14 @@ def _apply_formatting_from_meta(meta):
         pass
 
 def toggle_raw_rendered():
-    """Toggle current tab between raw HTML and rendered (parsed/plain + tags)."""
+    """Toggle current tab between raw HTML and rendered (parsed/plain + tags).
+
+    Behavior improvements:
+    - When switching FROM Raw -> Rendered we parse the *current* buffer contents (so edits made
+      in Raw view are immediately re-rendered without needing to save/reload).
+    - When switching FROM Rendered -> Raw we prefer the stored raw source (if any); otherwise
+      show the current rendered/plain text as a fallback raw representation.
+    """
     try:
         sel = editorNotebook.select()
         if not sel:
@@ -4823,48 +4852,87 @@ def toggle_raw_rendered():
         if tw is None:
             return
 
-        raw = getattr(frame, '_raw_html', None)
-        if raw is None:
-            statusBar['text'] = "No raw/HTML content available for this tab."
-            return
-
+        # If there's no stored raw at all and no parsed data, nothing to do
+        raw_stored = getattr(frame, '_raw_html', None)
         currently_raw = bool(getattr(frame, '_view_raw', False))
+
         if currently_raw:
-            # switch to rendered: use parsed plain + tags if available, otherwise parse now
-            plain = getattr(frame, '_raw_html_plain', None)
-            tags_meta = getattr(frame, '_raw_html_tags_meta', None)
-            if plain is None:
-                plain, tags_meta = funcs._parse_html_and_apply(raw)
+            # User is viewing/editing raw HTML. Re-parse the *current* buffer content and render it.
+            try:
+                raw_text = tw.get('1.0', 'end-1c')
+            except Exception:
+                raw_text = raw_stored or ''
+
+            # Persist the edited raw into frame so future toggles keep it
+            try:
+                frame._raw_html = raw_text
+            except Exception:
+                pass
+
+            # Parse the current raw text into plain + tag meta (this re-renders from edits)
+            try:
+                plain, tags_meta = funcs._parse_html_and_apply(raw_text)
+            except Exception:
+                plain, tags_meta = raw_text, None
+
+            # Store parsed results on the frame for toggling back later
+            try:
                 frame._raw_html_plain = plain
                 frame._raw_html_tags_meta = tags_meta
-            tw.delete('1.0', 'end')
-            tw.insert('1.0', frame._raw_html_plain or '')
-            _apply_tag_configs_to_widget(tw)
-            if getattr(frame, '_raw_html_tags_meta', None):
-                # apply saved meta to this widget (ensure helpers use this widget while applying)
-                prev_ta = globals().get('textArea', None)
-                try:
-                    globals()['textArea'] = tw
-                    _apply_formatting_from_meta(frame._raw_html_tags_meta)
-                finally:
-                    if prev_ta is not None:
-                        globals()['textArea'] = prev_ta
-                    else:
-                        try:
-                            del globals()['textArea']
-                        except Exception:
-                            pass
+            except Exception:
+                pass
+
+            # Replace widget content with parsed plain text and apply tag configs/meta
+            try:
+                tw.delete('1.0', 'end')
+                tw.insert('1.0', plain or '')
+                _apply_tag_configs_to_widget(tw)
+                if tags_meta and tags_meta.get('tags'):
+                    # Ensure _apply_formatting_from_meta operates on the correct widget
+                    prev_ta = globals().get('textArea', None)
+                    try:
+                        globals()['textArea'] = tw
+                        _apply_formatting_from_meta(tags_meta)
+                    finally:
+                        if prev_ta is not None:
+                            globals()['textArea'] = prev_ta
+                        else:
+                            try:
+                                del globals()['textArea']
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+
             frame._view_raw = False
-            statusBar['text'] = "Rendered HTML view"
+            statusBar['text'] = "Rendered HTML view (from current raw buffer)"
         else:
-            # switch to raw HTML text
-            tw.delete('1.0', 'end')
-            tw.insert('1.0', raw)
-            _apply_tag_configs_to_widget(tw)
-            frame._view_raw = True
-            statusBar['text'] = "Raw HTML view"
+            # Currently rendered -> switch to raw. Prefer stored original raw if present,
+            # otherwise fall back to the current text widget contents.
+            try:
+                raw_to_show = getattr(frame, '_raw_html', None)
+                if not raw_to_show:
+                    # If there is no stored raw, use the visible buffer as a reasonable raw fallback
+                    raw_to_show = tw.get('1.0', 'end-1c')
+                # persist to frame so toggles remain consistent
+                try:
+                    frame._raw_html = raw_to_show
+                except Exception:
+                    pass
+
+                # show raw text
+                tw.delete('1.0', 'end')
+                tw.insert('1.0', raw_to_show or '')
+                _apply_tag_configs_to_widget(tw)
+                frame._view_raw = True
+                statusBar['text'] = "Raw HTML view"
+            except Exception:
+                statusBar['text'] = "Failed to switch to Raw view"
         # refresh lightweight highlighting and UI
-        safe_highlight_event(None)
+        try:
+            safe_highlight_event(None)
+        except Exception:
+            pass
         # update toolbar/status indicator for current tab view
         try:
             update_view_status_indicator()
@@ -5810,55 +5878,88 @@ def _wrap_segment_by_tags(seg_text: str, active_tags: set):
     return funcs.wrap_segment_by_tags(seg_text, active_tags)
 
 def save_as_markdown(textArea):
+    """Save current buffer. If the active tab is showing RAW view, save raw HTML.
+    Otherwise use the existing rendered Markdown/HTML export flow."""
     try:
-        # determine current tab frame and whether it was opened as source
+        # determine active frame and whether current tab is showing raw view
         opened_as_source = False
+        view_raw = False
+        frame = None
         try:
             sel = editorNotebook.select()
             if sel:
                 frame = root.nametowidget(sel)
                 opened_as_source = bool(getattr(frame, '_opened_as_source', False))
+                view_raw = bool(getattr(frame, '_view_raw', False))
         except Exception:
             opened_as_source = False
+            view_raw = False
 
-        if opened_as_source:
-            # Save raw content (no HTML/MD tagging conversion)
-            fileName = filedialog.asksaveasfilename(
-                initialdir=os.path.expanduser("~"),
-                title="Save file (raw)",
-                defaultextension='.md',
-                filetypes=(
-                    ("Markdown files", "*.md"),
-                    ("HTML files", "*.html"),
-                    ("Text files", "*.txt"),
-                    ("All files", "*.*"),
-                )
+        # Clarify dialog title depending on what will be saved
+        if view_raw or opened_as_source:
+            dlg_title = "Save file (raw HTML source)"
+        else:
+            dlg_title = "Save rendered view as Markdown/HTML (preserves highlighting)"
+
+        # Ask user for target file
+        fileName = filedialog.asksaveasfilename(
+            initialdir=os.path.expanduser("~"),
+            title=dlg_title,
+            defaultextension='.md' if not (view_raw or opened_as_source) else '.html',
+            filetypes=(
+                ("Markdown files", "*.md"),
+                ("HTML files", "*.html"),
+                ("Text files", "*.txt"),
+                ("All files", "*.*"),
             )
-            if not fileName:
-                return None
+        )
+        if not fileName:
+            return None
+
+        # If user is viewing raw/source -> write raw HTML exactly as seen
+        if view_raw or opened_as_source:
             try:
-                content = textArea.get('1.0', 'end-1c')
+                # Prefer stored raw HTML on the frame when available
+                raw_content = None
+                try:
+                    raw_content = getattr(frame, '_raw_html', None)
+                except Exception:
+                    raw_content = None
+                if not raw_content:
+                    raw_content = textArea.get('1.0', 'end-1c')
                 with open(fileName, 'w', errors='replace', encoding='utf-8') as fh:
-                    fh.write(content)
-                statusBar['text'] = f"'{fileName}' saved successfully!"
+                    fh.write(raw_content)
+                statusBar['text'] = f"'{fileName}' saved (raw source)!"
                 root.fileName = fileName
                 add_recent_file(fileName)
                 refresh_recent_menu()
+                # Update window title to reflect saved raw source
+                try:
+                    root.title(f"SimpleEdit — {os.path.basename(fileName)} (raw)")
+                except Exception:
+                    pass
                 return fileName
             except Exception as e:
                 messagebox.showerror("Error", str(e))
                 return None
-        else:
-            fileName = funcs.save_as_markdown(textArea)
-            try:
-                if fileName:
-                    statusBar['text'] = f"'{fileName}' saved successfully!"
-                    root.fileName = fileName
-                    add_recent_file(fileName)
-                    refresh_recent_menu()
-            except Exception:
-                pass
-            return fileName
+
+        # Otherwise save rendered content using existing export helper
+        try:
+            saved = funcs.save_as_markdown(textArea)
+            if saved:
+                statusBar['text'] = f"'{saved}' saved successfully!"
+                root.fileName = saved
+                add_recent_file(saved)
+                refresh_recent_menu()
+                try:
+                    root.title(f"SimpleEdit — {os.path.basename(saved)} (rendered)")
+                except Exception:
+                    pass
+            return saved
+        except Exception as e:
+            messagebox.showerror("Error", str(e))
+            return None
+
     except Exception:
         return None
 
@@ -7172,6 +7273,14 @@ def highlight_current_line(event=None):
         textArea.tag_remove('currentLine', '1.0', 'end')
         line = textArea.index('insert').split('.')[0]
         textArea.tag_add('currentLine', f'{line}.0', f'{line}.0 lineend+1c')
+        # Ensure the currentLine highlight is rendered beneath the selection so selections remain visually on top.
+        try:
+            # Lower currentLine below 'sel' and raise 'sel' to guarantee selection visibility.
+            textArea.tag_lower('currentLine', 'sel')
+            textArea.tag_raise('sel')
+        except Exception:
+            # If 'sel' doesn't exist yet or platform doesn't support, ignore silently.
+            pass
     except Exception:
         pass
 
@@ -7839,17 +7948,23 @@ def create_config_window():
         # Line numbers color controls
     lineNumberFgField = mk_row("Line numbers FG", 19, config.get("Section1", "lineNumberFg", fallback="#555555"))
     lineNumberBgField = mk_row("Line numbers BG", 20, config.get("Section1", "lineNumberBg", fallback="#000000"))
+    lineHighlightField = mk_row("Line highlight BG", 21, config.get("Section1", "currentLineBg", fallback="#222222"))
+
 
     sw_ln_fg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "lineNumberFg", fallback="#555555"))
     sw_ln_fg.grid(row=19, column=2, padx=(8,0))
     sw_ln_bg = Label(container, width=3, relief='sunken', bg=config.get("Section1", "lineNumberBg", fallback="#000000"))
     sw_ln_bg.grid(row=20, column=2, padx=(8,0))
+    sw_line_high = Label(container, width=3, relief='sunken', bg=config.get("Section1", "currentLineBg", fallback="#222222"))
+    sw_line_high.grid(row=21, column=2, padx=(8,0))
 
     try:
         sw_ln_fg.config(cursor="hand2")
         sw_ln_bg.config(cursor="hand2")
         sw_ln_fg.bind("<Button-1>", lambda e: choose_line_number_fg())
         sw_ln_bg.bind("<Button-1>", lambda e: choose_line_number_bg())
+        sw_line_high.config(cursor="hand2")
+        sw_line_high.bind("<Button-1>", lambda e: choose_line_highlight())
     except Exception:
         pass
 
@@ -7872,6 +7987,17 @@ def create_config_window():
             lineNumberBgField.insert(0, hexc)
             try:
                 sw_ln_bg.config(bg=hexc)
+            except Exception:
+                pass
+
+    def choose_line_highlight():
+        c = safe_askcolor(lineHighlightField.get(), title="Line highlight BG")
+        hexc = get_hex_color(c)
+        if hexc:
+            lineHighlightField.delete(0, END)
+            lineHighlightField.insert(0, hexc)
+            try:
+                sw_line_high.config(bg=hexc)
             except Exception:
                 pass
 
@@ -7920,6 +8046,7 @@ def create_config_window():
         config.set("Section1", "openDialogModal", str(bool(promptOpenDialogVar.get())))
         config.set("Section1", "lineNumberFg", lineNumberFgField.get())
         config.set("Section1", "lineNumberBg", lineNumberBgField.get())
+        config.set("Section1", "currentLineBg", lineHighlightField.get())
         # persist new options
         config.set("Section1", "syntaxHighlighting", str(bool(syntaxCheckVar.get())))
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
@@ -7987,6 +8114,8 @@ def create_config_window():
         lineNumberFgField.insert(0, config.get("Section1", "lineNumberFg", fallback="#555555"))
         lineNumberBgField.delete(0, END)
         lineNumberBgField.insert(0, config.get("Section1", "lineNumberBg", fallback="#000000"))
+        lineHighlightField.delete(0, END)
+        lineHighlightField.insert(0, config.get("Section1", "currentLineBg", fallback="#222222"))
 
         try:
             syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
@@ -8042,6 +8171,8 @@ def nonlocal_values_reload():
         # line number colors
     lineNumberFg = config.get("Section1", "lineNumberFg", fallback="#555555")
     lineNumberBg = config.get("Section1", "lineNumberBg", fallback="#000000")
+    currentLineBg = config.get("Section1", "currentLineBg", fallback="#222222")
+
     # load css export settings
     exportCssMode = config.get("Section1", "exportCssMode", fallback="inline-element")
     exportCssPath = config.get("Section1", "exportCssPath", fallback="")
