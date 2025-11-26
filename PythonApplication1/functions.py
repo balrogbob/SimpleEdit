@@ -168,6 +168,7 @@ class _SimpleHTMLToTagged(HTMLParser):
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
         self._script_suppress_depth = 0  # nested <script> suppression counter
         self._recent_br = 0  # count of immediately preceding <br>-generated newlines
+        self._pending_li_leading = 0  # when >0, suppress leading newlines right after <li> to keep bullet inline
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
 
@@ -444,6 +445,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                         self._ol_counters[-1] = n + 1
                     else:
                         self.out.append('\u2022 '); self.pos += 2
+                    self._pending_li_leading += 1  # next whitespace chunk should not insert a newline
                 if tag == 'ol':
                     self._ol_counters.append(1)
                 self.stack.append((tag, self.pos))
@@ -749,6 +751,8 @@ class _SimpleHTMLToTagged(HTMLParser):
             elif tag_low == 'div':
                 self._ensure_trailing_block_spacing(require_blank=False)
 
+            if tag_low == 'li':
+                self._pending_li_leading = 0
             tagname = item[0] if len(item) > 0 else None
             start = item[1] if len(item) > 1 else None
             if not tagname or start is None:
@@ -776,6 +780,19 @@ class _SimpleHTMLToTagged(HTMLParser):
             s = data
             # Any chunk that is only whitespace?
             if s.strip() == '':
+               # Special-case: immediately after opening <li> we may see template newlines/indent.
+               # Keep bullet/number inline with the first content token (no newline).
+                if self._pending_li_leading > 0:
+                    # ensure at most a single separating space, but never a newline
+                    prev_char = ''
+                    if self.out:
+                        last = self.out[-1]
+                        prev_char = last[-1] if last else ''
+                    if self.pos > 0 and prev_char not in (' ', '\t', '\n'):
+                        self.out.append(' ')
+                        self.pos += 1
+                    self._pending_li_leading = max(0, self._pending_li_leading - 1)
+                    return
                 has_nl = ('\n' in s)
                 if has_nl:
                     # Add up to two newlines total at the tail, unless just added <br> lines.
@@ -815,6 +832,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             self.out.append(s)
             self.pos += len(s)
             self._recent_br = 0
+            self._pending_li_leading = 0
         except Exception:
             pass
 
