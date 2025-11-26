@@ -547,13 +547,80 @@ class _SimpleHTMLToTagged(HTMLParser):
 
     def get_result(self):
         try:
+            # Build full plain text
+            full = ''.join(self.out)
+
+            # Detect Markdown links [text](url) outside code blocks and add as hyperlinks
+            try:
+                # Accept http/https, file:///, or www. links; ignore bare (url) partials
+                md_link_re = re.compile(
+                    r'\[([^\]]+)\]\('
+                    r'(https?://[^\s)]+|file:///[^\s)]+|www\.[^\s)]+)'
+                    r'\)'
+                )
+
+                # Protected spans: do not create links inside code blocks
+                protected = list(self.ranges.get('code_block', [])) if isinstance(self.ranges.get('code_block', []), list) else []
+                existing_links = list(self.ranges.get('hyperlink', [])) if isinstance(self.ranges.get('hyperlink', []), list) else []
+
+                def _overlaps_any(s: int, e: int, spans) -> bool:
+                    for ps, pe in spans:
+                        if not (e <= ps or s >= pe):
+                            return True
+                    return False
+
+                # --- PATCH START ---
+                # Instead of tagging only the [title], replace the whole [title](link) with just title in output
+                # and tag that range as a hyperlink.
+                new_out = []
+                last = 0
+                new_ranges = self.ranges.copy()
+                new_hrefs = self.hrefs.copy()
+                for m in md_link_re.finditer(full):
+                    s_full, e_full = m.span()
+                    s_text, e_text = m.start(1), m.end(1)
+                    href = m.group(2).strip()
+                    title = m.group(1).strip()
+
+                    # Skip if inside code block or already covered by another hyperlink
+                    if _overlaps_any(s_text, e_text, protected) or _overlaps_any(s_text, e_text, existing_links):
+                        continue
+
+                    # Append text before the link
+                    new_out.append(full[last:s_full])
+                    # Append just the title (no markdown syntax)
+                    link_start = sum(len(part) for part in new_out)
+                    new_out.append(title)
+                    link_end = link_start + len(title)
+
+                    # Record hyperlink tag range
+                    new_ranges.setdefault('hyperlink', []).append([link_start, link_end])
+                    existing_links.append([link_start, link_end])
+
+                    # Record link metadata (so UI can restore clickable mapping)
+                    try:
+                        rec = {'start': link_start, 'end': link_end, 'href': href}
+                        if title:
+                            rec['title'] = title
+                        new_hrefs.append(rec)
+                    except Exception:
+                        pass
+
+                    last = e_full
+                new_out.append(full[last:])
+                full = ''.join(new_out)
+                self.ranges = new_ranges
+                self.hrefs = new_hrefs
+                # --- PATCH END ---
+            except Exception:
+                pass
+
             meta = {'tags': self.ranges}
             if self.hrefs:
                 meta['links'] = list(self.hrefs)
-            return ''.join(self.out), meta
+            return full, meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
-
     # --- Codeblock syntax helpers (isolated tags: cb_*) ----------------------
     def _cb_apply_syntax(self, lang: str, text: str, base_off: int):
         """Apply minimal syntax token tags inside a code block."""
