@@ -1180,29 +1180,29 @@ def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
             s = ''.join(ch*2 for ch in s)
         if len(s) != 6:
             return fallback
-            r = int(s[0:2], 16)
-            g = int(s[2:4], 16)
-            b = int(s[4:6], 16)
-            cr = 255 - r
-            cg = 255 - g
-            cb = 255 - b
-            try:
-                bg = (backgroundColor or "").strip()
-                if bg and bg.startswith('#'):
-                    bgc = bg[1:]
-                    if len(bgc) == 3:
-                        bgc = ''.join(ch*2 for ch in bgc)
-                    if len(bgc) == 6:
-                        br = int(bgc[0:2], 16)
-                        bg_ = int(bgc[2:4], 16)
-                        bb = int(bgc[4:6], 16)
-                        if (cr, cg, cb) == (br, bg_, bb):
-                            cr = max(0, min(255, cr - 16))
-                            cg = max(0, min(255, cg - 8))
-                            cb = max(0, min(255, cb - 4))
-            except Exception:
-                pass
-            return f"#{cr:02x}{cg:02x}{cb:02x}"
+        r = int(s[0:2], 16)
+        g = int(s[2:4], 16)
+        b = int(s[4:6], 16)
+        cr = 255 - r
+        cg = 255 - g
+        cb = 255 - b
+        try:
+            bg = (backgroundColor or "").strip()
+            if bg and bg.startswith('#'):
+                bgc = bg[1:]
+                if len(bgc) == 3:
+                    bgc = ''.join(ch*2 for ch in bgc)
+                if len(bgc) == 6:
+                    br = int(bgc[0:2], 16)
+                    bg_ = int(bgc[2:4], 16)
+                    bb = int(bgc[4:6], 16)
+                    if (cr, cg, cb) == (br, bg_, bb):
+                        cr = max(0, min(255, cr - 16))
+                        cg = max(0, min(255, cg - 8))
+                        cb = max(0, min(255, cb - 4))
+        except Exception:
+            pass
+        return f"#{cr:02x}{cg:02x}{cb:02x}"
     except Exception:
         return fallback
 
