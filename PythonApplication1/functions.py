@@ -169,6 +169,50 @@ class _SimpleHTMLToTagged(HTMLParser):
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
 
+   # --- Soft layout helpers (safe; do not interfere with code/pre capture) ---
+    def _collapse_leading_blank_region(self, text: str) -> tuple[str, int]:
+        """
+        Collapse all leading whitespace into at most ONE newline.
+        Returns (new_text, removed_char_count).
+        This only touches the very beginning of the document to avoid breaking
+        code block indent or any ranges elsewhere.
+        """
+        try:
+            if not text:
+                return text, 0
+            m = re.search(r'\S', text)
+            if not m:
+                # all whitespace => keep a single newline if any existed
+                had_nl = '\n' in text
+                return ('\n' if had_nl else ''), (len(text) - (1 if had_nl else 0))
+            i = m.start()
+            if i == 0:
+                return text, 0
+            head = text[:i]
+            keep_prefix = '\n' if '\n' in head else ''
+            return keep_prefix + text[i:], (i - len(keep_prefix))
+        except Exception:
+            return text, 0
+
+    def _shift_all_ranges_and_links(self, delta: int) -> None:
+        """Shift every recorded range and link start/end by delta (can be negative)."""
+        try:
+            if delta == 0:
+                return
+            for k, spans in list(self.ranges.items()):
+                new_spans = []
+                for s, e in spans:
+                    ns, ne = s + delta, e + delta
+                    if ne > ns and ne > 0:
+                        new_spans.append([max(0, ns), max(0, ne)])
+                self.ranges[k] = new_spans
+            if self.hrefs:
+                for rec in self.hrefs:
+                    if isinstance(rec, dict):
+                        rec['start'] = max(0, int(rec.get('start', 0)) + delta)
+                        rec['end'] = max(0, int(rec.get('end', 0)) + delta)
+        except Exception:
+            pass
     # --- Added helpers for block element spacing (<p>, <div>) ---
     def _current_tail_newline_count(self) -> int:
         """Return how many consecutive newlines appear at end of current output."""
@@ -772,9 +816,19 @@ class _SimpleHTMLToTagged(HTMLParser):
             except Exception:
                 pass
 
+            # Build meta and perform a final soft top-of-document whitespace collapse.
+           # This keeps the first rendered content at the top (or one line down),
+           # without touching code/pre or internal spacing elsewhere.
             meta = {'tags': self.ranges}
             if self.hrefs:
                 meta['links'] = list(self.hrefs)
+            try:
+                new_full, removed = self._collapse_leading_blank_region(full)
+                if removed > 0:
+                    self._shift_all_ranges_and_links(-removed)
+                    full = new_full
+            except Exception:
+                pass
             return full, meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
