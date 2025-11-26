@@ -107,6 +107,11 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                     if sel:
                         frame = root.nametowidget(sel)
                         frame.fileName = path
+                        # update visible tab title so UI and tab-level metadata remain consistent
+                        try:
+                            editorNotebook.tab(sel, text=os.path.basename(path) or path)
+                        except Exception:
+                            pass                
                 except Exception:
                     pass
                 _apply_tag_configs_to_widget(textArea)
@@ -2688,7 +2693,7 @@ def open_url_action():
                         # still attempt syntax autodetect (but apply on UI thread so highlighting uses the widget)
                         try:
                             if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
-                                preset_path = detect_syntax_preset_from_content(raw)
+                                preset_path = detect_syntax_preset_from_content(raw, filename_hint=url2)
                         except Exception:
                             preset_path = None
                     else:
@@ -2696,7 +2701,7 @@ def open_url_action():
                         # when parsed HTML, we may still want to autodetect syntax for non-HTML fragments
                         try:
                             if config.getboolean("Section1", "autoDetectSyntax", fallback=True) and not preset_path:
-                                preset_path = detect_syntax_preset_from_content(raw)
+                                preset_path = detect_syntax_preset_from_content(raw, filename_hint=url2)
                         except Exception:
                             preset_path = None
                     def ui():
@@ -5241,6 +5246,11 @@ def save_file():
             if sel:
                 frame = root.nametowidget(sel)
                 frame.fileName = root.fileName
+                # update visible tab title to the saved filename
+                try:
+                    editorNotebook.tab(sel, text=os.path.basename(root.fileName) or root.fileName)
+                except Exception:
+                    pass        
         except Exception:
             pass
     except Exception as e:
@@ -5480,14 +5490,15 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                 tags_meta = None
                 try:
                     if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
-                        preset_path = detect_syntax_preset_from_content(raw)
+                        # provide filename hint so presets with detect.filename/detect.ext can match
+                        preset_path = detect_syntax_preset_from_content(raw, filename_hint=url2)
                 except Exception:
                     preset_path = None
             else:
                 plain, tags_meta = funcs._parse_html_and_apply(raw)
                 try:
                     if config.getboolean("Section1", "autoDetectSyntax", fallback=True) and not preset_path:
-                        preset_path = detect_syntax_preset_from_content(raw)
+                        preset_path = detect_syntax_preset_from_content(raw, filename_hint=url2)
                 except Exception:
                     preset_path = None
 
@@ -6246,7 +6257,16 @@ def manual_detect_syntax(force: bool = False):
         # cheap detection
         preset = None
         try:
-            preset = detect_syntax_preset_from_content(snippet)
+            # pass current tab filename when available to improve detection (templates / ext-based rules)
+            hint = ''
+            try:
+                sel = editorNotebook.select()
+                if sel:
+                    frm = root.nametowidget(sel)
+                    hint = getattr(frm, 'fileName', '') or getattr(root, 'fileName', '') or ''
+            except Exception:
+                hint = getattr(root, 'fileName', '') or ''
+            preset = detect_syntax_preset_from_content(snippet, filename_hint=hint)
         except Exception:
             preset = None
 
