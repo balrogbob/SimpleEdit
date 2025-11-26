@@ -167,8 +167,11 @@ class _SimpleHTMLToTagged(HTMLParser):
         self.ranges = {}  # tag -> [[start,end], ...]
         self.hrefs = []   # list of {'start':int,'end':int,'href':str,'title':str}
         self._script_suppress_depth = 0  # nested <script> suppression counter
+        self._style_suppress_depth = 0   # nested <style> suppression counter
         self._recent_br = 0  # count of immediately preceding <br>-generated newlines
         self._pending_li_leading = 0  # when >0, suppress leading newlines right after <li> to keep bullet inline
+       # For block elements like <p>/<div>, suppress initial template-indent newlines after the opening tag.
+        self._pending_block_leading: str | None = None  # 'p' | 'div' | None
         # code block capture: push ('__code__', start_pos, list_of_fragments)
         # We treat both <code> and <pre> as code blocks (best-effort).
 
@@ -383,14 +386,17 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(self._reconstruct_start_tag(tag, attrs))
                 return
 
-           # Suppress any <script ...> (regardless of language/type attributes)
-            if tag == 'script':
+            # Suppress any <script ...> or <style ...> (regardless of attributes)
+            if tag in ('script', 'style'):
                 # Trim trailing whitespace before script to avoid tall gaps
                 # (lightweight: remove only pure whitespace segments at tail)
                 while self.out and self.out[-1] and self.out[-1].strip() == '':
                     self.pos -= len(self.out[-1])
                     self.out.pop()
-                self._script_suppress_depth += 1
+                if tag == 'script':
+                    self._script_suppress_depth += 1
+                else:
+                    self._style_suppress_depth += 1
                 return
             # Enter code/pre capture (outermost) — do not emit literal tags
             if tag in ('code', 'pre'):
@@ -413,6 +419,8 @@ class _SimpleHTMLToTagged(HTMLParser):
             if tag == 'p':
                 self._ensure_leading_block_spacing(require_blank=True)
                 self.stack.append(('p', self.pos))
+               # Next whitespace chunk is likely template indentation/newlines; suppress it.
+                self._pending_block_leading = 'p'
                 return
             if tag == 'div':
                 # Class-aware spacing
@@ -425,6 +433,8 @@ class _SimpleHTMLToTagged(HTMLParser):
                 else:
                     self._ensure_leading_block_spacing(require_blank=False)
                     self.stack.append(('div', self.pos))
+               # Suppress initial newline/indent after open <div> to avoid empty line before first text.
+                self._pending_block_leading = 'div'
                 return
 
             # Basic table/list handling
@@ -577,7 +587,7 @@ class _SimpleHTMLToTagged(HTMLParser):
                     self._code_append(self._reconstruct_end_tag(tag_low))
                     return
 
-            # Closing a suppressed <script>
+            # Closing a suppressed <script>/<style>
             if tag_low == 'script' and self._script_suppress_depth > 0:
                 try:
                     self._script_suppress_depth -= 1
@@ -592,6 +602,19 @@ class _SimpleHTMLToTagged(HTMLParser):
                         self.out[-1] = last[:-1]
                         self.pos -= 1
                 return
+            if tag_low == 'style' and self._style_suppress_depth > 0:
+                try:
+                    self._style_suppress_depth -= 1
+                except Exception:
+                    pass
+                # Collapse excessive trailing newlines (same behavior as script)
+                if self._current_tail_newline_count() > 1:
+                    while self._current_tail_newline_count() > 1:
+                        last = self.out[-1]
+                        self.out[-1] = last[:-1]
+                        self.pos -= 1
+                return
+
             # Finalize outermost code/pre block (no literal end tag emitted)
             if tag_low in ('code', 'pre'):
                 if not self.stack:
@@ -753,6 +776,11 @@ class _SimpleHTMLToTagged(HTMLParser):
 
             if tag_low == 'li':
                 self._pending_li_leading = 0
+            # Reset block-leading suppression when closing the block
+            if tag_low in ('p', 'div'):
+                # If still pending (no non-whitespace content was seen), clear it.
+                self._pending_block_leading = None
+
             tagname = item[0] if len(item) > 0 else None
             start = item[1] if len(item) > 1 else None
             if not tagname or start is None:
@@ -769,7 +797,10 @@ class _SimpleHTMLToTagged(HTMLParser):
                 return
            # Suppress script contents entirely
             if self._script_suppress_depth > 0:
-               return
+                return
+            # Suppress style contents entirely
+            if self._style_suppress_depth > 0:
+                return
             if self._in_code_capture():
                 self._code_append(data)
                 return
@@ -792,6 +823,20 @@ class _SimpleHTMLToTagged(HTMLParser):
                         self.out.append(' ')
                         self.pos += 1
                     self._pending_li_leading = max(0, self._pending_li_leading - 1)
+                    return
+                # Special-case: immediately after opening <p>/<div> suppress template newlines/indent.
+                if self._pending_block_leading in ('p', 'div'):
+                    # For paragraphs and generic divs, do NOT introduce a newline.
+                    # If a separating space is useful (prev char is not whitespace), add a single space.
+                    prev_char = ''
+                    if self.out:
+                        last = self.out[-1]
+                        prev_char = last[-1] if last else ''
+                    if prev_char not in (' ', '\t', '\n') and self.pos > 0:
+                        self.out.append(' ')
+                        self.pos += 1
+                    # Consume this whitespace entirely
+                    self._pending_block_leading = None
                     return
                 has_nl = ('\n' in s)
                 if has_nl:
@@ -833,6 +878,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             self.pos += len(s)
             self._recent_br = 0
             self._pending_li_leading = 0
+            self._pending_block_leading = None
         except Exception:
             pass
 
@@ -842,6 +888,8 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(f"&{name};")
                 return
             if self._script_suppress_depth > 0:
+                return
+            if self._style_suppress_depth > 0:
                 return
         except Exception:
             pass
@@ -853,6 +901,8 @@ class _SimpleHTMLToTagged(HTMLParser):
                 return
             if self._script_suppress_depth > 0:
                 return
+            if self._style_suppress_depth > 0:
+                return
         except Exception:
             pass
 
@@ -863,6 +913,8 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(f"<!--{data}-->")
                 return
             # Outside code capture, drop comments (including inside suppressed <script>)
+            if self._style_suppress_depth > 0:
+                return
             return
         except Exception:
             pass
