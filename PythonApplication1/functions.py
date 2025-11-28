@@ -410,13 +410,13 @@ class _SimpleHTMLToTagged(HTMLParser):
                     vals.append(part.split('-', 1)[1])
                 elif part.startswith('lang-'):
                     vals.append(part.split('-', 1)[1])
-                elif part in ('python','json','html','markdown','md','javascript','js','c','cpp','c++'):
+                elif part in ('python','json','html','markdown','md','javascript','js','c','cpp','c++','yaml','yml','rathena','npc','rathena-npc','rathena_yaml','rathena-yaml'):
                     vals.append(part)
             for k in ('data-lang','lang','type'):
                 v = (attrd.get(k) or '').lower()
                 if v:
                     if k == 'type':
-                        m = re.search(r'(python|json|html|markdown|javascript|js|c\+\+|cpp|c)', v)
+                        m = re.search(r'(python|json|html|markdown|javascript|js|c\+\+|cpp|c|yaml|yml|rathena(?:-yaml|-npc)?)', v)
                         if m:
                             vals.append(m.group(1))
                     else:
@@ -427,6 +427,9 @@ class _SimpleHTMLToTagged(HTMLParser):
                 if v == 'md': return 'markdown'
                 if v in ('js','javascript'): return 'javascript'
                 if v in ('c++','cpp'): return 'cpp'
+                if v in ('yml','yaml'): return 'yaml'
+                if v in ('rathena-yaml','rathena_yaml','rathenayaml','rathena yaml','rathena_yaml'): return 'rathena_yaml'
+                if v in ('rathena','npc','rathena-npc','rathena_npc','rathenanpc','rathena npc'): return 'rathena_npc'
                 return v
             return None
         except Exception:
@@ -453,6 +456,10 @@ class _SimpleHTMLToTagged(HTMLParser):
             if lang_token == 'md': lang_token = 'markdown'
             if lang_token in ('js','javascript'): lang_token = 'javascript'
             if lang_token in ('c++','cpp'): lang_token = 'cpp'
+            if lang_token in ('yml','yaml'): lang_token = 'yaml'
+            if lang_token in ('rathena-yaml','rathena_yaml','rathenayaml','rathenayaml'): lang_token = 'rathena_yaml'
+            if lang_token in ('rathena','npc','rathena-npc','rathena_npc','rathenanpc'): lang_token = 'rathena_npc'
+
             fence_seq = raw_code[m.start():m.end()]
             fence_kind = '```' if fence_seq.startswith('```') else "'''"
             close_re = re.compile(rf'^{re.escape(fence_kind)}\s*$', re.MULTILINE)
@@ -1090,6 +1097,13 @@ class _SimpleHTMLToTagged(HTMLParser):
             self._cb_javascript(text, base_off)
         elif lang in ('c','cpp'):
             self._cb_c(text, base_off)
+        elif lang in ('yaml','yml'):
+            self._cb_yaml(text, base_off)
+        elif lang in ('rathena_npc','rathena-npc','npc','rathena','rathena_script'):
+            self._cb_rathena_npc(text, base_off)
+        elif lang in ('rathena_yaml','rathena-yaml','rathena_db'):
+            # Rathena YAML uses YAML tokenization but we keep a distinct entry for future extensions
+            self._cb_yaml(text, base_off)
 
     def _cb_add(self, tag: str, s: int, e: int):
         if e > s:
@@ -1169,6 +1183,77 @@ class _SimpleHTMLToTagged(HTMLParser):
         except Exception:
             pass
 
+    # YAML tokenizer (generic)
+    def _cb_yaml(self, text: str, base: int):
+        try:
+            # Comments
+            com_re = re.compile(r'#[^\n]*')
+            # Keys (before colon), avoid matching inside strings
+            key_re = re.compile(r'(?m)^(?:\s*-?\s*)?([A-Za-z0-9_.-]+)\s*:(?=\s|$)')
+            # Strings: single/double quoted
+            str_re = re.compile(r'("([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\')')
+            # Numbers (ints, floats)
+            num_re = re.compile(r'\b-?(?:0|[1-9]\d*)(?:\.\d+)?\b')
+            # Booleans/null
+            kw_re = re.compile(r'\b(true|false|null|on|off|yes|no)\b', re.IGNORECASE)
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end())
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end())
+            for m in key_re.finditer(text):
+                self._cb_add('cb_attr', base + m.start(1), base + m.end(1))
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            for m in kw_re.finditer(text):
+                self._cb_add('cb_keyword', base + m.start(), base + m.end())
+        except Exception:
+            pass
+
+    # Rathena NPC tokenizer (best-effort)
+    def _cb_rathena_npc(self, text: str, base: int):
+        try:
+            # Comments: // line comments
+            com_re = re.compile(r'//[^\n]*')
+            # Strings: "..." and '...'
+            str_re = re.compile(r'("([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\')')
+            # Numbers
+            num_re = re.compile(r'\b\d+(?:\.\d+)?\b')
+            # Keywords: common rAthena script commands and flow control
+            kw = (
+                'mes','next','close','end','goto','switch','case','break',
+                'if','else','for','while','do','return',
+                'set','setarray','getarg','getiteminfo','getitemname',
+                'getitem','delitem','countitem','strcharinfo','select',
+                'rand','input','npcname','disablenpc','enablenpc','announce',
+                'sleep','callfunc','callsub','function','bonus','bonus2',
+                'gettime','getmapxy','warp','areawarp','unitkill','specialeffect',
+                'getnameditem','getinventorylist','getitem2','getitembound'
+            )
+            kw_re = re.compile(r'\b(' + '|'.join(map(re.escape, kw)) + r')\b', re.IGNORECASE)
+            # Variables: .@local, @account, $global, $@arrays
+            var_re = re.compile(r'(\.@[A-Za-z_]\w*|@[A-Za-z_]\w*|\$@?[A-Za-z_]\w*)')
+            # Labels: e.g., OnInit:, OnTouch:, OnTimer1000:
+            label_re = re.compile(r'(?m)^(On[A-Za-z0-9_]+)\s*:')
+            # Operators: basic symbolic operators
+            op_re = re.compile(r'([+\-*/%=!<>]{1,2})')
+            # Apply
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end())
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end())
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            for m in kw_re.finditer(text):
+                self._cb_add('cb_keyword', base + m.start(), base + m.end())
+            for m in var_re.finditer(text):
+                self._cb_add('cb_attr', base + m.start(1), base + m.end(1))
+            for m in label_re.finditer(text):
+                self._cb_add('cb_tag', base + m.start(1), base + m.end(1))
+            for m in op_re.finditer(text):
+                self._cb_add('cb_operator', base + m.start(1), base + m.end(1))
+        except Exception:
+            pass
+
     # Added JavaScript tokenizer
     def _cb_javascript(self, text: str, base: int):
         try:
@@ -1223,6 +1308,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             t = text.strip()
             if not t:
                 return None
+            # JSON-like: leading brace with key:value pairs
             if re.search(r'^\s*{[\s\S]*:\s*["\']', t[:300]):
                 return 'json'
             if re.search(r'\bdef\s+\w+\s*\(', t):
@@ -1233,6 +1319,28 @@ class _SimpleHTMLToTagged(HTMLParser):
                 return 'html'
             if re.search(r'\bclass\s+\w+\s*\{', t) and ';' in t:
                 return 'cpp'
+            # Markdown heuristics:
+            # - Lines starting with heading marks (#, ##, etc.)
+            # - List markers (-, *, +, or digit.) at line starts
+            # - Code fences (``` without a language)
+            # - Blockquotes starting with '>'
+            # - Link or image markdown patterns [text](url), ![alt](src)
+            md_head = re.search(r'(?m)^\s*#{1,6}\s+\S', t)
+            md_list = re.search(r'(?m)^\s*(?:[-*+]|\d+\.)\s+\S', t)
+            md_fence = re.search(r'(?m)^\s*```(?:\s*$|\s*\w+\s*$)', t)
+            md_quote = re.search(r'(?m)^\s*>\s+\S', t)
+            md_link = re.search(r'\[[^\]]+\]\([^)]+\)', t)
+            md_img = re.search(r'!\[[^\]]*\]\([^)]+\)', t)
+            md_table = re.search(r'(?m)^\s*\|.+\|\s*$', t) and re.search(r'(?m)^\s*[-|:]{3,}\s*$', t)
+            if md_head or md_list or md_fence or md_quote or md_link or md_img or md_table:
+                return 'markdown'
+            # YAML-like: common patterns (key: value, dashes for lists)
+            if re.search(r'(?m)^\s*-[ \t]', t) or re.search(r'(?m)^[A-Za-z0-9_.-]+\s*:', t):
+                return 'yaml'
+            # Rathena NPC heuristics:
+            # presence of OnInit:/OnTouch:, mes;, and rAthena style variables (.@, $@, @)
+            if re.search(r'(?m)^On[A-Za-z0-9_]+\s*:', t) or 'mes' in t or re.search(r'(\.@|@\w|\$@?)', t):
+                return 'rathena_npc'
             return None
         except Exception:
             return None
