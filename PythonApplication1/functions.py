@@ -36,6 +36,8 @@ import textwrap
 
 RECENT_MAX = 10
 
+IN_CELL_NL = '\u2028'  # internal cell-newline marker (stored inside table cells so real \n doesn't break rows)
+
 _DEFAULT_TAG_COLORS = {
     "number": {"fg": "#FDFD6A", "bg": ""},
     "selfs": {"fg": "yellow", "bg": ""},
@@ -200,6 +202,11 @@ class _SimpleHTMLToTagged(HTMLParser):
         self._table_attr_stack: list[dict] = []
         # Capture cell-level attributes while inside table (populated on td/th start and end)
         self._cell_meta: list[dict] = []
+        # Per-table and per-row builders used while parsing so the final table meta
+        # mirrors the table-editor output (rows -> cells with attrs).
+        # Stack of lists: each open <table> pushes a list of rows; each open <tr> pushes a current-row buffer.
+        self._current_table_rows: list[list] = []
+        self._current_row_cells: list[list] = []
          # stack entries: ('tag', start) or ('hyperlink', start, href, title)
         self.stack = []
         # stack to track nested ordered-list counters (one counter per open <ol>)
@@ -499,6 +506,9 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._code_append(self._reconstruct_start_tag(tag, attrs))
                 return
 
+            # Special-case finalize table cells / rows / tables so we build detailed metadata
+            # that matches the table-editor output (rows of cells with attrs + colgroup).
+
             # Suppress any <script ...> or <style ...> (regardless of attributes)
             if tag in ('script', 'style'):
                 # Trim trailing whitespace before script to avoid tall gaps
@@ -557,6 +567,11 @@ class _SimpleHTMLToTagged(HTMLParser):
                 if tag == 'tr':
                     if self.pos > 0:
                         self.out.append('\n'); self.pos += 1
+                    # start a new in-memory row buffer so subsequent td/th closures can append cell metas
+                    try:
+                        self._current_row_cells.append([])
+                    except Exception:
+                        pass
                 elif tag in ('td', 'th'):
                     prev_text = ''.join(self.out) if self.out else ''
                     if prev_text and not prev_text.endswith('\n'):
@@ -564,7 +579,15 @@ class _SimpleHTMLToTagged(HTMLParser):
                     # record cell start and attrs so we can preserve rowspan/colspan/align on export
                     attrd = dict(attrs or {})
                     try:
-                        self._cell_meta.append({'start': self.pos, 'end': None, 'attrs': attrd, 'type': tag})
+                        # create a cell meta entry; end/text will be finalized on the matching endtag
+                       cm = {'start': self.pos, 'end': None, 'attrs': attrd, 'type': tag}
+                       self._cell_meta.append(cm)
+                       # also leave a placeholder in the current row buffer if available
+                       try:
+                           if self._current_row_cells:
+                               self._current_row_cells[-1].append(cm)
+                       except Exception:
+                           pass
                     except Exception:
                         pass
                 elif tag == 'li':
@@ -579,12 +602,18 @@ class _SimpleHTMLToTagged(HTMLParser):
                     self._pending_li_leading += 1  # next whitespace chunk should not insert a newline
                 if tag == 'ol':
                     self._ol_counters.append(1)
-                # record table start attrs for later reconstruction
+                # record table start attrs for later reconstruction and push a new rows accumulator
                 if tag == 'table':
                     try:
                         self._table_attr_stack.append(dict(attrd))
                     except Exception:
                         self._table_attr_stack.append({})
+                    # start a per-table rows accumulator so <tr> can append into it
+                    try:
+                        self._current_table_rows.append([])
+                    except Exception:
+                        pass                        
+                    self._table_attr_stack.append({})
                 self.stack.append((tag, self.pos))
                 return
 
@@ -900,6 +929,92 @@ class _SimpleHTMLToTagged(HTMLParser):
             end = self.pos
             if end > start:
                 self.ranges.setdefault(tagname, []).append([start, end])
+            # If this was a cell, finalize its recorded meta (end + text) and append to current row buffer.
+            try:
+                if tagname in ('td', 'th'):
+                    # find the most-recent cell meta matching this start that has no end yet
+                    found = None
+                    for cm in reversed(self._cell_meta):
+                        try:
+                            if int(cm.get('start', -1)) == int(start) and (cm.get('end') is None or cm.get('end') == 0):
+                                found = cm
+                                break
+                        except Exception:
+                            continue
+                    if found is not None:
+                        try:
+                            found['end'] = end
+                            # extract the text content between start..end from the current output buffer
+                            full_text = ''.join(self.out)
+                            found['text'] = full_text[start:end]
+                        except Exception:
+                            try:
+                                found['text'] = ''
+                            except Exception:
+                                pass
+                        # Ensure the current row buffer contains this exact cm (append if missing)
+                        try:
+                            if self._current_row_cells:
+                                cur = self._current_row_cells[-1]
+                                if found not in cur:
+                                    cur.append(found)
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+            # If this was a row close, finalize the row into the current table's rows list.
+            try:
+                if tagname == 'tr':
+                    try:
+                        if self._current_row_cells:
+                            row_cells = self._current_row_cells.pop()
+                        else:
+                            row_cells = []
+                        # attach this row to the most recent open table's rows accumulator
+                        if self._current_table_rows:
+                            self._current_table_rows[-1].append(row_cells)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            # If this was a table close, pop table attrs/rows and emit a table meta entry
+            try:
+                if tagname == 'table':
+                    try:
+                        attrs = self._table_attr_stack.pop() if self._table_attr_stack else {}
+                    except Exception:
+                        attrs = {}
+                    try:
+                        rows_meta = self._current_table_rows.pop() if self._current_table_rows else []
+                    except Exception:
+                        rows_meta = []
+                    # compute a colgroup from rows_meta if possible
+                    colgroup = []
+                    try:
+                        if rows_meta:
+                            max_cols = max((len(r) for r in rows_meta), default=0)
+                            col_widths = [0] * max_cols
+                            for r in rows_meta:
+                                for ci, cell in enumerate(r):
+                                    try:
+                                        txt = (cell.get('text') or '')
+                                    except Exception:
+                                        txt = ''
+                                    visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                                    col_widths[ci] = max(col_widths[ci], len(visible))
+                            if max(col_widths, default=0) > 0 and max_cols > 0:
+                                colgroup = [{'width': max(4, int(w))} for w in col_widths]
+                    except Exception:
+                        colgroup = []
+                    try:
+                        table_meta = {'start': start, 'end': end, 'attrs': attrs, 'rows': rows_meta, 'colgroup': colgroup}
+                        self._table_meta.append(table_meta)
+                    except Exception:
+                        pass
+            except Exception:
+                pass        
         except Exception:
             pass
 
@@ -916,10 +1031,47 @@ class _SimpleHTMLToTagged(HTMLParser):
             if self._in_code_capture():
                 self._code_append(data)
                 return
-            # Tighten whitespace like an HTML renderer (outside code/pre):
-            # - Collapse whitespace runs inside text nodes to single spaces.
-            # - Limit vertical gaps between elements to at most two '\n'.
-            # - Preserve explicit <br> vertical spacing (tracked via self._recent_br).
+
+            # NEW: When parsing HTML, ignore purely-whitespace data that exists
+            # between table-related tags (common in pretty-printed HTML). That
+            # whitespace confuses downstream table reconstruction (it becomes
+            # separate single-cell rows). Preserve whitespace when we are *inside*
+            # an actual cell (i.e. a td/th has been opened and not closed).
+            try:
+                if data.strip() == '':
+                    # Detect whether we are inside any table context:
+                    in_table_stack = False
+                    try:
+                        # _current_table_rows and _table_attr_stack track open tables/tr parsing
+                        if self._current_table_rows or self._table_attr_stack:
+                            in_table_stack = True
+                        else:
+                            # also check explicit stack entries for an open table/tr/td/th
+                            for entry in self.stack:
+                                try:
+                                    if isinstance(entry, (tuple, list)) and entry and entry[0] in ('table', 'tr', 'td', 'th'):
+                                        in_table_stack = True
+                                        break
+                                except Exception:
+                                    continue
+                    except Exception:
+                        in_table_stack = False
+
+                    # If whitespace-only chunk and it is only layout whitespace between tags
+                    # (we are in a table context but not inside an opened cell capture), drop it.
+                    if in_table_stack:
+                        # preserve whitespace if currently building cell content (open _cell_meta exists)
+                        if not self._cell_meta:
+                            return
+                # end whitespace-between-table suppression
+            except Exception:
+                # on any error fall back to original behavior below
+                pass
+
+           # Tighten whitespace like an HTML renderer (outside code/pre):
+           # - Collapse whitespace runs inside text nodes to single spaces.
+           # - Limit vertical gaps between elements to at most two '\n'.
+           # - Preserve explicit <br> vertical spacing (tracked via self._recent_br).
             s = data
             # Any chunk that is only whitespace?
             if s.strip() == '':
@@ -1133,12 +1285,34 @@ class _SimpleHTMLToTagged(HTMLParser):
                                 cell_cursor = ce + 1
                             table_rows.append(row_cells)
                             abs_cursor += len(rtext) + 1
-                        table_entry = {'start': tstart, 'end': tend, 'attrs': t.get('attrs', {}), 'rows': table_rows, 'colgroup': t.get('colgroup', [])}
+
+                        # Ensure colgroup information is present (best-effort). If source provided a colgroup prefer it,
+                        # otherwise compute widths from measured cell first-line lengths.
+                        colgroup = t.get('colgroup', []) or []
+                        if not colgroup:
+                            # compute per-column widths heuristically
+                            try:
+                                max_cols = max((len(r) for r in table_rows), default=0)
+                                if max_cols:
+                                    col_widths = [0] * max_cols
+                                    for r in table_rows:
+                                        for ci, cell in enumerate(r):
+                                            txt = (cell.get('text') or '')
+                                            visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                                            col_widths[ci] = max(col_widths[ci], len(visible))
+                                    # only include reasonable widths (non-zero)
+                                    colgroup = [{'width': int(max(1, w))} for w in col_widths]
+                            except Exception:
+                                colgroup = []
+
+                        table_entry = {'start': tstart, 'end': tend, 'attrs': t.get('attrs', {}), 'rows': table_rows, 'colgroup': colgroup}
                         tables.append(table_entry)
                     except Exception:
                         continue
                 if tables:
                     meta['tables'] = tables
+            except Exception:
+                pass
             except Exception:
                 pass
             try:
@@ -1540,21 +1714,96 @@ def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
     except Exception:
         return fallback
 
+def _strip_whitespace_between_tags(html: str) -> str:
+    """
+    Return a copy of `html` with all inter-tag whitespace removed (">   <" -> "><"),
+    while preserving content inside sensitive tags (script/style/pre/code).
+    Also ensure anchor tags are separated by two spaces from adjacent tags so
+    link parsing doesn't merge adjacent anchors into a single malformed link.
+    """
+    try:
+        if not isinstance(html, str) or html == '':
+            return html
+
+        # Preserve sensitive blocks by replacing them with placeholders
+        placeholder_fmt = "__HTML_PRESERVE_%d__"
+        preserved = []
+
+        def _preserve_match(m):
+            idx = len(preserved)
+            preserved.append(m.group(0))
+            return placeholder_fmt % idx
+
+        # find script/style/pre/code blocks (case-insensitive, DOTALL)
+        block_re = re.compile(r'(?is)<(script|style|pre|code)(?:\s[^>]*)?>.*?</\1\s*>')
+        working = block_re.sub(_preserve_match, html)
+
+        # Remove whitespace between tags: any ">" then whitespace then "<" -> "><"
+        # This collapses newlines/tabs/spaces used for pretty-printing.
+        working = re.sub(r'>\s+<', '><', working)
+
+        # Also remove leading/trailing whitespace between adjacent tags (e.g. at start/end)
+        # (safe because we restored protected blocks later)
+        working = re.sub(r'^\s+<', '<', working)
+        working = re.sub(r'>\s+$', '>', working)
+
+        # Ensure anchors don't run together: add two spaces before opening <a and after closing </a>
+        # Use case-insensitive, whitespace-tolerant patterns to be robust.
+        try:
+            # Add two spaces before an opening <a (e.g. "...><a" -> "...>  <a")
+            working = re.sub(r'>\s*<\s*(a\b)', r'>  <\1', working, flags=re.I)
+            # Add two spaces after a closing </a> when immediately followed by another tag (e.g. "</a><" -> "</a>  <")
+            working = re.sub(r'</\s*a\s*>\s*<', '</a>  <', working, flags=re.I)
+        except Exception:
+            # don't fail on weird inputs; keep best-effort spacing
+            pass
+
+        # Restore preserved blocks
+        if preserved:
+            for i, original in enumerate(preserved):
+                working = working.replace(placeholder_fmt % i, original)
+
+        return working
+    except Exception:
+        return html
+
 def _parse_html_and_apply(raw) -> tuple[str, dict]:
     """
     Parse raw HTML fragment or document and extract plain text and tag ranges.
-    Returns (plain_text, meta) where meta is {'tags': {...}, 'links': [...]}
+    Pre-process the HTML by removing whitespace between tags (while preserving
+    script/style/pre/code contents). Returns (plain_text, meta) where meta
+    contains at least 'tags' and includes 'prochtml' (the processed HTML).
     """
     try:
         m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
         fragment = m.group(1) if m else raw
 
+        # Keep original fragment (so callers can store the raw buffer separately)
+        raw_fragment = fragment
+
+        # Produce prochtml: fragment with whitespace removed between tags (but preserving code/style/script/pre)
+        try:
+            prochtml = _strip_whitespace_between_tags(raw_fragment)
+        except Exception:
+            prochtml = raw_fragment
+
         parser = _SimpleHTMLToTagged()
-        parser.feed(fragment)
+        # Feed the processed HTML to the parser (this is the key change)
+        parser.feed(prochtml)
         plain, meta = parser.get_result()
+
+        # Attach both raw and processed HTML to meta so caller/UI can keep raw and re-process later
+        try:
+            if not isinstance(meta, dict):
+                meta = dict(meta or {})
+            meta['raw_fragment'] = raw_fragment
+            meta['prochtml'] = prochtml
+        except Exception:
+            pass
+
         return plain, meta
     except Exception:
-        return raw, {}
+        return raw, {'tags': {}}
 
 def _ensure_url_section(cfg):
     """Ensure the 'URLHistory' section exists."""
@@ -1819,34 +2068,46 @@ def _convert_buffer_to_html_fragment(textArea):
                 block_text = content[s:e]
 
                 if kind == 'table':
-                    rows = [r for r in block_text.split('\n') if r is not None]
-                    # Try to enrich rendering using stored table metadata (if present)
+                    # Prefer to build table from parser/table-editor metadata when available.
+                    # We still fall back to legacy split-based reconstruction when no meta exists.
+                    # Try to find matching meta for this table span (best-effort by overlap / proximity).
                     table_meta_for_span = None
                     try:
                         tmetas = getattr(textArea, '_tables_meta', []) or []
-                        # best-effort: match by start offset
+                        s_int = int(s)
+                        e_int = int(e)
+                        best = None
+                        best_dist = None
                         for tm in tmetas:
                             try:
-                                if int(tm.get('start', -1)) == int(s):
-                                    table_meta_for_span = tm
-                                    break
+                                ts = int(tm.get('start', -1))
+                                te = int(tm.get('end', -1))
                             except Exception:
                                 continue
+                            if (ts <= s_int < te) or (s_int <= ts < e_int) or (ts < e_int and te > s_int):
+                                table_meta_for_span = tm
+                                best = None
+                                break
+                            dist = abs(ts - s_int)
+                            if best is None or dist < best_dist:
+                                best = tm
+                                best_dist = dist
+                        if table_meta_for_span is None and best is not None and best_dist is not None and best_dist <= 32:
+                            table_meta_for_span = best
                     except Exception:
                         table_meta_for_span = None
 
-                    # If we can, emit a colgroup (either explicit from metadata or computed widths)
-                    colgroup_html = ''
-                    if table_meta_for_span:
-                        try:
-                            # if explicit colgroup present in metadata, prefer it
+                    # Emit <table> using precise metadata when available
+                    out_parts.append('<table>')
+                    try:
+                        if table_meta_for_span:
+                            # prefer explicit colgroup if present
                             cg = table_meta_for_span.get('colgroup', []) or []
                             if cg:
                                 cols = []
                                 for c in cg:
                                     w = c.get('width')
                                     if w:
-                                        # allow numeric widths or strings; if numeric assume characters -> use ch
                                         try:
                                             wi = int(w)
                                             cols.append(f'<col style="width:{wi}ch">')
@@ -1855,101 +2116,65 @@ def _convert_buffer_to_html_fragment(textArea):
                                     else:
                                         cols.append('<col>')
                                 if cols:
-                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
-                            else:
-                                # compute widths from metadata rows (character counts)
-                                rows_meta = table_meta_for_span.get('rows', []) or []
-                                if rows_meta:
-                                    max_cols = max((len(r) for r in rows_meta), default=0)
-                                    col_widths = [0] * max_cols
-                                    for r in rows_meta:
-                                        for ci, cell in enumerate(r):
-                                            txt = (cell.get('text') or '')
-                                            # measure visible first-line length (internal markers replaced)
-                                            visible = txt.replace('\u2028', '\n').split('\n', 1)[0]
-                                            col_widths[ci] = max(col_widths[ci], len(visible))
-                                    cols = []
-                                    for w in col_widths:
-                                        # Ensure at least a small width to avoid zero-width cols
-                                        wch = max(4, int(w))
-                                        cols.append(f'<col style="width:{wch}ch">')
-                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
-                        except Exception:
-                            colgroup_html = ''
-                    else:
-                        # fallback: compute widths from the textual table if reasonable
-                        try:
-                            cell_rows = [r.split('\t') if r != '' else [''] for r in rows]
-                            if cell_rows:
-                                max_cols = max((len(r) for r in cell_rows), default=0)
-                                col_widths = [0] * max_cols
-                                for r in cell_rows:
-                                    for ci, cell in enumerate(r):
-                                        visible = cell.replace('\u2028', '\n').split('\n', 1)[0]
-                                        col_widths[ci] = max(col_widths[ci], len(visible))
-                                # only emit colgroup if we have more than 1 column or widths non-trivial
-                                if max(col_widths, default=0) > 0 and max_cols > 0:
-                                    cols = []
-                                    for w in col_widths:
-                                        wch = max(4, int(w))
-                                        cols.append(f'<col style="width:{wch}ch">')
-                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
-                        except Exception:
-                            colgroup_html = ''
+                                    out_parts.append('<colgroup>' + ''.join(cols) + '</colgroup>')
 
-                    out_parts.append('<table>')
-                    if colgroup_html:
-                        out_parts.append(colgroup_html)
-
-                    if table_meta_for_span:
-                        # Use precise rows/cells with attributes
-                        for row_cells in table_meta_for_span.get('rows', []):
+                            for row_cells in table_meta_for_span.get('rows', []):
+                                out_parts.append('<tr>')
+                                for cell in row_cells:
+                                    # cell text may contain internal IN_CELL_NL markers -> render as <br>
+                                    raw_txt = (cell.get('text') or '') or ''
+                                    # convert internal marker to HTML line breaks prior to escaping replacement
+                                    raw_txt = raw_txt.replace(IN_CELL_NL, '\n')
+                                    esc = html.escape(raw_txt).replace('\n', '<br>')
+                                    attrs = cell.get('attrs', {}) or {}
+                                    typ = cell.get('type', 'td')
+                                    attr_str = ''
+                                    if 'colspan' in attrs and str(attrs.get('colspan')).strip():
+                                        try:
+                                            attr_str += f' colspan="{int(attrs.get("colspan"))}"'
+                                        except Exception:
+                                            attr_str += f' colspan="{html.escape(str(attrs.get("colspan")))}"'
+                                    if 'rowspan' in attrs and str(attrs.get('rowspan')).strip():
+                                        try:
+                                            attr_str += f' rowspan="{int(attrs.get("rowspan"))}"'
+                                        except Exception:
+                                            attr_str += f' rowspan="{html.escape(str(attrs.get("rowspan")))}"'
+                                    align = attrs.get('align') or ''
+                                    if not align:
+                                        style = (attrs.get('style') or '')
+                                        m = re.search(r'text-align\s*:\s*(left|right|center|justify)', style, flags=re.I) if style else None
+                                        if m:
+                                            align = m.group(1)
+                                    if align:
+                                        attr_str += f' align="{html.escape(str(align))}"'
+                                    if typ == 'th':
+                                        out_parts.append(f'<th{attr_str}>{esc}</th>')
+                                    else:
+                                        out_parts.append(f'<td{attr_str}>{esc}</td>')
+                                out_parts.append('</tr>')
+                        else:
+                            # legacy fallback: split rows/tabs
+                            rows = block_text.split('\n')
+                            for ridx, row in enumerate(rows):
+                                if row == '' and len(rows) == 1:
+                                    continue
+                                out_parts.append('<tr>')
+                                cells = row.split('\t')
+                                is_header_table = bool('th' in tags_by_name and tags_by_name['th'])
+                                for cell_text in cells:
+                                    cell_text_escaped = html.escape(cell_text.replace(IN_CELL_NL, '\n')).replace('\n', '<br>')
+                                    if is_header_table and ridx == 0:
+                                        out_parts.append(f'<th>{cell_text_escaped}</th>')
+                                    else:
+                                        out_parts.append(f'<td>{cell_text_escaped}</td>')
+                                out_parts.append('</tr>')
+                    except Exception:
+                        # strong fallback: basic escaped table content
+                        rows = block_text.split('\n')
+                        for row in rows:
                             out_parts.append('<tr>')
-                            for cell in row_cells:
-                                txt = html.escape(cell.get('text', ''))
-                                attrs = cell.get('attrs', {}) or {}
-                                typ = cell.get('type', 'td')
-                                attr_str = ''
-                                # support common attributes: colspan, rowspan, align
-                                if 'colspan' in attrs and str(attrs.get('colspan')).strip():
-                                    try:
-                                        attr_str += f' colspan="{int(attrs.get("colspan"))}"'
-                                    except Exception:
-                                        attr_str += f' colspan="{html.escape(str(attrs.get("colspan")))}"'
-                                if 'rowspan' in attrs and str(attrs.get('rowspan')).strip():
-                                    try:
-                                        attr_str += f' rowspan="{int(attrs.get("rowspan"))}"'
-                                    except Exception:
-                                        attr_str += f' rowspan="{html.escape(str(attrs.get("rowspan")))}"'
-                                # alignment (align or style text-align)
-                                align = attrs.get('align') or ''
-                                if not align:
-                                    style = (attrs.get('style') or '')
-                                    m = re.search(r'text-align\s*:\s*(left|right|center|justify)', style, flags=re.I) if style else None
-                                    if m:
-                                        align = m.group(1)
-                                if align:
-                                    attr_str += f' align="{html.escape(str(align))}"'
-                                if typ == 'th':
-                                    out_parts.append(f'<th{attr_str}>{txt}</th>')
-                                else:
-                                    out_parts.append(f'<td{attr_str}>{txt}</td>')
-                            out_parts.append('</tr>')
-                    else:
-                        # Fallback: simple split-based reconstruction (legacy behavior)
-                        for ridx, row in enumerate(rows):
-                            if row == '' and len(rows) == 1:
-                                continue
-                            out_parts.append('<tr>')
-                            cells = row.split('\t')
-                            # Header inference: first row only if any th tag ranges exist globally
-                            is_header_table = bool('th' in tags_by_name and tags_by_name['th'])
-                            for cell_text in cells:
-                                cell_text_escaped = html.escape(cell_text)
-                                if is_header_table and ridx == 0:
-                                    out_parts.append(f'<th>{cell_text_escaped}</th>')
-                                else:
-                                    out_parts.append(f'<td>{cell_text_escaped}</td>')
+                            for cell_text in (row.split('\t') if row != '' else ['']):
+                                out_parts.append('<td>' + html.escape(cell_text) + '</td>')
                             out_parts.append('</tr>')
                     out_parts.append('</table>')
 

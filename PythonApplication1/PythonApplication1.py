@@ -1787,7 +1787,35 @@ def _apply_tag_configs_to_widget(tw):
                         pass
             except Exception:
                 pass
+        except Exception:
+            pass
 
+        # Visual indicators for spanned cells and attribute hints:
+        # - td_colspan: subtle darker background to indicate the cell spans columns
+        # - td_rowspan: slightly lighter background to indicate row-spanning
+        # - td_has_attrs: underline to hint attribute presence (colspan/rowspan/align)
+        try:
+            colspan_bg = _lighten_color(td_bg, -0.06) if td_bg else td_bg
+            rowspan_bg = _lighten_color(td_bg, 0.06) if td_bg else td_bg
+            try:
+                tw.tag_config("td_colspan", background=colspan_bg)
+            except Exception:
+                pass
+            try:
+                tw.tag_config("td_rowspan", background=rowspan_bg)
+            except Exception:
+                pass
+            try:
+                tw.tag_config("td_has_attrs", underline=1)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+        # After visual tags are configured, ensure any parsed or implicit table geometry is normalized
+        # into the canonical per-widget `_tables_meta` structure used by the table editor and renderer.
+        try:
+            _ensure_widget_tables_meta(tw)
         except Exception:
             pass
 
@@ -2273,12 +2301,14 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
     If start_idx == end_idx == None the dialog will operate in 'insert at cursor' mode (Add Table)."""
     try:
         insert_mode = False
+        existing_meta = None
         if not start_idx or not end_idx:
             # create blank default 3x3 table
             grid = [['' for _ in range(3)] for _ in range(3)]
             insert_mode = True
             s_norm = None
             e_norm = None
+            cell_attrs = [[{} for _ in range(3)] for _ in range(3)]
         else:
             # normalize indices and extract text
             s_norm = widget.index(start_idx)
@@ -2286,6 +2316,37 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
             content = widget.get(s_norm, e_norm)
             rows = [r for r in content.split('\n')]
             grid = [r.split('\t') for r in rows]
+  
+            # Attempt to initialize cell attributes from stored metadata if available
+            cell_attrs = []
+            try:
+                metas = getattr(widget, '_tables_meta', []) or []
+                # pick a meta that matches this span (best-effort by start offset)
+                region_start_off = len(widget.get('1.0', s_norm))
+                for tm in metas:
+                    try:
+                        if int(tm.get('start', -1)) == region_start_off:
+                            existing_meta = tm
+                            break
+                    except Exception:
+                        continue
+                if existing_meta:
+                    for r_idx in range(len(grid)):
+                        row_attrs = []
+                        for c_idx in range(len(grid[r_idx])):
+                            try:
+                                cell_meta = existing_meta.get('rows', [])[r_idx][c_idx] if r_idx < len(existing_meta.get('rows', [])) and c_idx < len(existing_meta.get('rows', [])[r_idx]) else {}
+                                row_attrs.append(dict(cell_meta.get('attrs', {}) or {}))
+                            except Exception:
+                                row_attrs.append({})
+                        cell_attrs.append(row_attrs)
+                else:
+                    # default empty attrs structure
+                    for r in grid:
+                        cell_attrs.append([{} for _ in range(len(r))])
+            except Exception:
+                for r in grid:
+                    cell_attrs.append([{} for _ in range(len(r))])
 
         dlg = Toplevel(root)
         dlg.transient(root)
@@ -2296,10 +2357,16 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
 
         # dynamic grid of Entry widgets
         entries = [ [None]*max(1, len(grid[0])) for _ in range(max(1, len(grid))) ]
+        # attrs matrix parallel to entries
+        # ensure size matches grid
+        rows_init = max(1, len(grid))
+        cols_init = max(1, max((len(r) for r in grid), default=1))
+        while len(cell_attrs) < rows_init:
+            cell_attrs.append([{} for _ in range(cols_init)])
+        for r in cell_attrs:
+            while len(r) < cols_init:
+                r.append({})
 
-        # Heuristic: if the first cell starts with a single accidental leading space,
-        # remove that single space when populating the editor so the dialog doesn't show the spurious space.
-        # Only strip a single leading space on row=0,col=0 to avoid changing intentional leading whitespace elsewhere.
         def _sanitize_initial_grid(g):
             try:
                 if not g or not g[0]:
@@ -2337,30 +2404,77 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                 for c in range(cols):
                     val = grid_data[r][c] if c < len(grid_data[r]) else ''
                     ent = Entry(container, width=max(10, max(10, len(val.splitlines()[0]) + 2 if val else 10)))
-                    ent.grid(row=r, column=c, padx=2, pady=2, sticky='nsew')
+                    ent.grid(row=r, column=c*2, padx=2, pady=2, sticky='nsew')
                     # insert the single-line representation (internal newlines shown as literal newlines aren't supported in Entry)
-                    # we preserve actual newlines by replacing them with a visible placeholder in the Entry UI (join with ' ↵ ').
                     if isinstance(val, str) and '\n' in val:
                         display = val.replace('\n', ' ↵ ')
                     else:
                         display = val
                     ent.insert(0, display)
                     entries[r][c] = ent
-                # separator columns (visual black bar) as Labels (one per gap between columns)
-                # place separators to the right of each column except last
-                for c in range(cols - 1):
-                    sep = Label(container, width=1, relief='flat', bd=0)
-                    # color configured later via tag; here choose black/white based on editor bg
-                    bg_contrast = _contrast_text_color(backgroundColor or "#ffffff")
-                    sep_color = "#FFFFFF" if bg_contrast == "#FFFFFF" else "#000000"
-                    sep.config(bg=sep_color)
-                    # place separator in a separate grid column (interleaving is easier done by placing separators in same column index with sticky)
-                    # We'll put separators using grid on the same column with sticky so they appear between entries visually.
-                    # To keep things simple we won't create extra columns; visual separators rely on spacing between entries.
-                    # (This label helps show a visual column border in the editor dialog.)
-                    sep.grid(row=r, column=cols + c + 1, padx=0, pady=2, sticky='ns')
+
+                    # Attribute button beside each entry to edit colspan/rowspan/align
+                    def make_attr_btn(rr, cc):
+                        def on_attr():
+                            # modal to edit attributes for this single cell
+                            adlg = Toplevel(dlg)
+                            adlg.transient(dlg)
+                            adlg.grab_set()
+                            adlg.title(f"Cell attributes (r{rr+1}, c{cc+1})")
+                            frm2 = ttk.Frame(adlg, padding=8)
+                            frm2.grid(row=0, column=0, sticky='nsew')
+                            ttk.Label(frm2, text="Colspan:").grid(row=0, column=0, sticky='w')
+                            colspan_var = StringVar(value=str(cell_attrs[rr][cc].get('colspan','') or ''))
+                            colspan_e = ttk.Entry(frm2, textvariable=colspan_var, width=6)
+                            colspan_e.grid(row=0, column=1, sticky='w', padx=6)
+                            ttk.Label(frm2, text="Rowspan:").grid(row=1, column=0, sticky='w')
+                            rowspan_var = StringVar(value=str(cell_attrs[rr][cc].get('rowspan','') or ''))
+                            rowspan_e = ttk.Entry(frm2, textvariable=rowspan_var, width=6)
+                            rowspan_e.grid(row=1, column=1, sticky='w', padx=6)
+                            ttk.Label(frm2, text="Align:").grid(row=2, column=0, sticky='w')
+                            align_var = StringVar(value=str(cell_attrs[rr][cc].get('align','') or ''))
+                            align_combo = ttk.Combobox(frm2, textvariable=align_var, values=('', 'left', 'center', 'right', 'justify'), state='readonly', width=10)
+                            align_combo.grid(row=2, column=1, sticky='w', padx=6)
+                            def save_attr():
+                                try:
+                                    cs = colspan_var.get().strip()
+                                    rs = rowspan_var.get().strip()
+                                    al = align_var.get().strip()
+                                    d = {}
+                                    if cs:
+                                        try:
+                                            iv = int(cs)
+                                            if iv > 1:
+                                                d['colspan'] = iv
+                                        except Exception:
+                                            d['colspan'] = cs
+                                    if rs:
+                                        try:
+                                            iv = int(rs)
+                                            if iv > 1:
+                                                d['rowspan'] = iv
+                                        except Exception:
+                                            d['rowspan'] = rs
+                                    if al:
+                                        d['align'] = al
+                                    cell_attrs[rr][cc] = d
+                                except Exception:
+                                    pass
+                                finally:
+                                    try:
+                                        adlg.grab_release()
+                                    except Exception:
+                                        pass
+                                    adlg.destroy()
+                            ttk.Button(frm2, text="Save", command=save_attr).grid(row=3, column=1, sticky='e', pady=(8,0))
+                            ttk.Button(frm2, text="Cancel", command=lambda: (adlg.grab_release(), adlg.destroy())).grid(row=3, column=0, sticky='w', pady=(8,0))
+                            center_window(adlg)
+                        return on_attr
+                    btn_attr = Button(container, text='⋯', width=2, command=make_attr_btn(r, c))
+                    btn_attr.grid(row=r, column=c*2 + 1, padx=(2,8), pady=2, sticky='ns')
+
                 # make columns expand equally
-                for c in range(cols):
+                for c in range(cols*2):
                     container.grid_columnconfigure(c, weight=1)
 
             # bind key handlers after rebuild so we can adjust widths live
@@ -2420,21 +2534,24 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
             rcount = len(entries)
             ccount = len(entries[0]) if entries else 1
             for r in entries:
-                # ensure each row has same length
                 while len(r) < ccount:
                     r.append(None)
             entries.append([None]*ccount)
+            cell_attrs.append([{} for _ in range(ccount)])
             rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
 
         def remove_row():
             if len(entries) <= 1:
                 return
             entries.pop()
+            cell_attrs.pop()
             rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
 
         def add_col():
             for row in entries:
                 row.append(None)
+            for r in cell_attrs:
+                r.append({})
             rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
 
         def remove_col():
@@ -2442,8 +2559,10 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                 return
             for row in entries:
                 row.pop()
+            for r in cell_attrs:
+                r.pop()
             rebuild_grid(frm, [[entries[r][c].get() if entries[r][c] else '' for c in range(len(entries[0]))] for r in range(len(entries))])
-
+  
         # row/col controls
         def do_save():
             try:
@@ -2464,7 +2583,7 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                             val = val.replace('\n', IN_CELL_NL)
                         row_vals.append(val)
                     grid_vals.append(row_vals)
-
+  
                 # compute max width per column (characters)
                 max_cols = max(len(row) for row in grid_vals) if grid_vals else 0
                 col_widths = [0] * max_cols
@@ -2475,7 +2594,7 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                         parts = text.replace(IN_CELL_NL, '\n').splitlines()
                         longest = max((len(p) for p in parts), default=0)
                         col_widths[ci] = max(col_widths[ci], longest)
-
+  
                 # pad cells to uniform widths so visual wrapping is consistent across rows
                 for row in grid_vals:
                     padded_cells = []
@@ -2492,9 +2611,9 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                         padded = IN_CELL_NL.join(parts)
                         padded_cells.append(padded)
                     new_rows.append('\t'.join(padded_cells))
-
+  
                 new_text = '\n'.join(new_rows)
-
+  
                 if insert_mode:
                     # insert at current cursor
                     ins_idx = widget.index('insert')
@@ -2515,14 +2634,16 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                         widget.tag_remove(t, start_idx, end_idx)
                 except Exception:
                     pass
-                # add new tags based on new_text geometry
+                # add new tags based on new_text geometry and attach metadata
                 cursor_off = 0
+                table_rows_meta = []
                 for r_idx, line in enumerate(new_rows):
                     row_start_off = abs_start_off + cursor_off
                     cells = line.split('\t')
                     # compute row_end_off once
                     row_end_off = row_start_off + len(line)
                     cell_cursor = row_start_off
+                    row_meta = []
                     for c_idx, cell_text in enumerate(cells):
                         cs = cell_cursor
                         ce = cs + len(cell_text)
@@ -2532,6 +2653,10 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                         else:
                             ce_display = row_end_off
                         # add td tag
+                        if c_idx < len(cell_attrs[r_idx]):
+                            attrs_for_cell = dict(cell_attrs[r_idx][c_idx] or {})
+                        else:
+                            attrs_for_cell = {}
                         try:
                             widget.tag_add('td', f"1.0 + {cs}c", f"1.0 + {ce_display}c")
                         except Exception:
@@ -2543,6 +2668,14 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                                 widget.tag_add('table_sep', f"1.0 + {sep_offset}c", f"1.0 + {sep_offset + 1}c")
                             except Exception:
                                 pass
+                        # populate cell metadata (text is the original padded cell content without including the tab)
+                        row_meta.append({
+                            'start': cs,
+                            'end': ce,
+                            'text': cell_text,
+                            'attrs': attrs_for_cell,
+                            'type': 'td'
+                        })
                         # advance: account for tab char between cells (the stored new_rows include tabs)
                         cell_cursor = ce + 1
                     # add tr tag for the whole row
@@ -2550,12 +2683,42 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                         widget.tag_add('tr', f"1.0 + {row_start_off}c", f"1.0 + {row_end_off}c")
                     except Exception:
                         pass
+                    table_rows_meta.append(row_meta)
                     cursor_off += len(line) + 1  # plus newline
                 # add table tag covering whole inserted region
                 try:
                     widget.tag_add('table', ins_start_idx, f"1.0 + {abs_start_off + len(new_text)}c")
                 except Exception:
                     pass
+  
+                # attach table metadata to widget for round-trip export and visual hints
+                try:
+                    new_table_meta = {
+                        'start': abs_start_off,
+                        'end': abs_start_off + len(new_text),
+                        'attrs': {},  # no table-level attrs in editor UI currently
+                        'rows': table_rows_meta,
+                        'colgroup': [{'width': int(w)} for w in col_widths]
+                    }
+                    metas = getattr(widget, '_tables_meta', []) or []
+                    # remove any existing meta overlapping this new region
+                    cleaned = []
+                    for tm in metas:
+                        try:
+                            ts = int(tm.get('start', -1))
+                            te = int(tm.get('end', -1))
+                            if te <= abs_start_off or ts >= abs_start_off + len(new_text):
+                                cleaned.append(tm)
+                        except Exception:
+                            cleaned.append(tm)
+                    cleaned.append(new_table_meta)
+                    try:
+                        setattr(widget, '_tables_meta', cleaned)
+                    except Exception:
+                        widget._tables_meta = cleaned
+                except Exception:
+                    pass
+  
                 # apply visual configs to ensure tags show
                 _apply_tag_configs_to_widget(widget)
                 # re-highlight and refresh
@@ -2568,14 +2731,14 @@ def open_table_editor(widget: Text, start_idx: str, end_idx: str):
                 except Exception:
                     pass
                 dlg.destroy()
-
+  
         def do_cancel():
             try:
                 dlg.grab_release()
             except Exception:
                 pass
             dlg.destroy()
-
+  
         Button(ctl, text="Save", command=do_save).pack(side=RIGHT, padx=6)
         Button(ctl, text="Cancel", command=do_cancel).pack(side=RIGHT)
         # Add row/col controls left of Save/Cancel
@@ -5631,6 +5794,43 @@ def _apply_formatting_from_meta(meta):
         except Exception:
             pass
 
+        # Apply per-cell visual span indicators when table metadata present (colspan/rowspan)
+        try:
+            tmetas = getattr(textArea, '_tables_meta', []) or []
+            if tmetas:
+                for tm in tmetas:
+                    try:
+                        for r_idx, row in enumerate(tm.get('rows', [])):
+                            for c_idx, cell in enumerate(row):
+                                try:
+                                    s = int(cell.get('start', 0))
+                                    e = int(cell.get('end', 0))
+                                    attrs = cell.get('attrs', {}) or {}
+                                    if e > s:
+                                        if 'colspan' in attrs and str(attrs.get('colspan')).strip():
+                                            try:
+                                                if int(attrs.get('colspan', 1)) > 1:
+                                                    textArea.tag_add('td_colspan', f"1.0 + {s}c", f"1.0 + {e}c")
+                                            except Exception:
+                                                textArea.tag_add('td_colspan', f"1.0 + {s}c", f"1.0 + {e}c")
+                                        if 'rowspan' in attrs and str(attrs.get('rowspan')).strip():
+                                            try:
+                                                if int(attrs.get('rowspan', 1)) > 1:
+                                                    textArea.tag_add('td_rowspan', f"1.0 + {s}c", f"1.0 + {e}c")
+                                            except Exception:
+                                                textArea.tag_add('td_rowspan', f"1.0 + {s}c", f"1.0 + {e}c")
+                                        if attrs:
+                                            try:
+                                                textArea.tag_add('td_has_attrs', f"1.0 + {s}c", f"1.0 + {e}c")
+                                            except Exception:
+                                                pass
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         # Restore explicit links produced by parser (if any)
         try:
             links = meta.get('links', []) if isinstance(meta, dict) else []
@@ -6317,6 +6517,257 @@ def _range_fully_has_attribute(start_idx: str, end_idx: str, attr: str) -> bool:
         return True
     except Exception:
         return False
+
+def _ensure_widget_tables_meta(tw):
+    """
+    Ensure `tw._tables_meta` exists and follows the table-editor canonical structure.
+
+    Robust normalization rules added:
+    - Prefer existing explicit `table` tag ranges and use `th` ranges to derive header column count.
+    - If parser output produced many single-cell rows (common when parser inserted line breaks
+      instead of tabs), but the table has multiple <th> header cells, attempt to regroup the
+      flattened cells into rows of `header_cols` to recover the original grid.
+    - When regrouping, preserve per-cell recorded attrs/start/end/text entries when available.
+    - Always produce `tw._tables_meta` and (best-effort) re-create `table`/`tr`/`td` tags on widget
+      so downstream rendering/editor code sees a canonical structure.
+    """
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+
+        # If widget already has a sane tables meta, keep it.
+        existing = getattr(tw, '_tables_meta', None)
+        if isinstance(existing, list) and all(isinstance(x, dict) and 'rows' in x for x in existing):
+            return
+
+        def idx_to_off(idx_str):
+            try:
+                return len(tw.get('1.0', idx_str))
+            except Exception:
+                return 0
+
+        tables_out = []
+
+        # Use explicit table tag ranges if present (preferred)
+        try:
+            table_tag_ranges = list(tw.tag_ranges('table'))
+        except Exception:
+            table_tag_ranges = []
+
+        if table_tag_ranges:
+            for ti in range(0, len(table_tag_ranges), 2):
+                try:
+                    s_idx = table_tag_ranges[ti]; e_idx = table_tag_ranges[ti + 1]
+                    tstart = idx_to_off(s_idx)
+                    tend = idx_to_off(e_idx)
+                    if tend <= tstart:
+                        continue
+                    seg = tw.get(s_idx, e_idx)
+                    rows_text = seg.split('\n')
+                    abs_cursor = tstart
+                    rows_meta = []
+
+                    # collect existing th spans within this table to determine headers/cols
+                    th_spans = []
+                    try:
+                        thr = list(tw.tag_ranges('th'))
+                        for j in range(0, len(thr), 2):
+                            th_spans.append((idx_to_off(thr[j]), idx_to_off(thr[j + 1])))
+                    except Exception:
+                        th_spans = []
+
+                    def overlaps_any(s, e, spans):
+                        for ps, pe in spans:
+                            if not (e <= ps or s >= pe):
+                                return True
+                        return False
+
+                    # Build per-row, per-cell meta by splitting on tabs (parser normally emits tabs)
+                    for rtext in rows_text:
+                        cells = rtext.split('\t') if rtext != '' else ['']
+                        cell_cursor = abs_cursor
+                        row_meta = []
+                        for ctext in cells:
+                            cs = cell_cursor
+                            ce = cs + len(ctext)
+                            is_th = overlaps_any(cs, ce, th_spans)
+                            row_meta.append({
+                                'start': cs,
+                                'end': ce,
+                                'text': ctext,
+                                'attrs': {},
+                                'type': 'th' if is_th else 'td'
+                            })
+                            cell_cursor = ce + 1
+                        rows_meta.append(row_meta)
+                        abs_cursor += len(rtext) + 1  # account for newline
+
+                    # Heuristic regroup: detect flattened rows (many single-cell rows) but header indicates multi-col
+                    try:
+                        # number of header cells inside this table (explicit th tag count)
+                        header_count = 0
+                        try:
+                            header_count = len([1 for (ps, pe) in th_spans])
+                        except Exception:
+                            header_count = 0
+                        # if header_count absent, try infer from first row if >1
+                        if header_count <= 0 and rows_meta and len(rows_meta[0]) > 1:
+                            header_count = len(rows_meta[0])
+
+                        # If we have a reasonable header_count and current rows appear flattened (each row 1 cell)
+                        if header_count > 1:
+                            single_col_rows = all((len(r) == 1 for r in rows_meta)) and len(rows_meta) >= header_count
+                            # also ensure total cell count is divisible by header_count for clean regroup
+                            total_cells = sum(len(r) for r in rows_meta)
+                            if single_col_rows and total_cells % header_count == 0:
+                                # Flatten cell list preserving existing meta objects, then regroup into rows of header_count
+                                flat_cells = []
+                                for r in rows_meta:
+                                    # r has one cell entry
+                                    if r:
+                                        flat_cells.append(r[0])
+                                new_rows = []
+                                for rstart in range(0, len(flat_cells), header_count):
+                                    chunk = flat_cells[rstart:rstart + header_count]
+                                    # If first (header) row exists (th_spans) we mark first row cells as 'th'
+                                    is_header_row = (len(new_rows) == 0 and header_count == len(chunk))
+                                    row_buf = []
+                                    for cmeta in chunk:
+                                        cm_copy = dict(cmeta)
+                                        # adjust type using header info when possible
+                                        if is_header_row:
+                                            cm_copy['type'] = 'th'
+                                        else:
+                                            # preserve existing type if set
+                                            cm_copy['type'] = cm_copy.get('type', 'td')
+                                        row_buf.append(cm_copy)
+                                    new_rows.append(row_buf)
+                                rows_meta = new_rows
+                    except Exception:
+                        pass
+
+                    # derive colgroup heuristically
+                    colgroup = []
+                    try:
+                        if rows_meta:
+                            max_cols = max((len(r) for r in rows_meta), default=0)
+                            if max_cols > 0:
+                                col_widths = [0] * max_cols
+                                for r in rows_meta:
+                                    for ci, cell in enumerate(r):
+                                        try:
+                                            txt = cell.get('text') or ''
+                                        except Exception:
+                                            txt = ''
+                                        visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                                        col_widths[ci] = max(col_widths[ci], len(visible))
+                                colgroup = [{'width': max(1, int(w))} for w in col_widths]
+                    except Exception:
+                        colgroup = []
+
+                    tables_out.append({'start': tstart, 'end': tend, 'attrs': {}, 'rows': rows_meta, 'colgroup': colgroup})
+                except Exception:
+                    continue
+        else:
+            # No explicit table tags: fallback to tab-delimited block detection (existing behavior)
+            try:
+                full = tw.get('1.0', 'end-1c')
+                if not full:
+                    return
+                lines = full.split('\n')
+                candidates = []
+                n = len(lines)
+                i = 0
+                while i < n:
+                    if '\t' not in lines[i]:
+                        i += 1
+                        continue
+                    j = i
+                    while j < n and (('\t' in lines[j]) or (lines[j].strip() == '')):
+                        j += 1
+                    block = lines[i:j]
+                    col_counts = [len(r.split('\t')) for r in block if r != '']
+                    if not col_counts:
+                        i = j
+                        continue
+                    max_cols = max(col_counts)
+                    if max_cols >= 2 and len(block) >= 1:
+                        start_off = sum(len(lines[k]) + 1 for k in range(0, i))
+                        end_off = start_off + sum(len(lines[k]) + 1 for k in range(i, j)) - 1
+                        candidates.append((i, j, start_off, end_off))
+                    i = j
+
+                for (ri, rj, start_off, end_off) in candidates:
+                    try:
+                        rows = lines[ri:rj]
+                        abs_cursor = start_off
+                        rows_meta = []
+                        for row_text in rows:
+                            cells = row_text.split('\t') if row_text != '' else ['']
+                            cell_cursor = abs_cursor
+                            row_meta = []
+                            for cell_text in cells:
+                                cs = cell_cursor
+                                ce = cs + len(cell_text)
+                                row_meta.append({
+                                    'start': cs,
+                                    'end': ce,
+                                    'text': cell_text,
+                                    'attrs': {},
+                                    'type': 'td'
+                                })
+                                cell_cursor = ce + 1
+                            rows_meta.append(row_meta)
+                            abs_cursor += len(row_text) + 1
+                        # colgroup
+                        colgroup = []
+                        try:
+                            max_cols = max((len(r) for r in rows_meta), default=0)
+                            if max_cols > 0:
+                                col_widths = [0] * max_cols
+                                for r in rows_meta:
+                                    for ci, cell in enumerate(r):
+                                        txt = (cell.get('text') or '')
+                                        visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                                        col_widths[ci] = max(col_widths[ci], len(visible))
+                                colgroup = [{'width': max(1, int(w))} for w in col_widths]
+                        except Exception:
+                            colgroup = []
+                        tables_out.append({'start': start_off, 'end': end_off, 'attrs': {}, 'rows': rows_meta, 'colgroup': colgroup})
+                        # attempt to add widget tags for discovered ranges
+                        try:
+                            tw.tag_add('table', f"1.0 + {start_off}c", f"1.0 + {end_off}c")
+                            cursor = start_off
+                            for row_cells in rows_meta:
+                                row_start = cursor
+                                for cell in row_cells:
+                                    cs = cell['start']; ce = cell['end']
+                                    tw.tag_add('td', f"1.0 + {cs}c", f"1.0 + {ce}c")
+                                # use actual line length from widget to set tr
+                                try:
+                                    row_len = len((tw.get(f"1.0 + {row_start}c", f"1.0 + {row_start}c lineend") or ''))
+                                    tw.tag_add('tr', f"1.0 + {row_start}c", f"1.0 + {row_start + row_len}c")
+                                    cursor = row_start + row_len + 1
+                                except Exception:
+                                    cursor = row_start + sum(len(c['text']) for c in row_cells) + 1
+                        except Exception:
+                            pass
+                    except Exception:
+                        continue
+            except Exception:
+                pass
+
+        # attach computed metas to widget if any found
+        if tables_out:
+            try:
+                setattr(tw, '_tables_meta', tables_out)
+            except Exception:
+                try:
+                    tw._tables_meta = tables_out
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 def toggle_tag_complex(tag):
     """Toggle bold/italic/underline across the selection, respecting font_* boundaries and composite style tags.
