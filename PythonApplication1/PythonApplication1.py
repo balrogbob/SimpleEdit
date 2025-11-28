@@ -5617,6 +5617,20 @@ def _apply_formatting_from_meta(meta):
                 except Exception:
                     pass
 
+        # Preserve richer table metadata on the text widget for round-trip export.
+        # Parser may provide meta['tables'] = [ { start,end, attrs, rows:[ [ {start,end,text,attrs,type} ] ], colgroup: [...] } ]
+        try:
+            tables_meta = meta.get('tables', []) if isinstance(meta, dict) else []
+            if tables_meta:
+                # normalize keys/indices and store on the widget for _convert_buffer_to_html_fragment to use during export
+                try:
+                    # attach per-widget so multiple tabs can hold different metas
+                    setattr(textArea, '_tables_meta', tables_meta)
+                except Exception:
+                    root._tables_meta = tables_meta
+        except Exception:
+            pass
+
         # Restore explicit links produced by parser (if any)
         try:
             links = meta.get('links', []) if isinstance(meta, dict) else []

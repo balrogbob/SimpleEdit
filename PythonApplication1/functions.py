@@ -192,7 +192,15 @@ class _SimpleHTMLToTagged(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.out = []
         self.pos = 0
-        # stack entries: ('tag', start) or ('hyperlink', start, href, title)
+        # Table / cell metadata collectors to preserve attributes and structure
+        # Entries are populated during parsing and emitted via get_result() as meta['tables'].
+        # Each table meta: {'start': int, 'end': int, 'attrs': dict, 'rows': [ [ { 'start':int,'end':int,'text':str,'attrs':dict,'type':'td'|'th' } ] ], 'colgroup': [...] }
+        self._table_meta: list[dict] = []
+        # Temporary stack for nested table attributes (parallel to stack entries)
+        self._table_attr_stack: list[dict] = []
+        # Capture cell-level attributes while inside table (populated on td/th start and end)
+        self._cell_meta: list[dict] = []
+         # stack entries: ('tag', start) or ('hyperlink', start, href, title)
         self.stack = []
         # stack to track nested ordered-list counters (one counter per open <ol>)
         self._ol_counters = []
@@ -553,6 +561,12 @@ class _SimpleHTMLToTagged(HTMLParser):
                     prev_text = ''.join(self.out) if self.out else ''
                     if prev_text and not prev_text.endswith('\n'):
                         self.out.append('\t'); self.pos += 1
+                    # record cell start and attrs so we can preserve rowspan/colspan/align on export
+                    attrd = dict(attrs or {})
+                    try:
+                        self._cell_meta.append({'start': self.pos, 'end': None, 'attrs': attrd, 'type': tag})
+                    except Exception:
+                        pass
                 elif tag == 'li':
                     if self.pos > 0 and not ''.join(self.out).endswith('\n'):
                         self.out.append('\n'); self.pos += 1
@@ -565,6 +579,12 @@ class _SimpleHTMLToTagged(HTMLParser):
                     self._pending_li_leading += 1  # next whitespace chunk should not insert a newline
                 if tag == 'ol':
                     self._ol_counters.append(1)
+                # record table start attrs for later reconstruction
+                if tag == 'table':
+                    try:
+                        self._table_attr_stack.append(dict(attrd))
+                    except Exception:
+                        self._table_attr_stack.append({})
                 self.stack.append((tag, self.pos))
                 return
 
@@ -1067,11 +1087,60 @@ class _SimpleHTMLToTagged(HTMLParser):
                 pass
 
             # Build meta and perform a final soft top-of-document whitespace collapse.
-           # This keeps the first rendered content at the top (or one line down),
-           # without touching code/pre or internal spacing elsewhere.
+            # This keeps the first rendered content at the top (or one line down),
+            # without touching code/pre or internal spacing elsewhere.
             meta = {'tags': self.ranges}
             if self.hrefs:
                 meta['links'] = list(self.hrefs)
+            # Build rich table metadata (rows, cells with attrs) using recorded _table_meta and _cell_meta.
+            try:
+                tables = []
+                for t in self._table_meta:
+                    try:
+                        tstart = int(t.get('start', 0))
+                        tend = int(t.get('end', 0))
+                        if tstart < 0 or tend <= tstart or tstart >= len(full):
+                            continue
+                        tend = min(tend, len(full))
+                        seg = full[tstart:tend]
+                        rows = seg.split('\n')
+                        # build cell offsets by scanning rows/cells and map to nearest recorded cell meta (by overlap)
+                        abs_cursor = tstart
+                        table_rows = []
+                        for rtext in rows:
+                            cells = rtext.split('\t') if rtext != '' else ['']
+                            row_cells = []
+                            cell_cursor = abs_cursor
+                            for cell_text in cells:
+                                cs = cell_cursor
+                                ce = cs + len(cell_text)
+                                # find matching recorded cell meta overlapping this region
+                                matched = None
+                                for cm in t.get('cells', []):
+                                    # simple overlap test
+                                    if not (cm.get('end') <= cs or cm.get('start') >= ce):
+                                        matched = cm
+                                        break
+                                cell_entry = {
+                                    'start': cs,
+                                    'end': ce,
+                                    'text': cell_text,
+                                    'attrs': dict(matched.get('attrs', {})) if matched else {},
+                                    'type': (matched.get('type') if matched else 'td')
+                                }
+                                row_cells.append(cell_entry)
+                                # advance by cell length plus one for tab (except last)
+                                cell_cursor = ce + 1
+                            table_rows.append(row_cells)
+                            abs_cursor += len(rtext) + 1
+                        table_entry = {'start': tstart, 'end': tend, 'attrs': t.get('attrs', {}), 'rows': table_rows, 'colgroup': t.get('colgroup', [])}
+                        tables.append(table_entry)
+                    except Exception:
+                        continue
+                if tables:
+                    meta['tables'] = tables
+            except Exception:
+                pass
             try:
                 new_full, removed = self._collapse_leading_blank_region(full)
                 if removed > 0:
@@ -1752,20 +1821,71 @@ def _convert_buffer_to_html_fragment(textArea):
                 if kind == 'table':
                     rows = [r for r in block_text.split('\n') if r is not None]
                     out_parts.append('<table>')
-                    for ridx, row in enumerate(rows):
-                        if row == '' and len(rows) == 1:
-                            continue
-                        out_parts.append('<tr>')
-                        cells = row.split('\t')
-                        # Header inference: first row only if any th tag ranges exist globally
-                        is_header_table = bool('th' in tags_by_name and tags_by_name['th'])
-                        for cell_text in cells:
-                            cell_text_escaped = html.escape(cell_text)
-                            if is_header_table and ridx == 0:
-                                out_parts.append(f'<th>{cell_text_escaped}</th>')
-                            else:
-                                out_parts.append(f'<td>{cell_text_escaped}</td>')
-                        out_parts.append('</tr>')
+                    # Try to enrich rendering using stored table metadata (if present)
+                    table_meta_for_span = None
+                    try:
+                        tmetas = getattr(textArea, '_tables_meta', []) or []
+                        # pick a meta that matches this table span start (best-effort)
+                        for tm in tmetas:
+                            try:
+                                if tm.get('start') == s:
+                                    table_meta_for_span = tm
+                                break
+                            except Exception:
+                                continue
+                    except Exception:
+                        table_meta_for_span = None
+
+                    if table_meta_for_span:
+                        # Use precise rows/cells with attributes
+                        for row_cells in table_meta_for_span.get('rows', []):
+                            out_parts.append('<tr>')
+                            for cell in row_cells:
+                                txt = html.escape(cell.get('text', ''))
+                                attrs = cell.get('attrs', {}) or {}
+                                typ = cell.get('type', 'td')
+                                attr_str = ''
+                                # support common attributes: colspan, rowspan, align
+                                if 'colspan' in attrs and str(attrs.get('colspan')).strip():
+                                    try:
+                                        attr_str += f' colspan="{int(attrs.get("colspan"))}"'
+                                    except Exception:
+                                        attr_str += f' colspan="{html.escape(str(attrs.get("colspan")))}"'
+                                if 'rowspan' in attrs and str(attrs.get('rowspan')).strip():
+                                    try:
+                                        attr_str += f' rowspan="{int(attrs.get("rowspan"))}"'
+                                    except Exception:
+                                        attr_str += f' rowspan="{html.escape(str(attrs.get("rowspan")))}"'
+                                # alignment (align or style text-align)
+                                align = attrs.get('align') or ''
+                                if not align:
+                                    style = (attrs.get('style') or '')
+                                    m = re.search(r'text-align\s*:\s*(left|right|center|justify)', style, flags=re.I) if style else None
+                                    if m:
+                                        align = m.group(1)
+                                if align:
+                                    attr_str += f' align="{html.escape(str(align))}"'
+                                if typ == 'th':
+                                    out_parts.append(f'<th{attr_str}>{txt}</th>')
+                                else:
+                                    out_parts.append(f'<td{attr_str}>{txt}</td>')
+                            out_parts.append('</tr>')
+                    else:
+                        # Fallback: simple split-based reconstruction (legacy behavior)
+                        for ridx, row in enumerate(rows):
+                            if row == '' and len(rows) == 1:
+                                continue
+                            out_parts.append('<tr>')
+                            cells = row.split('\t')
+                            # Header inference: first row only if any th tag ranges exist globally
+                            is_header_table = bool('th' in tags_by_name and tags_by_name['th'])
+                            for cell_text in cells:
+                                cell_text_escaped = html.escape(cell_text)
+                                if is_header_table and ridx == 0:
+                                    out_parts.append(f'<th>{cell_text_escaped}</th>')
+                                else:
+                                    out_parts.append(f'<td>{cell_text_escaped}</td>')
+                            out_parts.append('</tr>')
                     out_parts.append('</table>')
 
                 elif kind == 'code_block':
