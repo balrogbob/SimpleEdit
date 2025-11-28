@@ -36,6 +36,38 @@ import textwrap
 
 RECENT_MAX = 10
 
+_DEFAULT_TAG_COLORS = {
+    "number": {"fg": "#FDFD6A", "bg": ""},
+    "selfs": {"fg": "yellow", "bg": ""},
+    "variable": {"fg": "#8A2BE2", "bg": ""},
+    "decorator": {"fg": "#66CDAA", "bg": ""},
+    "class_name": {"fg": "#FFB86B", "bg": ""},
+    "constant": {"fg": "#FF79C6", "bg": ""},
+    "attribute": {"fg": "#33ccff", "bg": ""},
+    "builtin": {"fg": "#9CDCFE", "bg": ""},
+    "def": {"fg": "orange", "bg": ""},
+    "keyword": {"fg": "red", "bg": ""},
+    "string": {"fg": "#C9CA6B", "bg": ""},
+    "operator": {"fg": "#AAAAAA", "bg": ""},
+    "comment": {"fg": "#75715E", "bg": ""},
+    "todo": {"fg": "#ffffff", "bg": "#B22222"},
+    "currentLine": {"fg": "", "bg": "#222222"},
+    "trailingWhitespace": {"fg": "", "bg": "#331111"},
+    "find_match": {"fg": "white", "bg": "#444444"},
+    "marquee": {"fg": "#FF4500", "bg": ""},
+    "mark": {"fg": "", "bg": "#FFF177"},
+    "code": {"fg": "#000000", "bg": "#F5F5F5"},
+    "kbd": {"fg": "#000000", "bg": "#F5F5F5"},
+    "sub": {"fg": "", "bg": ""},
+    "sup": {"fg": "", "bg": ""},
+    "small": {"fg": "", "bg": ""},
+    # HTML element/attribute colors
+    "html_tag": {"fg": "#569CD6", "bg": ""},            # element names
+    "html_attr": {"fg": "#9CDCFE", "bg": ""},           # attribute names
+    "html_attr_value": {"fg": "#CE9178", "bg": ""},     # attribute values (strings)
+    "html_comment": {"fg": "#6A9955", "bg": ""}         # HTML comments
+}
+
 DEFAULT_CONFIG = {
     'Section1': {
         'fontName': 'consolas',
@@ -367,6 +399,72 @@ class _SimpleHTMLToTagged(HTMLParser):
         except Exception:
             return f"<{tag} />"
 
+    # ---- Added: language extraction helpers & fenced splitter ---- 
+    def _lang_from_attrs(self, attrs) -> str | None:
+        try:
+            attrd = dict(attrs or {})
+            vals = []
+            cls = attrd.get('class') or ''
+            for part in re.split(r'[\s,]+', cls.lower()):
+                if part.startswith('language-'):
+                    vals.append(part.split('-', 1)[1])
+                elif part.startswith('lang-'):
+                    vals.append(part.split('-', 1)[1])
+                elif part in ('python','json','html','markdown','md','javascript','js','c','cpp','c++'):
+                    vals.append(part)
+            for k in ('data-lang','lang','type'):
+                v = (attrd.get(k) or '').lower()
+                if v:
+                    if k == 'type':
+                        m = re.search(r'(python|json|html|markdown|javascript|js|c\+\+|cpp|c)', v)
+                        if m:
+                            vals.append(m.group(1))
+                    else:
+                        vals.append(v)
+            if not vals:
+                return None
+            for v in vals:
+                if v == 'md': return 'markdown'
+                if v in ('js','javascript'): return 'javascript'
+                if v in ('c++','cpp'): return 'cpp'
+                return v
+            return None
+        except Exception:
+            return None
+
+    def _split_fenced_segments(self, raw_code: str):
+        """
+        Split code into segments by ```lang or '''lang fences.
+        Returns list of {'lang': <str|None>, 'text': <str>}
+        """
+        segments = []
+        pos = 0
+        L = len(raw_code)
+        fence_open = re.compile(r'^(?:```|\'\'\')\s*([A-Za-z0-9_+\-]+)?\s*$', re.MULTILINE)
+        while pos < L:
+            m = fence_open.search(raw_code, pos)
+            if not m:
+                segments.append({'lang': None, 'text': raw_code[pos:]})
+                break
+            start_line = m.start()
+            if start_line > pos:
+                segments.append({'lang': None, 'text': raw_code[pos:start_line]})
+            lang_token = (m.group(1) or '').lower() if m.group(1) else None
+            if lang_token == 'md': lang_token = 'markdown'
+            if lang_token in ('js','javascript'): lang_token = 'javascript'
+            if lang_token in ('c++','cpp'): lang_token = 'cpp'
+            fence_seq = raw_code[m.start():m.end()]
+            fence_kind = '```' if fence_seq.startswith('```') else "'''"
+            close_re = re.compile(rf'^{re.escape(fence_kind)}\s*$', re.MULTILINE)
+            search_from = m.end()
+            m_close = close_re.search(raw_code, search_from)
+            if not m_close:
+                segments.append({'lang': lang_token, 'text': raw_code[m.start():]})
+                break
+            inner = raw_code[search_from:m_close.start()]
+            segments.append({'lang': lang_token, 'text': inner})
+            pos = m_close.end()
+        return segments
     def handle_starttag(self, tag, attrs):
         try:
             tag = (tag or '').lower()
@@ -400,7 +498,9 @@ class _SimpleHTMLToTagged(HTMLParser):
                 return
             # Enter code/pre capture (outermost) — do not emit literal tags
             if tag in ('code', 'pre'):
-                self.stack.append(['__code__', self.pos, [], 0])
+                 # Added language hint capture
+                lang_hint = self._lang_from_attrs(attrs)
+                self.stack.append(['__code__', self.pos, [], 0, lang_hint])
                 return
 
             attrd = dict(attrs or {})
@@ -624,34 +724,19 @@ class _SimpleHTMLToTagged(HTMLParser):
                     return
                 fragments = item[2] if len(item) > 2 else []
                 raw_code = ''.join(fragments) if fragments else ''
-
-                # Fenced multi-lang segmentation
-                fence_open_re = re.compile(r"'''[ \t]*([A-Za-z]+)\b[ \t]*")
-                recognized = {'python', 'html', 'markdown', 'md', 'json'}
-                segments = []
-                pos = 0
-                L = len(raw_code)
-                while pos < L:
-                    m = fence_open_re.search(raw_code, pos)
-                    if not m:
-                        if pos < L:
-                            segments.append({'lang': None, 'text': raw_code[pos:]})
-                        break
-                    if m.start() > pos:
-                        segments.append({'lang': None, 'text': raw_code[pos:m.start()]})
-                    lang_token = m.group(1).lower()
-                    lang_norm = 'markdown' if lang_token == 'md' else lang_token
-                    content_start = m.end()
-                    close_idx = raw_code.find("'''", content_start)
-                    if close_idx == -1:
-                        segments.append({'lang': None, 'text': raw_code[m.start():]})
-                        break
-                    inner = raw_code[content_start:close_idx]
-                    if lang_norm in recognized:
-                        segments.append({'lang': lang_norm, 'text': inner})
-                    else:
-                        segments.append({'lang': None, 'text': inner})
-                    pos = close_idx + 3
+                # New: unified fenced parsing (``` / '''), attribute lang, heuristic fallback
+                lang_hint = item[4] if len(item) > 4 else None
+                segments = self._split_fenced_segments(raw_code)
+                # If no fenced langs, apply attribute hint globally
+                if lang_hint and all(seg['lang'] is None for seg in segments):
+                    for seg in segments:
+                        seg['lang'] = lang_hint
+                # Heuristic fallback if still none
+                if all(seg['lang'] is None for seg in segments):
+                    guess = self._heuristic_guess_lang(raw_code) if hasattr(self, '_heuristic_guess_lang') else None
+                    if guess:
+                        for seg in segments:
+                            seg['lang'] = guess
 
                 # Build rendered block: newline + 4-space indent + wrapped/padded lines
                 width = 60
@@ -1001,6 +1086,10 @@ class _SimpleHTMLToTagged(HTMLParser):
             self._cb_html(text, base_off)
         elif lang == 'markdown':
             self._cb_markdown(text, base_off)
+        elif lang in ('javascript','js'):
+            self._cb_javascript(text, base_off)
+        elif lang in ('c','cpp'):
+            self._cb_c(text, base_off)
 
     def _cb_add(self, tag: str, s: int, e: int):
         if e > s:
@@ -1079,6 +1168,74 @@ class _SimpleHTMLToTagged(HTMLParser):
                 self._cb_add('cb_string', base + m.start(1), base + m.end(1))
         except Exception:
             pass
+
+    # Added JavaScript tokenizer
+    def _cb_javascript(self, text: str, base: int):
+        try:
+            kw = ('function','return','var','let','const','if','else','for','while','switch','case',
+                  'break','continue','new','class','extends','import','from','export','default','try',
+                  'catch','finally','throw','async','await','this','null','true','false')
+            kw_re = re.compile(r'\b(' + '|'.join(map(re.escape, kw)) + r')\b')
+            str_re = re.compile(r'("([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\'|`[^`]*`)')
+            com_re = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/')
+            num_re = re.compile(r'\b\d+(?:\.\d+)?\b')
+            protected = []
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end()); protected.append((base + m.start(), base + m.end()))
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end()); protected.append((base + m.start(), base + m.end()))
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            for m in kw_re.finditer(text):
+                s, e = base + m.start(), base + m.end()
+                if not any(not (e <= ps or s >= pe) for ps, pe in protected):
+                    self._cb_add('cb_keyword', s, e)
+        except Exception:
+            pass
+
+    # Added C / C++ minimal tokenizer
+    def _cb_c(self, text: str, base: int):
+        try:
+            kw = ('int','char','float','double','struct','typedef','return','if','else','for','while',
+                  'switch','case','break','continue','static','const','void','class','public','private',
+                  'protected','virtual','template','enum','union','sizeof')
+            kw_re = re.compile(r'\b(' + '|'.join(map(re.escape, kw)) + r')\b')
+            com_re = re.compile(r'//[^\n]*|/\*[\s\S]*?\*/')
+            str_re = re.compile(r'"([^"\\]|\\.)*"')
+            num_re = re.compile(r'\b\d+(?:\.\d+)?\b')
+            protected = []
+            for m in str_re.finditer(text):
+                self._cb_add('cb_string', base + m.start(), base + m.end()); protected.append((base + m.start(), base + m.end()))
+            for m in com_re.finditer(text):
+                self._cb_add('cb_comment', base + m.start(), base + m.end()); protected.append((base + m.start(), base + m.end()))
+            for m in num_re.finditer(text):
+                self._cb_add('cb_number', base + m.start(), base + m.end())
+            for m in kw_re.finditer(text):
+                s, e = base + m.start(), base + m.end()
+                if not any(not (e <= ps or s >= pe) for ps, pe in protected):
+                    self._cb_add('cb_keyword', s, e)
+        except Exception:
+            pass
+
+    # Added simple heuristic guess (used when no fences / attrs)
+    def _heuristic_guess_lang(self, text: str) -> str | None:
+        try:
+            t = text.strip()
+            if not t:
+                return None
+            if re.search(r'^\s*{[\s\S]*:\s*["\']', t[:300]):
+                return 'json'
+            if re.search(r'\bdef\s+\w+\s*\(', t):
+                return 'python'
+            if '#include' in t:
+                return 'c'
+            if '<html' in t.lower() or '<div' in t.lower():
+                return 'html'
+            if re.search(r'\bclass\s+\w+\s*\{', t) and ';' in t:
+                return 'cpp'
+            return None
+        except Exception:
+            return None
 
 def get_hex_color(color_tuple):
     """Return a hex string from a colorchooser return value."""
@@ -1458,7 +1615,7 @@ def _convert_buffer_to_html_fragment(textArea):
         # If we have structural ranges (table | code_block | div_* | p), we slice and rebuild HTML blocks.
         structural_present = any(
             k in tags_by_name for k in (
-                'table', 'code_block',
+                'table',
                 'div', 'div_nav', 'div_content', 'p',
                 'h1','h2','h3','h4','h5','h6','hr','blockquote'
             )
@@ -1466,7 +1623,7 @@ def _convert_buffer_to_html_fragment(textArea):
         if structural_present:
             # Build a combined list of segments to render specially
             special_keys = []
-            for k in ('table','code_block','div_nav','div_content','div','p',
+            for k in ('table','div_nav','div_content','div','p',
                       'h1','h2','h3','h4','h5','h6','hr','blockquote'):
 
                 if k in tags_by_name:

@@ -30,6 +30,37 @@ from tkinter import ttk
 import tkinter.font as tkfont
 import shutil, sys, os
 
+_DEFAULT_TAG_COLORS = {
+    "number": {"fg": "#FDFD6A", "bg": ""},
+    "selfs": {"fg": "yellow", "bg": ""},
+    "variable": {"fg": "#8A2BE2", "bg": ""},
+    "decorator": {"fg": "#66CDAA", "bg": ""},
+    "class_name": {"fg": "#FFB86B", "bg": ""},
+    "constant": {"fg": "#FF79C6", "bg": ""},
+    "attribute": {"fg": "#33ccff", "bg": ""},
+    "builtin": {"fg": "#9CDCFE", "bg": ""},
+    "def": {"fg": "orange", "bg": ""},
+    "keyword": {"fg": "red", "bg": ""},
+    "string": {"fg": "#C9CA6B", "bg": ""},
+    "operator": {"fg": "#AAAAAA", "bg": ""},
+    "comment": {"fg": "#75715E", "bg": ""},
+    "todo": {"fg": "#ffffff", "bg": "#B22222"},
+    "currentLine": {"fg": "", "bg": "#222222"},
+    "trailingWhitespace": {"fg": "", "bg": "#331111"},
+    "find_match": {"fg": "white", "bg": "#444444"},
+    "marquee": {"fg": "#FF4500", "bg": ""},
+    "mark": {"fg": "", "bg": "#FFF177"},
+    "code": {"fg": "#000000", "bg": "#F5F5F5"},
+    "kbd": {"fg": "#000000", "bg": "#F5F5F5"},
+    "sub": {"fg": "", "bg": ""},
+    "sup": {"fg": "", "bg": ""},
+    "small": {"fg": "", "bg": ""},
+    # HTML element/attribute colors
+    "html_tag": {"fg": "#569CD6", "bg": ""},            # element names
+    "html_attr": {"fg": "#9CDCFE", "bg": ""},           # attribute names
+    "html_attr_value": {"fg": "#CE9178", "bg": ""},     # attribute values (strings)
+    "html_comment": {"fg": "#6A9955", "bg": ""}         # HTML comments
+}
 
 # Optional ML dependencies (wrapped so editor still runs without them)
 try:
@@ -1693,7 +1724,8 @@ def _apply_tag_configs_to_widget(tw):
             def _fg_for(tag_fallback):
                 try:
                     return _DEFAULT_TAG_COLORS.get(tag_fallback, {}).get('fg', '#000000') or '#000000'
-                except Exception:
+                except Exception as e:
+                    messagebox.showerror("shIts all FucKeD n SHiT", f"Code-block (from HTML <code>/<pre>) styling and isolated cb_* token tags: {e}")
                     return '#000000'
             tw.tag_config("cb_keyword", foreground=_fg_for("keyword"))
             tw.tag_config("cb_string", foreground=_fg_for("string"))
@@ -1703,7 +1735,8 @@ def _apply_tag_configs_to_widget(tw):
             tw.tag_config("cb_tag", foreground=_fg_for("html_tag"))
             tw.tag_config("cb_attr", foreground=_fg_for("html_attr"))
             tw.tag_config("cb_attr_value", foreground=_fg_for("html_attr_value"))
-        except Exception:
+        except Exception as e:
+            messagebox.showerror("shIts all FucKeD n SHiT", f"Code-block (from HTML <code>/<pre>) styling and isolated cb_* token tags: {e}")
             pass
 
         # Basic table/list visual styling so parsed tags are visible in editor
@@ -3325,37 +3358,6 @@ HTML_COMMENT_RE = re.compile(r'<!--([\s\S]*?)-->')
 # -------------------------
 # default tag color map (keeps same defaults as above)
 # default tag color map (explicit fg/bg for every tag)
-_DEFAULT_TAG_COLORS = {
-    "number": {"fg": "#FDFD6A", "bg": ""},
-    "selfs": {"fg": "yellow", "bg": ""},
-    "variable": {"fg": "#8A2BE2", "bg": ""},
-    "decorator": {"fg": "#66CDAA", "bg": ""},
-    "class_name": {"fg": "#FFB86B", "bg": ""},
-    "constant": {"fg": "#FF79C6", "bg": ""},
-    "attribute": {"fg": "#33ccff", "bg": ""},
-    "builtin": {"fg": "#9CDCFE", "bg": ""},
-    "def": {"fg": "orange", "bg": ""},
-    "keyword": {"fg": "red", "bg": ""},
-    "string": {"fg": "#C9CA6B", "bg": ""},
-    "operator": {"fg": "#AAAAAA", "bg": ""},
-    "comment": {"fg": "#75715E", "bg": ""},
-    "todo": {"fg": "#ffffff", "bg": "#B22222"},
-    "currentLine": {"fg": "", "bg": "#222222"},
-    "trailingWhitespace": {"fg": "", "bg": "#331111"},
-    "find_match": {"fg": "white", "bg": "#444444"},
-    "marquee": {"fg": "#FF4500", "bg": ""},
-    "mark": {"fg": "", "bg": "#FFF177"},
-    "code": {"fg": "#000000", "bg": "#F5F5F5"},
-    "kbd": {"fg": "#000000", "bg": "#F5F5F5"},
-    "sub": {"fg": "", "bg": ""},
-    "sup": {"fg": "", "bg": ""},
-    "small": {"fg": "", "bg": ""},
-    # HTML element/attribute colors
-    "html_tag": {"fg": "#569CD6", "bg": ""},            # element names
-    "html_attr": {"fg": "#9CDCFE", "bg": ""},           # attribute names
-    "html_attr_value": {"fg": "#CE9178", "bg": ""},     # attribute values (strings)
-    "html_comment": {"fg": "#6A9955", "bg": ""}         # HTML comments
-}
 
 def open_url_action():
     """Prompt for a URL, fetch it on a background thread and open parsed HTML in a tab."""
@@ -4948,6 +4950,10 @@ def _apply_template_to_widget(tw, kind: str):
     Python / JSON remain simple raw text (not marked as 'source').
     """
     try:
+        # Support additional template kinds backed by files (prefer project files when present).
+        # Known kinds: 'html', 'md'/'markdown', 'json', 'python' (existing), plus:
+        # 'rathena_npc' -> loads scripts/example_quest.npc
+        # 'rathena_yaml' -> loads templates/example_quest.yaml
         if kind == 'html':
             tpl = (
                 "<!doctype html>\n"
@@ -5050,6 +5056,139 @@ def _apply_template_to_widget(tw, kind: str):
                 "  ]\n"
                 "}\n"
             )
+        elif kind == 'rathena_npc':
+            # Prefer project file `scripts/example_quest.npc` if present; otherwise fall back to a bundled sample.
+            try:
+                base = os.path.dirname(os.path.abspath(__file__))
+                p = os.path.join(base, "templates", "example_quest.npc")
+                if os.path.isfile(p):
+                    with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                        tpl = fh.read()
+                else:
+                    tpl = (
+                        "prontera,150,150,5\tscript\tExample_Quest_NPC\t999,{\n\n"
+                        "// Example rAthena NPC quest\n"
+                        "// - Start: choose \"Start Quest\" to begin\n"
+                        "// - Objective: bring 3 apples (item id 10001)\n"
+                        "// - Claim: exchange apples for exp reward\n"
+                        "/* Multi-line comment example:\n"
+                        "   This demonstrates // and /* ... */ comment forms (both supported).\n"
+                        "*/\n\n"
+                        "mes \"[Example NPC]\"\n"
+                        "mes \"Greetings, adventurer!\"\n"
+                        "next\n"
+                        "menu \"What can I do for you?\",\n"
+                        "\"Start Quest\",\n"
+                        "\"Check Progress\",\n"
+                        "\"Claim Reward\",\n"
+                        "\"Leave\"\n\n"
+                        "switch (select)\n"
+                        "    case 1:\n"
+                        "        // start quest if not already started\n"
+                        "        if (.@eq_started == 0) {\n"
+                        "            set .@eq_started, 1\n"
+                        "            set .@apple_count, 0\n"
+                        "            mes \"Quest started: bring me 3 apples (item id 10001).\"\n"
+                        "            close\n"
+                        "        } else {\n"
+                        "            mes \"You already have the quest. Good luck!\"\n"
+                        "            close\n"
+                        "        }\n\n"
+                        "    case 2:\n"
+                        "        if (.@eq_started == 1) {\n"
+                        "            .@have = countitem(10001)\n"
+                        "            mes \"Your progress: \" + .@have + \" / 3 apples.\"\n"
+                        "        } else {\n"
+                        "            mes \"You don't have an active quest.\"\n"
+                        "        }\n"
+                        "        close\n\n"
+                        "    case 3:\n"
+                        "        if (.@eq_started == 1) {\n"
+                        "            if (countitem(10001) >= 3) {\n"
+                        "                delitem 10001,3\n"
+                        "                set .@eq_started, 0\n"
+                        "                getexp 500,500\n"
+                        "                addspiritball 10\n"
+                        "                mes \"Thank you! Here is your reward.\"\n"
+                        "            } else {\n"
+                        "                mes \"You don't have enough apples.\"\n"
+                        "            }\n"
+                        "        } else {\n"
+                        "            mes \"You have no quest to claim.\"\n"
+                        "        }\n"
+                        "        close\n\n"
+                        "    case 4:\n"
+                        "        mes \"Farewell.\"\n"
+                        "        close\n"
+                        "end\n\n"
+                        "}\n"
+                    )
+            except Exception:
+                tpl = "// rAthena NPC template (failed to load project file)\n"
+        elif kind == 'rathena_yaml':
+            try:
+                base = os.path.dirname(os.path.abspath(__file__))
+                p = os.path.join(base, "templates", "template.yml")
+                if os.path.isfile(p):
+                    with open(p, "r", encoding="utf-8", errors="replace") as fh:
+                        tpl = fh.read()
+                else:
+                    tpl = (
+                        "# Metadata template for an rAthena NPC script\n"
+                        "# Fill values and place the corresponding .npc file in your server's npc directory.\n\n"
+                        "id: example_quest_npc\n"
+                        "name: Example Quest NPC\n"
+                        "author: YourName\n"
+                        "version: 1.0.0\n"
+                        "license: MIT\n"
+                        "description: >\n"
+                        "  Simple example rAthena NPC that gives a small fetch quest: collect 3 apples (item id 10001)\n"
+                        "  and exchange them for experience and spirit balls.\n\n"
+                        "locations:\n"
+                        "  - map: prontera\n"
+                        "    x: 150\n"
+                        "    y: 150\n"
+                        "    dir: 5          # facing direction (0-7 typical)\n"
+                        "    npc_name: Example_Quest_NPC\n"
+                        "    npc_sprite_id: 999\n\n"
+                        "script:\n"
+                        "  file: scripts/example_quest.npc\n"
+                        "  entry_point: Example_Quest_NPC\n"
+                        "  language: rathena\n\n"
+                        "quest:\n"
+                        "  var_prefix: .@\n"
+                        "  variables:\n"
+                        "    eq_started:\n"
+                        "      default: 0\n"
+                        "      description: \"1 when quest started, 0 otherwise\"\n"
+                        "    apple_count:\n"
+                        "      default: 0\n"
+                        "      description: \"cached inventory count (optional)\"\n\n"
+                        "items:\n"
+                        "  objective:\n"
+                        "    id: 10001\n"
+                        "    name: \"Apple\"\n"
+                        "    count: 3\n"
+                        "  rewards:\n"
+                        "    exp:\n"
+                        "      base: 500\n"
+                        "      job: 500\n"
+                        "    items:\n"
+                        "      - id: 0\n"
+                        "        name: \"none\"\n"
+                        "    spirit_balls: 10\n\n"
+                        "events:\n"
+                        "  - name: on_talk\n"
+                        "    description: \"Handles menu, start, progress check and claim.\"\n"
+                        "  - name: on_init\n"
+                        "    description: \"Optional initialization logic (not required in the example).\"\n\n"
+                        "notes: |\n"
+                        "  - Save the .npc file to your server /npc directory and update the NPC spawn if needed.\n"
+                        "  - This YAML is intended as an authoring/metadata aid: CI, packaging, or automated deploy\n"
+                        "    tools can read this to place the script and register NPC data.\n"
+                    )
+            except Exception:
+                tpl = "# rAthena YAML template (failed to load project file)\n"
         else:  # python (default)
             tpl = (
                 "#!/usr/bin/env python3\n"
@@ -5116,7 +5255,7 @@ def _apply_template_to_widget(tw, kind: str):
         pass
 
 def create_template(kind: str, open_in_new_tab: bool = True):
-    """Create a template of `kind` ('python'|'html'|'md'|'json').
+    """Create a template of `kind` ('python'|'html'|'md'|'json'|'rAthena_NPC'|'rAthena_yaml').
 
     By default opens in a new tab. Uses `_apply_template_to_widget` for content.
     """
@@ -5126,7 +5265,9 @@ def create_template(kind: str, open_in_new_tab: bool = True):
             'html': 'New - HTML',
             'md': 'New - Markdown',
             'markdown': 'New - Markdown',
-            'json': 'New - JSON'
+            'json': 'New - JSON',
+            'rathena_npc': 'New - rAthena NPC',
+            'rathena_yaml': 'New - rAthena YAML'
         }
         kind_norm = (kind or 'python').lower()
         title = title_map.get(kind_norm, 'Untitled')
@@ -5787,6 +5928,75 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
     Returns (actions_dict, new_vars_set, new_defs_set)
     where actions_dict is mapping tag -> list of (abs_start, abs_end) offsets.
     """
+    # Select regexes and lists from transient if present (matches highlight_python_helper behavior)
+    STRING_RE_loc = STRING_RE
+    COMMENT_RE_loc = COMMENT_RE
+    NUMBER_RE_loc = NUMBER_RE
+    DECORATOR_RE_loc = DECORATOR_RE
+    CLASS_RE_loc = CLASS_RE
+    VAR_ASSIGN_RE_loc = VAR_ASSIGN_RE
+    CONSTANT_RE_loc = CONSTANT_RE
+    ATTRIBUTE_RE_loc = ATTRIBUTE_RE
+    TODO_RE_loc = TODO_RE
+    SELFS_RE_loc = SELFS_RE
+    VAR_ANNOT_RE_loc = VAR_ANNOT_RE
+    FSTRING_RE_loc = FSTRING_RE
+    DUNDER_RE_loc = DUNDER_RE
+    CLASS_BASES_RE_loc = CLASS_BASES_RE
+    KEYWORD_RE_loc = KEYWORD_RE
+    BUILTIN_RE_loc = BUILTIN_RE
+
+    try:
+        trans = None
+        try:
+            sel = editorNotebook.select()
+            if sel:
+                frame = root.nametowidget(sel)
+                trans = getattr(frame, '_transient_syntax', None)
+            else:
+                trans = getattr(root, '_transient_syntax', None)
+        except Exception:
+            trans = getattr(root, '_transient_syntax', None)
+
+        if trans:
+            # Regex overrides
+            rx = trans.get('regexes', {}) or {}
+            STRING_RE_loc = rx.get('STRING_RE', STRING_RE_loc)
+            COMMENT_RE_loc = rx.get('COMMENT_RE', COMMENT_RE_loc)
+            NUMBER_RE_loc = rx.get('NUMBER_RE', NUMBER_RE_loc)
+            DECORATOR_RE_loc = rx.get('DECORATOR_RE', DECORATOR_RE_loc)
+            CLASS_RE_loc = rx.get('CLASS_RE', CLASS_RE_loc)
+            VAR_ASSIGN_RE_loc = rx.get('VAR_ASSIGN_RE', VAR_ASSIGN_RE_loc)
+            CONSTANT_RE_loc = rx.get('CONSTANT_RE', CONSTANT_RE_loc)
+            ATTRIBUTE_RE_loc = rx.get('ATTRIBUTE_RE', ATTRIBUTE_RE_loc)
+            TODO_RE_loc = rx.get('TODO_RE', TODO_RE_loc)
+            SELFS_RE_loc = rx.get('SELFS_RE', SELFS_RE_loc)
+            VAR_ANNOT_RE_loc = rx.get('VAR_ANNOT_RE', VAR_ANNOT_RE_loc)
+            FSTRING_RE_loc = rx.get('FSTRING_RE', FSTRING_RE_loc)
+            DUNDER_RE_loc = rx.get('DUNDER_RE', DUNDER_RE_loc)
+            CLASS_BASES_RE_loc = rx.get('CLASS_BASES_RE', CLASS_BASES_RE_loc)
+
+            # Keywords / builtins (compile local)
+            try:
+                kw_list = (trans.get('keywords') or [[], KEYWORD_RE])[0]
+                if kw_list:
+                    KEYWORD_RE_loc = re.compile(r'\b(' + r'|'.join(map(re.escape, kw_list)) + r')\b')
+                else:
+                    KEYWORD_RE_loc = re.compile(r'\b\b')
+            except Exception:
+                KEYWORD_RE_loc = KEYWORD_RE
+            try:
+                bk_list = (trans.get('builtins') or [[], BUILTIN_RE])[0]
+                if bk_list:
+                    BUILTIN_RE_loc = re.compile(r'\b(' + r'|'.join(map(re.escape, bk_list)) + r')\b')
+                else:
+                    BUILTIN_RE_loc = re.compile(r'\b\b')
+            except Exception:
+                BUILTIN_RE_loc = BUILTIN_RE
+    except Exception:
+        # keep defaults on any error
+        pass
+
     actions = {
         'string': [], 'comment': [], 'number': [], 'decorator': [], 'class_name': [], 'variable': [],
         'constant': [], 'attribute': [], 'def': [], 'keyword': [], 'builtin': [], 'selfs': [], 'todo': []
@@ -5800,13 +6010,11 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
             pass
 
     try:
-        # We'll report progress in steps as we run each major pass.
-        # List of passes (name, function to run)
         protected_spans = []
 
         # Pass 1: strings
         report(2, "Scanning strings...")
-        for m in STRING_RE.finditer(content):
+        for m in STRING_RE_loc.finditer(content):
             s, e = m.span()
             actions['string'].append((s, e))
             protected_spans.append((s, e))
@@ -5814,11 +6022,11 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 2: comments and TODOs
         report(9, "Scanning comments...")
-        for m in COMMENT_RE.finditer(content):
+        for m in COMMENT_RE_loc.finditer(content):
             s, e = m.span()
             actions['comment'].append((s, e))
             protected_spans.append((s, e))
-            mm = TODO_RE.search(content, m.start(), m.end())
+            mm = TODO_RE_loc.search(content, m.start(), m.end())
             if mm:
                 ts, te = mm.span()
                 actions['todo'].append((ts, te))
@@ -5832,36 +6040,45 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 3: numbers
         report(16, "Scanning numbers...")
-        for i, m in enumerate(NUMBER_RE.finditer(content)):
+        for i, m in enumerate(NUMBER_RE_loc.finditer(content)):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['number'].append((s, e))
-            # occasionally yield progress
             if i and (i % 200) == 0:
                 report(16 + min(10, i // 200), "Scanning numbers...")
-                time.sleep(0)  # yield thread
+                time.sleep(0)
         report(22)
 
         # Pass 4: decorators
         report(23, "Scanning decorators...")
-        for m in DECORATOR_RE.finditer(content):
-            s, e = m.span(1)
+        for m in DECORATOR_RE_loc.finditer(content):
+            # prefer named group/first group when present
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['decorator'].append((s, e))
         report(27)
 
         # Pass 5: classes
         report(28, "Scanning classes...")
-        for m in CLASS_RE.finditer(content):
-            s, e = m.span(1)
+        for m in CLASS_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['class_name'].append((s, e))
         report(32)
 
         # Pass 6: variable assignments
         report(33, "Scanning variable assignments...")
-        for i, m in enumerate(VAR_ASSIGN_RE.finditer(content)):
-            s, e = m.span(1)
+        for i, m in enumerate(VAR_ASSIGN_RE_loc.finditer(content)):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['variable'].append((s, e))
             if i and (i % 200) == 0:
@@ -5871,16 +6088,22 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 7: constants ALL_CAPS
         report(42, "Scanning constants...")
-        for m in CONSTANT_RE.finditer(content):
-            s, e = m.span(1)
+        for m in CONSTANT_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['constant'].append((s, e))
         report(46)
 
         # Pass 8: attributes (a.b -> tag 'b')
         report(47, "Scanning attributes...")
-        for i, m in enumerate(ATTRIBUTE_RE.finditer(content)):
-            s, e = m.span(1)
+        for i, m in enumerate(ATTRIBUTE_RE_loc.finditer(content)):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['attribute'].append((s, e))
             if i and (i % 500) == 0:
@@ -5890,20 +6113,20 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 9: dunder names
         report(56, "Scanning dunder names...")
-        for m in DUNDER_RE.finditer(content):
+        for m in DUNDER_RE_loc.finditer(content):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['def'].append((s, e))
         report(60)
 
-        # Pass 10: f-strings (tag whole)
+        # Pass 10: f-strings (kept for Python; harmless otherwise)
         report(61, "Scanning f-strings...")
-        for m in FSTRING_RE.finditer(content):
+        for m in FSTRING_RE_loc.finditer(content):
             s, e = m.span()
-            # already tagged as "string"; we keep for completeness
+            # Already included in 'string', no extra tagging needed here.
         report(64)
 
-        # Pass 11: defs discovery and marking
+        # Pass 11: defs discovery (python-specific heuristic preserved)
         report(65, "Discovering defs...")
         try:
             DEF_RE = re.compile(r'(?m)^[ \t]*def\s+([A-Za-z_]\w*)\s*\(')
@@ -5931,14 +6154,14 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 13: keywords and builtins
         report(77, "Scanning keywords and builtins...")
-        for i, m in enumerate(KEYWORD_RE.finditer(content)):
+        for i, m in enumerate(KEYWORD_RE_loc.finditer(content)):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['keyword'].append((s, e))
             if i and (i % 1000) == 0:
                 report(77 + min(8, i // 1000), "Scanning keywords...")
                 time.sleep(0)
-        for i, m in enumerate(BUILTIN_RE.finditer(content)):
+        for i, m in enumerate(BUILTIN_RE_loc.finditer(content)):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['builtin'].append((s, e))
@@ -5949,7 +6172,7 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 14: selfs/attributes highlight
         report(89, "Scanning self/attributes...")
-        for m in SELFS_RE.finditer(content):
+        for m in SELFS_RE_loc.finditer(content):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 actions['selfs'].append((s, e))
@@ -5957,7 +6180,7 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
 
         # Pass 15: variables discovered across full file
         report(91, "Collecting variables...")
-        new_vars = {m.group(1) for m in VAR_ASSIGN_RE.finditer(content)}
+        new_vars = {m.group(1) for m in VAR_ASSIGN_RE_loc.finditer(content)}
         report(93)
 
         # Pass 16: include persisted buffers
@@ -5982,7 +6205,6 @@ def _bg_full_scan_and_collect(content, progress_callback=None):
                 pass
         report(98)
 
-        # Finalize
         report(100, "Done, please wait while highlighting is applied")
         return actions, new_vars, new_defs
     except Exception:
@@ -7139,6 +7361,8 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
         ATTRIBUTE_RE_loc = trans['regexes'].get('ATTRIBUTE_RE') if (trans and 'ATTRIBUTE_RE' in trans.get('regexes', {})) else ATTRIBUTE_RE
         DUNDER_RE_loc = trans['regexes'].get('DUNDER_RE') if (trans and 'DUNDER_RE' in trans.get('regexes', {})) else DUNDER_RE
         FSTRING_RE_loc = trans['regexes'].get('FSTRING_RE') if (trans and 'FSTRING_RE' in trans.get('regexes', {})) else FSTRING_RE
+        TODO_RE_loc = trans['regexes'].get('TODO_RE') if (trans and 'TODO_RE' in trans.get('regexes', {})) else TODO_RE
+        SELFS_RE_loc = trans['regexes'].get('SELFS_RE') if (trans and 'SELFS_RE' in trans.get('regexes', {})) else SELFS_RE
 
         # keywords/builtins
         KEYWORD_RE_loc = trans['keywords'][1] if (trans and trans.get('keywords')) else KEYWORD_RE
@@ -7147,12 +7371,10 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
         # determine region to scan (visible region by default)
         if scan_start is None or scan_end is None:
             try:
-                # compute visible viewport lines and add a small padding margin
                 first_visible = textArea.index('@0,0')
                 last_visible = textArea.index(f'@0,{textArea.winfo_height()}')
                 start_line = int(first_visible.split('.')[0])
                 end_line = int(last_visible.split('.')[0])
-                # add small padding of a couple lines to give context
                 start_line = max(1, start_line - 2)
                 end_line = end_line + 2
                 start = f'{start_line}.0'
@@ -7164,7 +7386,6 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
             start = scan_start
             end = scan_end
 
-        # content for region and absolute char offset of region start
         content = textArea.get(start, end)
         base_offset = 0
         if start != "1.0":
@@ -7179,18 +7400,18 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
             except Exception:
                 pass
 
-        protected_spans = []  # keep (s, e) offsets relative to content for strings/comments
+        protected_spans = []
 
         # strings and comments first -- protect their spans
-        for m in STRING_RE.finditer(content):
+        for m in STRING_RE_loc.finditer(content):
             s, e = m.span()
             textArea.tag_add("string", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
             protected_spans.append((s, e))
-        for m in COMMENT_RE.finditer(content):
+        for m in COMMENT_RE_loc.finditer(content):
             s, e = m.span()
             textArea.tag_add("comment", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
             protected_spans.append((s, e))
-            mm = TODO_RE.search(content, m.start(), m.end())
+            mm = TODO_RE_loc.search(content, m.start(), m.end())
             if mm:
                 ts, te = mm.span()
                 textArea.tag_add("todo", f"1.0 + {base_offset + ts}c", f"1.0 + {base_offset + te}c")
@@ -7248,55 +7469,66 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
             pass
 
         # numbers
-        for m in NUMBER_RE.finditer(content):
+        for m in NUMBER_RE_loc.finditer(content):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("number", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
         # decorators
-        for m in DECORATOR_RE.finditer(content):
-            s, e = m.span(1)
+        for m in DECORATOR_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("decorator", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
         # classes
-        for m in CLASS_RE.finditer(content):
-            s, e = m.span(1)
+        for m in CLASS_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("class_name", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
-        # variable assignments (first non-whitespace word on a line)
-        for m in VAR_ASSIGN_RE.finditer(content):
-            s, e = m.span(1)
+        # variable assignments
+        for m in VAR_ASSIGN_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("variable", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
-        # constants ALL_CAPS
-        for m in CONSTANT_RE.finditer(content):
-            s, e = m.span(1)
+        # constants
+        for m in CONSTANT_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("constant", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
-        # attribute names (a.b -> tag 'b')
-        for m in ATTRIBUTE_RE.finditer(content):
-            s, e = m.span(1)
+        # attribute names
+        for m in ATTRIBUTE_RE_loc.finditer(content):
+            try:
+                s, e = m.span(1)
+            except Exception:
+                s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("attribute", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
-        for m in DUNDER_RE.finditer(content):
+        # dunders
+        for m in DUNDER_RE_loc.finditer(content):
             s, e = m.span()
-            textArea.tag_add("def", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
-        for m in FSTRING_RE.finditer(content):
+            if not overlaps_protected(s, e):
+                textArea.tag_add("def", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+
+        # f-strings
+        for m in FSTRING_RE_loc.finditer(content):
             s, e = m.span()
-            # tag entire fstring as "string" already covered; then highlight expressions in braces
-            ftext = m.group(0)
-            for be in re.finditer(r'\{([^}]+)\}', ftext):
-                expr_s = s + be.start(1)
-                expr_e = s + be.end(1)
-                # if you want to treat inner expression with keywords/builtins:
-                sub = content[expr_s:expr_e]
-                # small heuristic: run keyword/builtin regex on sub and tag matches (or tag whole expr)
-                textArea.tag_add("string", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+            # already tagged as string; keep behavior (no extra tag)
 
         # dynamic defs (existing behaviour)
         global match_string
@@ -7308,14 +7540,20 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                     textArea.tag_add("def", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
         # keywords and builtins
-        for m in KEYWORD_RE.finditer(content):
+        for m in KEYWORD_RE_loc.finditer(content):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("keyword", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
-        for m in BUILTIN_RE.finditer(content):
+        for m in BUILTIN_RE_loc.finditer(content):
             s, e = m.span()
             if not overlaps_protected(s, e):
                 textArea.tag_add("builtin", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
+
+        # selfs
+        for m in SELFS_RE_loc.finditer(content):
+            s, e = m.span()
+            if not overlaps_protected(s, e):
+                textArea.tag_add("selfs", f"1.0 + {base_offset + s}c", f"1.0 + {base_offset + e}c")
 
         # selfs/attributes highlight (include 'after' as requested)
         for m in SELFS_RE.finditer(content):
@@ -7775,7 +8013,7 @@ def manual_detect_syntax(force: bool = False):
         # get current buffer prefix (safe and cheap)
         try:
             # prefer per-tab widget if available
-            snippet = textArea.get("1.0", "1.0 + 2048c")
+            snippet = textArea.get("1.0", "1.0 + 16384c")
         except Exception:
             snippet = ""
         if not snippet:
@@ -8705,6 +8943,8 @@ try:
     templates_menu.add_command(label='HTML', command=lambda: create_template('html', open_in_new_tab=True))
     templates_menu.add_command(label='Markdown', command=lambda: create_template('md', open_in_new_tab=True))
     templates_menu.add_command(label='JSON', command=lambda: create_template('json', open_in_new_tab=True))
+    templates_menu.add_command(label='rAthena NPC', command=lambda: create_template('rathena_npc', open_in_new_tab=True))
+    templates_menu.add_command(label='rAthena DB', command=lambda: create_template('rathena_yaml', open_in_new_tab=True))
     templatesBtn.config(menu=templates_menu)
     templatesBtn.pack(side=RIGHT, padx=2, pady=2)
 except Exception:

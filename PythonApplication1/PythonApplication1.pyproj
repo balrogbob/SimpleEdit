@@ -47,18 +47,33 @@
   <ItemGroup>
     <Folder Include="out\" />
     <Folder Include="syntax\" />
+    <Folder Include="templates\" />
     <Folder Include="worker_logs\" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="atcommands.txt" />
+    <Content Include="effect_list.md" />
+    <Content Include="mapflags.txt" />
     <Content Include="out\ckpt.pt">
       <Publish>True</Publish>
     </Content>
+    <Content Include="permissions.txt" />
+    <Content Include="quest_variables.txt" />
     <Content Include="requirements.txt" />
+    <Content Include="script_commands.txt" />
+    <Content Include="syntax\c.ini" />
+    <Content Include="syntax\cpp.ini" />
+    <Content Include="syntax\csharp.ini" />
     <Content Include="syntax\html_dark.ini" />
     <Content Include="syntax\html_light.ini" />
     <Content Include="syntax\json.ini" />
     <Content Include="syntax\markdown.ini" />
     <Content Include="syntax\python.ini" />
+    <Content Include="syntax\rathena.ini" />
+    <Content Include="syntax\xml.ini" />
+    <Content Include="syntax\yaml.ini" />
+    <Content Include="syntax\yaml_header.ini" />
+    <Content Include="templates\quest_db.yml" />
     <Content Include="worker_logs\syntax_worker_19916.stderr.log" />
     <Content Include="worker_logs\syntax_worker_19916.worker.log" />
     <Content Include="worker_logs\syntax_worker_24880.stderr.log" />
