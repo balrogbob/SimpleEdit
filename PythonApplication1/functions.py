@@ -1718,8 +1718,10 @@ def _strip_whitespace_between_tags(html: str) -> str:
     """
     Return a copy of `html` with all inter-tag whitespace removed (">   <" -> "><"),
     while preserving content inside sensitive tags (script/style/pre/code).
-    Also ensure anchor tags are separated by two spaces from adjacent tags so
-    link parsing doesn't merge adjacent anchors into a single malformed link.
+
+    Additionally: trim/collapse leading/trailing/layout whitespace inside
+    <a>...</a> anchor labels so generators that emit lots of indentation/newlines
+    between the anchor tags do not confuse downstream link parsing.
     """
     try:
         if not isinstance(html, str) or html == '':
@@ -1742,20 +1744,47 @@ def _strip_whitespace_between_tags(html: str) -> str:
         # This collapses newlines/tabs/spaces used for pretty-printing.
         working = re.sub(r'>\s+<', '><', working)
 
-        # Also remove leading/trailing whitespace between adjacent tags (e.g. at start/end)
-        # (safe because we restored protected blocks later)
+        # Trim excessive leading/trailing whitespace around whole document tag edges
         working = re.sub(r'^\s+<', '<', working)
         working = re.sub(r'>\s+$', '>', working)
 
-        # Ensure anchors don't run together: add two spaces before opening <a and after closing </a>
-        # Use case-insensitive, whitespace-tolerant patterns to be robust.
+        # --- NEW: Normalize anchor inner HTML ---
+        # For each <a ...>...</a> remove leading/trailing layout whitespace inside the anchor,
+        # and collapse runs of whitespace in text nodes to single spaces while preserving any inline tags.
         try:
-            # Add two spaces before an opening <a (e.g. "...><a" -> "...>  <a")
-            working = re.sub(r'>\s*<\s*(a\b)', r'>  <\1', working, flags=re.I)
-            # Add two spaces after a closing </a> when immediately followed by another tag (e.g. "</a><" -> "</a>  <")
-            working = re.sub(r'</\s*a\s*>\s*<', '</a>  <', working, flags=re.I)
+            anchor_re = re.compile(r'(?is)<a\b([^>]*)>(.*?)</a\s*>')
+
+            def _trim_anchor_inner(m):
+               # full = m.group(0)
+                inner = m.group(2) or ''
+                # If inner is only whitespace -> empty
+                if inner.strip() == '':
+                    new_inner = ''
+                else:
+                    # Split into tags and text so we only collapse whitespace in text nodes
+                    parts = re.split(r'(<[^>]+>)', inner)
+                    for i, p in enumerate(parts):
+                        if not p:
+                            continue
+                        if p.startswith('<'):
+                            # keep tags untouched
+                            continue
+                        # collapse any whitespace run to single space in text nodes
+                        parts[i] = re.sub(r'\s+', ' ', p)
+                    new_inner = ''.join(parts).strip()
+                # Reconstruct by replacing the original inner region inside the full match
+                # compute opening/closing segments relative to the match
+                return f"<a{m.group(1)}>{new_inner}</a>"
+
+            working = anchor_re.sub(_trim_anchor_inner, working)
         except Exception:
-            # don't fail on weird inputs; keep best-effort spacing
+            # best-effort: if anything goes wrong leave anchors as-is
+            pass
+
+        # Small spacing safety so adjacent anchors remain separated when tags were collapsed
+        try:
+            working = re.sub(r'</\s*a\s*>\s*<\s*a\b', '</a>  <a', working, flags=re.I)
+        except Exception:
             pass
 
         # Restore preserved blocks
@@ -1773,6 +1802,10 @@ def _parse_html_and_apply(raw) -> tuple[str, dict]:
     Pre-process the HTML by removing whitespace between tags (while preserving
     script/style/pre/code contents). Returns (plain_text, meta) where meta
     contains at least 'tags' and includes 'prochtml' (the processed HTML).
+
+    Post-process anchors from `prochtml` to robustly map multiple anchors per
+    line into distinct hyperlink ranges in the produced `plain` text. This
+    avoids adjacent-anchor merging issues from earlier passes.
     """
     try:
         m = re.search(r'<body[^>]*>(.*)</body>', raw, flags=re.DOTALL | re.IGNORECASE)
@@ -1799,6 +1832,93 @@ def _parse_html_and_apply(raw) -> tuple[str, dict]:
             meta['raw_fragment'] = raw_fragment
             meta['prochtml'] = prochtml
         except Exception:
+            pass
+
+        # --- NEW: Robust anchor remapping based on prochtml -> plain
+        # This guarantees each <a ...>...</a> in the processed HTML yields a
+        # separate entry in meta['links'] and a corresponding non-overlapping
+        # 'hyperlink' range in meta['tags'] even when anchors sit adjacent.
+        try:
+            # Helper: extract anchors from prochtml (preserving order)
+            anchors = []
+            for m_a in re.finditer(r'(?is)<a\b([^>]*)>(.*?)</a\s*>', prochtml):
+                try:
+                    attrstr = m_a.group(1) or ''
+                    inner_html = m_a.group(2) or ''
+                    # find href and title (best-effort)
+                    href = None
+                    title = None
+                    ah = re.search(r'href\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))', attrstr, flags=re.I)
+                    if ah:
+                        href = ah.group(1) or ah.group(2) or ah.group(3)
+                    th = re.search(r'title\s*=\s*(?:"([^"]+)"|\'([^\']+)\'|([^\s>]+))', attrstr, flags=re.I)
+                    if th:
+                        title = th.group(1) or th.group(2) or th.group(3)
+                    # strip inner tags to get visible text
+                    visible = re.sub(r'<[^>]+>', '', inner_html)
+                    visible = html.unescape(visible or '')
+                    visible_norm = re.sub(r'\s+', ' ', visible).strip()
+                    anchors.append({'href': href, 'title': title, 'visible': visible, 'visible_norm': visible_norm})
+                except Exception:
+                    continue
+
+            if anchors:
+                new_links = []
+                new_hyper_ranges = []
+                # Walk anchors sequentially and locate their visible text in `plain`.
+                # Use a moving search start so repeated identical link texts map in order.
+                search_pos = 0
+                plain_for_search = plain or ''
+                for a in anchors:
+                    vn = a.get('visible_norm', '') or ''
+                    if not vn:
+                        # If no visible text (e.g. image-only link) try to locate small token or skip
+                        # fallback: attempt to find an empty boundary near search_pos
+                        # skip mapping if we can't reasonably locate text
+                        continue
+                    # Build a flexible regex from normalized visible text: allow arbitrary whitespace in source
+                    esc = re.escape(vn)
+                    esc = esc.replace(r'\ ', r'\s+')
+                    rx = re.compile(esc)
+                    m_found = rx.search(plain_for_search, search_pos)
+                    if not m_found:
+                        # try a looser exact substring search (fallback)
+                        idx = plain_for_search.find(vn, search_pos)
+                        if idx >= 0:
+                            s_idx = idx
+                            e_idx = idx + len(vn)
+                        else:
+                            # as a last resort, try from beginning
+                            m_found = rx.search(plain_for_search)
+                            if m_found:
+                                s_idx, e_idx = m_found.span()
+                            else:
+                                continue
+                    else:
+                        s_idx, e_idx = m_found.span()
+
+                    # Accept and record
+                    try:
+                        link_rec = {'start': int(s_idx), 'end': int(e_idx), 'href': a.get('href'), 'title': a.get('title') or None}
+                        new_links.append(link_rec)
+                        new_hyper_ranges.append([int(s_idx), int(e_idx)])
+                        search_pos = e_idx
+                    except Exception:
+                        continue
+
+                # Merge with any pre-existing non-anchor links (e.g., markdown-links) safely:
+                existing_meta_links = list(meta.get('links') or [])
+                # prefer mapped anchors first (they correspond to literal <a> elements)
+                combined_links = new_links + [l for l in existing_meta_links if not any((l.get('start') == nl.get('start') and l.get('end') == nl.get('end')) for nl in new_links)]
+                # update meta and parser structures
+                meta['links'] = combined_links
+                tags = meta.get('tags') or {}
+                # replace/merge hyperlink tag ranges
+                if new_hyper_ranges:
+                    tags['hyperlink'] = new_hyper_ranges
+                    meta['tags'] = tags
+        except Exception:
+            # best-effort: if mapping fails, keep parser's original hrefs
             pass
 
         return plain, meta

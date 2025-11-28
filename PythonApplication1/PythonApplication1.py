@@ -1005,7 +1005,8 @@ root.geometry("800x600")
 root.title('SimpleEdit')
 root.fileName = ""
 font_family_var = StringVar(value=config.get("Section1", "fontName", fallback=fontName))
-font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback=str(fontSize))))
+# Safe fallback here too to avoid referencing `fontSize` before it's defined.
+font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback='12')))
 
 menuBar = Menu(root)
 root.config(menu=menuBar)
@@ -2876,6 +2877,231 @@ def _configure_text_widget(tw):
         tw.bind('<Button-3>', _on_text_right_click, add=True)
     except Exception:
         pass
+wordWrapVar = IntVar(value=config.getboolean("Section1", "wordWrap", fallback=False))
+
+def _apply_wordwrap_to_widget(tw: Text):
+    """Apply current word-wrap setting to a Text widget (word vs none)."""
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+        wrap_mode = 'none' if wordWrapVar.get() else 'word'
+        try:
+            tw.config(wrap=wrap_mode)
+        except Exception:
+            pass
+        # When wrap changes, horizontal scrollbar visibility may change.
+        try:
+            _update_hscroll_visibility(tw)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+# -------------------------
+# View / UI toggles & zoom
+# -------------------------
+# Persisted defaults (loaded from config where appropriate)
+showLineNumbersDefault = config.getboolean("Section1", "showLineNumbers", fallback=True)
+showStatusBarDefault = config.getboolean("Section1", "showStatusBar", fallback=True)
+showToolbarDefault = config.getboolean("Section1", "showToolbar", fallback=True)
+showPresentToolbarDefault = config.getboolean("Section1", "showPresentToolBar", fallback=True)
+
+# Per-process control vars bound to menu items (integers used for checkbuttons)
+showStatusBarVar = IntVar(value=1 if showStatusBarDefault else 0)
+showToolbarVar = IntVar(value=1 if showToolbarDefault else 0)
+showPresentToolbarVar = IntVar(value=1 if showPresentToolbarDefault else 0)
+
+def _apply_line_numbers_visibility_for_frame(frame, visible: bool):
+    """Show or hide the left gutter Canvas for one tab frame."""
+    try:
+        ln = getattr(frame, 'lineNumbersCanvas', None)
+        if not ln:
+            return
+        # track on frame so per-tab state persists while tab exists
+        try:
+            frame._line_numbers_visible = bool(visible)
+        except Exception:
+            pass
+        if visible:
+            if not ln.winfo_ismapped():
+                try:
+                    ln.pack(side=LEFT, fill=Y)
+                except Exception:
+                    pass
+        else:
+            if ln.winfo_ismapped():
+                try:
+                    ln.pack_forget()
+                except Exception:
+                    pass
+        try:
+            _draw_line_numbers_for(frame)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _toggle_line_numbers_for_current_tab():
+    """Toggle line numbers visibility for currently selected tab (per-tab)."""
+    try:
+        sel = editorNotebook.select()
+        if not sel:
+            return
+        frame = root.nametowidget(sel)
+        cur = bool(getattr(frame, '_line_numbers_visible', showLineNumbersDefault))
+        _apply_line_numbers_visibility_for_frame(frame, not cur)
+    except Exception:
+        pass
+
+def _set_statusbar_visible(visible: bool):
+    """Show/hide the bottom statusFrame and persist choice."""
+    try:
+        if visible:
+            if not statusFrame.winfo_ismapped():
+                statusFrame.pack(side=BOTTOM, fill=X)
+        else:
+            if statusFrame.winfo_ismapped():
+                statusFrame.pack_forget()
+        showStatusBarVar.set(1 if visible else 0)
+        config.set("Section1", "showStatusBar", str(bool(visible)))
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _on_toggle_statusbar():
+    try:
+        _set_statusbar_visible(bool(showStatusBarVar.get()))
+    except Exception:
+        pass
+
+def _set_top_toolbar_visible(visible: bool):
+    """Show/hide the primary top toolbar container (topBarContainer)."""
+    try:
+        if visible:
+            if not topBarContainer.winfo_ismapped():
+                # pack above the notebook so it occupies top region
+                topBarContainer.pack(side=TOP, fill=X, before=editorNotebook)
+        else:
+            if topBarContainer.winfo_ismapped():
+                topBarContainer.pack_forget()
+        showToolbarVar.set(1 if visible else 0)
+        config.set("Section1", "showToolbar", str(bool(visible)))
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _on_toggle_top_toolbar():
+    try:
+        _set_top_toolbar_visible(bool(showToolbarVar.get()))
+    except Exception:
+        pass
+
+def _set_present_toolbar_visible(visible: bool):
+    """Show/hide the presentational toolbar (presentToolBar)."""
+    try:
+        if visible:
+            if not presentToolBar.winfo_ismapped():
+                # Ensure presentToolBar is packed under topBarContainer
+                presentToolBar.pack(side=TOP, fill=X)
+        else:
+            if presentToolBar.winfo_ismapped():
+                presentToolBar.pack_forget()
+        showPresentToolbarVar.set(1 if visible else 0)
+        config.set("Section1", "showPresentToolBar", str(bool(visible)))
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _on_toggle_present_toolbar():
+    try:
+        _set_present_toolbar_visible(bool(showPresentToolbarVar.get()))
+    except Exception:
+        pass
+
+
+def _change_global_font_size(delta: int):
+    """Adjust global editor font size by delta (positive/negative) and apply to all widgets."""
+    try:
+        saveZoomVar = config.getboolean("Section1", "saveZoom", fallback=False)
+        global fontSize
+        fontSize = max(6, int(fontSize + delta))
+        if saveZoomVar:
+            config.set("Section1", "fontSize", str(fontSize))
+        try:
+            with open(INI_PATH, 'w') as f:
+                config.write(f)
+        except Exception:
+            pass
+        # apply new font to every Text widget and reconfigure tags that depend on fontSize
+        try:
+            for tab_id in editorNotebook.tabs():
+                try:
+                    frame = root.nametowidget(tab_id)
+                    for child in frame.winfo_children():
+                        if isinstance(child, Text):
+                            try:
+                                child.config(font=(fontName, fontSize))
+                                _apply_tag_configs_to_widget(child)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+            # also apply to global textArea if present
+            try:
+                if 'textArea' in globals() and isinstance(textArea, Text):
+                    textArea.config(font=(fontName, fontSize))
+            except Exception:
+                pass
+            # update combobox value if present
+            try:
+                font_size_var.set(str(fontSize))
+            except Exception:
+                pass
+            # refresh lightweight visuals
+            safe_highlight_event(None)
+            for tab_id in editorNotebook.tabs():
+                try:
+                    frame = root.nametowidget(tab_id)
+                    _draw_line_numbers_for(frame)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _zoom_in():
+    _change_global_font_size(+4)
+
+def _zoom_out():
+    _change_global_font_size(-4)
+
+def _zoom_reset():
+    try:
+        # Do not reference `fontSize` directly as a fallback here to avoid "used before declaration"
+        # in edge layouts where this function is defined before the module-level value is set.
+        target = int(config.get('Section1', 'fontSize', fallback='12'))
+    except Exception:
+        target = 12
+    try:
+        global fontSize
+        fontSize = target
+        _change_global_font_size(0)
+    except Exception:
+        pass
 
 def create_editor_tab(title='Untitled', content='', filename=''):
     """Create a new tab containing a Text widget and return (text_widget, frame)."""
@@ -2892,13 +3118,33 @@ def create_editor_tab(title='Untitled', content='', filename=''):
 
     # per-tab line numbers canvas (left) - use configured bg
     ln_canvas = Canvas(frame, width=40, bg=lineNumberBg, highlightthickness=0)
-    ln_canvas.pack(side=LEFT, fill=Y)
+    # Pack line number gutter only when enabled for this tab (default from config)
+    try:
+        frame.lineNumbersCanvas = ln_canvas
+        if getattr(frame, '_line_numbers_visible', None) is None:
+            # initialize per-tab flag from persisted default
+            frame._line_numbers_visible = showLineNumbersDefault
+        if frame._line_numbers_visible:
+            ln_canvas.pack(side=LEFT, fill=Y)
+    except Exception:
+        try:
+            ln_canvas.pack(side=LEFT, fill=Y)
+        except Exception:
+            pass
     frame.lineNumbersCanvas = ln_canvas
 
     # text area for this tab (center)
+    # NOTE: keep Text as a direct child of the tab frame. Placing the Text inside another
+    # container broke many helpers that locate the per-tab Text widget by iterating
+    # `frame.winfo_children()`. Keeping it direct preserves compatibility.
     tx = Text(frame)
     tx.pack(side=LEFT, fill=BOTH, expand=True)
 
+    # horizontal scrollbar (per-tab). Attach to the frame but keep it hidden by default.
+    # We keep a reference on the Text widget so _update_hscroll_visibility can toggle it.
+    hscr = Scrollbar(frame, orient=HORIZONTAL, command=tx.xview)
+    tx.configure(xscrollcommand=hscr.set)
+    tx._hscroll = hscr
     # per-tab scrollbar (right)
     # wrap the scrollbar command so scrolling also updates quick highlighting immediately
     def _scroll_cmd(*args, _tx=tx):
@@ -3487,7 +3733,11 @@ KEYWORD_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, KEYWORDS)) + r')\b')
 # short list of builtins you want highlighted (extend as needed)
 BUILTINS = ['len', 'range', 'print', 'open', 'isinstance', 'int', 'str', 'list', 'dict', 'set', 'True', 'False', 'None']
 BUILTIN_RE = re.compile(r'\b(' + r'|'.join(map(re.escape, BUILTINS)) + r')\b')
-URL_RE = re.compile(r'(?i)\b(?:https?://[^\s<>"]+|file:///[^\s<>"]+|www\.[^\s<>"]+)\b')
+URL_RE = re.compile(
+    r'(?i)(?:(?<=^)|(?<=\s)|(?<=[\(\[\{>]))'  # must be at start, after whitespace or after an opening bracket/'">'
+    r'(?:https?://[^\s<>"\)\]\}]+|file:///[^\s<>"\)\]\}]+|www\.[^\s<>"\)\]\}]+)'
+    r'(?=(?:\s|$|[.,;:!?\'"\)\]\}<>]))'        # must be followed by whitespace, end, or common punctuation/closer
+)
 HEX_COLOR_RE = re.compile(r'#([0-9A-Fa-f]{3}|[0-9A-Fa-f]{6})\b')
 STRING_RE = re.compile(r'("""[\s\S]*?"""|\'\'\'[\s\S]*?\'\'\'|"[^"\n]*"|' + r"'[^'\n]*')", re.DOTALL)
 COMMENT_RE = re.compile(r'#[^\n]*')
@@ -4824,6 +5074,94 @@ try:
 except Exception:
     pass
 
+# View menu: toggles like Word Wrap, Line Numbers, Status Bar, Toolbars and Zoom
+try:
+    viewMenu = Menu(menuBar, tearoff=False)
+    menuBar.add_cascade(label="View", menu=viewMenu)
+
+    def _on_wordwrap_toggle():
+        """Toggle persisted word-wrapping and apply to every open Text widget."""
+        try:
+            config.set("Section1", "wordWrap", str(bool(wordWrapVar.get())))
+            try:
+                with open(INI_PATH, 'w') as f:
+                    config.write(f)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Apply to all existing Text widgets (current tab + all tabs)
+        try:
+            widgets = []
+            try:
+                if 'textArea' in globals() and isinstance(globals().get('textArea'), Text):
+                    widgets.append(globals().get('textArea'))
+            except Exception:
+                pass
+            try:
+                for tab_id in editorNotebook.tabs():
+                    try:
+                        frame = root.nametowidget(tab_id)
+                        for child in frame.winfo_children():
+                            if isinstance(child, Text):
+                                widgets.append(child)
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            for tw in widgets:
+                try:
+                    _apply_wordwrap_to_widget(tw)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    viewMenu.add_checkbutton(label="Word Wrap Disabled", variable=wordWrapVar, command=_on_wordwrap_toggle)
+
+    # Line numbers (per-tab)
+    try:
+        viewMenu.add_checkbutton(label="Show Line Numbers (current tab)", command=_toggle_line_numbers_for_current_tab)
+    except Exception:
+        pass
+
+    # Status bar (global)
+    try:
+        viewMenu.add_checkbutton(label="Show Status Bar", variable=showStatusBarVar, command=_on_toggle_statusbar)
+        # apply initial visibility
+        try:
+            _set_statusbar_visible(bool(showStatusBarVar.get()))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Toolbars: primary + presentational
+    try:
+        viewMenu.add_checkbutton(label="Show Toolbar", variable=showToolbarVar, command=_on_toggle_top_toolbar)
+        viewMenu.add_checkbutton(label="Show Presentational Toolbar", variable=showPresentToolbarVar, command=_on_toggle_present_toolbar)
+        # apply initial visibility
+        try:
+            _set_top_toolbar_visible(bool(showToolbarVar.get()))
+            _set_present_toolbar_visible(bool(showPresentToolbarVar.get()))
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+    # Zoom submenu
+    try:
+        zoomMenu = Menu(viewMenu, tearoff=False)
+        zoomMenu.add_command(label="Zoom In", command=_zoom_in)
+        zoomMenu.add_command(label="Zoom Out", command=_zoom_out)
+        zoomMenu.add_separator()
+        zoomMenu.add_command(label="Reset Zoom", command=_zoom_reset)
+        viewMenu.add_cascade(label="Zoom", menu=zoomMenu)
+    except Exception:
+        pass
+except Exception:
+    pass
 def open_url_from_field():
     """Handler for toolbar Open URL button: use URL field if present, otherwise show dialog."""
     try:
@@ -5861,6 +6199,26 @@ def _apply_formatting_from_meta(meta):
                         pass
         except Exception:
             pass
+        # Schedule table padding and horizontal-scroll visibility after widget is realized.
+        # Run slightly deferred so tag ranges and widget layout have settled (prevents index mismatches).
+        try:
+            def _deferred_pad_and_hscroll():
+                try:
+                    _pad_table_columns(textArea)
+                except Exception:
+                    pass
+                try:
+                    pass #_update_hscroll_visibility(textArea)
+                except Exception:
+                    pass
+            # small delay to ensure tags/meta applied and widget geometry is stable
+            try:
+                textArea.after(50, _deferred_pad_and_hscroll)
+            except Exception:
+                # fallback: immediate best-effort call
+                _deferred_pad_and_hscroll()
+        except Exception:
+            pass
         # ensure any literal hex codes are colored as well (HTML imports may introduce them)
         try:
             color_hex_codes()
@@ -6769,6 +7127,194 @@ def _ensure_widget_tables_meta(tw):
     except Exception:
         pass
 
+def _pad_table_columns(tw: Text):
+    """Pad first-line content of shorter cells to the max column width for each table in widget.
+
+    This inserts spaces into the Text widget so columns visually align. Inserts are applied
+    from highest absolute offset to lowest so offsets remain valid during multiple inserts.
+    """
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+        metas = getattr(tw, '_tables_meta', []) or []
+        ops = []  # list of (abs_offset, text_to_insert)
+
+        for tm in metas:
+            try:
+                rows = tm.get('rows', []) or []
+                if not rows:
+                    continue
+                col_count = max((len(r) for r in rows), default=0)
+                if col_count <= 0:
+                    continue
+
+                col_max = [0] * col_count
+                for r in rows:
+                    for ci in range(col_count):
+                        try:
+                            cell = r[ci] if ci < len(r) else {'text': ''}
+                            txt = cell.get('text', '') or ''
+                            first = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                            l = len(first)
+                            if l > col_max[ci]:
+                                col_max[ci] = l
+                        except Exception:
+                            continue
+
+                for r in rows:
+                    for ci in range(col_count):
+                        try:
+                            if ci >= len(r):
+                                continue
+                            cell = r[ci]
+                            cell_text = cell.get('text', '') or ''
+                            first_line = cell_text.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                            cur_len = len(first_line)
+                            target = col_max[ci]
+                            if target <= cur_len:
+                                continue
+                            pad = target - cur_len
+                            # Prefer canonical start offset recorded by the parser/meta.
+                            # If the recorded offsets don't match the current buffer (possible if edits happened),
+                            # attempt to locate the cell's first-line inside the table region as a fallback.
+                            cell_start = int(cell.get('start', 0))
+                            abs_insert_off = None
+                            try:
+                                # quick sanity check: does widget content at recorded range equal the stored text?
+                                if cell_start >= 0:
+                                    sidx = f"1.0 + {cell_start}c"
+                                    cand = tw.get(sidx, f"1.0 + {cell_start + len(cell_text)}c")
+                                    if cand == cell_text:
+                                        # insert before internal marker when present, else before tab/end
+                                        nl_pos = (cell_text.find(IN_CELL_NL) if isinstance(cell_text, str) else -1)
+                                        insert_pos_in_cell = nl_pos if nl_pos >= 0 else len(cell_text)
+                                        abs_insert_off = cell_start + insert_pos_in_cell
+                            except Exception:
+                                abs_insert_off = None
+
+                            if abs_insert_off is None:
+                                # fallback: search for the first_line text within the table bounds
+                                try:
+                                    table_start = int(tm.get('start', 0))
+                                    table_end = int(tm.get('end', 0))
+                                    start_idx = f"1.0 + {table_start}c"
+                                    end_idx = f"1.0 + {table_end}c"
+                                    # search for the first line (trimmed) inside the table region
+                                    needle = first_line.strip()
+                                    if needle:
+                                        found = tw.search(needle, start_idx, stopindex=end_idx, nocase=False, regexp=False)
+                                        if found:
+                                            # compute offset of found index
+                                            abs_insert_off = len(tw.get('1.0', found))
+                                            # if the original cell had an internal marker, ensure insert position is before it
+                                            if IN_CELL_NL in cell_text:
+                                                # try to find marker in widget text after found
+                                                try:
+                                                    search_after = found
+                                                    rest = tw.get(search_after, end_idx)
+                                                    mpos = rest.find(IN_CELL_NL)
+                                                    if mpos >= 0:
+                                                        abs_insert_off = abs_insert_off + mpos
+                                                except Exception:
+                                                    pass
+                                    else:
+                                        # empty first-line: insert at recorded cell_start if sane
+                                        if cell_start >= 0:
+                                            abs_insert_off = cell_start
+                                except Exception:
+                                    abs_insert_off = None
+
+                            if abs_insert_off is None or abs_insert_off < 0:
+                                continue
+                            ops.append((abs_insert_off, ' ' * pad))
+
+                        except Exception:
+                            continue
+            except Exception:
+                continue
+
+        if not ops:
+            return
+
+        ops.sort(key=lambda x: x[0], reverse=True)
+        for off, txt in ops:
+            try:
+                pos = tw.index(f"1.0 + {off}c")
+                tw.insert(pos, txt)
+            except Exception:
+                pass
+
+        try:
+            safe_highlight_event(None)
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+
+def _update_hscroll_visibility(tw: Text):
+    """Show or hide the horizontal scrollbar attached to `tw` depending on content width."""
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+        hscr = getattr(tw, '_hscroll', None)
+        if hscr is None:
+            return
+        try:
+            tw.update_idletasks()
+            fnt = tkfont.Font(font=tw.cget('font'))
+            char_w = max(1, fnt.measure('0'))
+            visible_pixels = tw.winfo_width() or 1
+            visible_chars = max(1, visible_pixels // char_w)
+            content = tw.get('1.0', 'end-1c') or ''
+            max_line_len = 0
+            for ln in content.split('\n'):
+                if len(ln) > max_line_len:
+                    max_line_len = len(ln)
+            if max_line_len > visible_chars:
+                if not hscr.winfo_ismapped():
+                    try:
+                        # Pack the per-widget horizontal scrollbar into the bottom region above the
+                        # status bar so it spans the full editor width instead of being shoved to the right.
+                        # Use the global `statusFrame` if available (it lives at the very bottom of the UI).
+                        target_container = globals().get('statusFrame', None)
+                        if target_container and isinstance(target_container, (Frame, ttk.Frame)):
+                            # pack the hscroll at the top of the statusFrame so it appears above the statusBar
+                            try:
+                                hscr.pack(in_=statusFrame, side=TOP, fill=X)
+                            except Exception:
+                                # fallback to packing inside the text widget's parent if statusFrame packing fails
+                                try:
+                                    hscr.pack(in_=root.frame, side=BOTTOM, fill=X)
+                                except Exception:
+                                    hscr.pack(in_=textArea, side=BOTTOM, fill=X)
+                                    pass
+                        else:
+                            # no status frame available; fall back to packing inside the widget's parent
+                            try:
+                                parent = getattr(tw, 'master', None)
+                                if parent:
+                                    hscr.pack(in_=parent, side=BOTTOM, fill=X)
+                                else:
+                                    hscr.pack(side=BOTTOM, fill=X)
+                            except Exception:
+                                try:
+                                    hscr.pack(side=BOTTOM, fill=X)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
+            else:
+                if hscr.winfo_ismapped():
+                    try:
+                        hscr.pack_forget()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def toggle_tag_complex(tag):
     """Toggle bold/italic/underline across the selection, respecting font_* boundaries and composite style tags.
 
@@ -7607,6 +8153,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
 # -------------------------
 # Highlighting toggle (initialized from config)
 updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHighlighting", fallback=True))
+# Word wrap toggle (persisted)
 fullScanEnabled = IntVar(value=config.getboolean("Section1", "fullScanEnabled", fallback=True))
 openHtmlAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
 browsingModeVar = IntVar(value=0)
@@ -7917,7 +8464,6 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                 # Tag attribute values (captured in group 1/2/3)
                 for m in HTML_ATTR_VAL_RE.finditer(content):
                     try:
-                        # find which group matched (1,2 or 3). m.start(n) works only if group matched
                         for gi in (1, 2, 3):
                             try:
                                 if m.group(gi) is not None:
@@ -8053,14 +8599,12 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
                     continue
                 abs_s = base_offset + text_s
                 abs_e = base_offset + text_e
-                # normalize indices via textArea.index so keys match tag_ranges values
                 start_idx = textArea.index(f"1.0 + {abs_s}c")
                 end_idx = textArea.index(f"1.0 + {abs_e}c")
                 try:
                     textArea.tag_add("hyperlink", start_idx, end_idx)
                 except Exception:
                     pass
-                # only set mapping if one isn't already present (HTML/imported meta wins)
                 key = (start_idx, end_idx)
                 if key not in textArea._hyperlink_map:
                     try:
@@ -8071,33 +8615,121 @@ def highlight_python_helper(event=None, scan_start=None, scan_end=None):
         except Exception:
             pass
 
-        # hyperlink detection (http(s) / file:/// / www.)
+        # --- Ensure parser-provided anchor/link metadata is applied first so URL detection never merges them ---
         try:
             if not hasattr(textArea, '_hyperlink_map'):
                 textArea._hyperlink_map = {}
-            for m in URL_RE.finditer(content):
-                s, e = m.span()
-                if not overlaps_protected(s, e):
-                    abs_s = base_offset + s
-                    abs_e = base_offset + e
-                    start_idx = textArea.index(f"1.0 + {abs_s}c")
-                    end_idx = textArea.index(f"1.0 + {abs_e}c")
+            sel_tab = editorNotebook.select()
+            tab_frame = root.nametowidget(sel_tab) if sel_tab else None
+            frame_links_meta = None
+            if tab_frame is not None:
+                frame_links_meta = getattr(tab_frame, '_raw_html_tags_meta', None) or getattr(tab_frame, '_raw_html', None)
+                # frame_links_meta may be full meta dict or list of links; support both
+            if not frame_links_meta:
+                root_meta = getattr(root, '_raw_html_tags_meta', None)
+                if isinstance(root_meta, dict):
+                    frame_links_meta = root_meta
+            links_list = []
+            if isinstance(frame_links_meta, dict):
+                links_list = frame_links_meta.get('links', []) or []
+            elif isinstance(frame_links_meta, list):
+                links_list = frame_links_meta
+            # Apply parser-provided links as authoritative hyperlink tag ranges on the widget
+            for ln in links_list:
+                try:
+                    if isinstance(ln, dict):
+                        ls = int(ln.get('start', -1))
+                        le = int(ln.get('end', -1))
+                        href = ln.get('href') or ''
+                        title = ln.get('title') or ln.get('text') or None
+                    elif isinstance(ln, (list, tuple)) and len(ln) >= 2:
+                        ls = int(ln[0]); le = int(ln[1]); href = ln[2] if len(ln) > 2 else ''
+                        title = None
+                    else:
+                        continue
+                    if le <= ls or href is None:
+                        continue
+                    # Only apply if range intersects scanned region (optimization) OR if scanning whole buffer
+                    buff_len = len(textArea.get('1.0', 'end-1c'))
+                    if ls < 0 or le < 0 or ls >= buff_len:
+                        continue
+                    start_idx = textArea.index(f"1.0 + {ls}c")
+                    end_idx = textArea.index(f"1.0 + {le}c")
                     try:
                         textArea.tag_add("hyperlink", start_idx, end_idx)
                     except Exception:
                         pass
-                    # store mapping only when not already present so parser-applied links remain authoritative
                     key = (start_idx, end_idx)
-                    if key in textArea._hyperlink_map:
-                        continue
-                    url_text = content[s:e].strip()
-                    if url_text.lower().startswith("www."):
-                        url_text = "http://" + url_text
-                    try:
-                        entry = {'href': url_text}
-                        textArea._hyperlink_map[key] = entry
-                    except Exception:
-                        pass
+                    if key not in textArea._hyperlink_map:
+                        try:
+                            entry = {'href': href}
+                            if title:
+                                entry['title'] = title
+                            textArea._hyperlink_map[key] = entry
+                        except Exception:
+                            pass
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+        # hyperlink detection (http(s) / file:/// / www.)
+        try:
+            if not hasattr(textArea, '_hyperlink_map'):
+                textArea._hyperlink_map = {}
+
+           # Build existing hyperlink spans (absolute offsets) so we never create overlapping ranges
+            # Prefer authoritative sources in this order:
+            #  1) hyperlink tag ranges already applied to the widget (including parser-applied above)
+            #  2) parser-provided link records stored on the tab frame (covered by above application)
+            existing_spans = []
+            try:
+                hr = list(textArea.tag_ranges('hyperlink'))
+                for i in range(0, len(hr), 2):
+                    rs = hr[i]
+                    re_ = hr[i + 1]
+                    rs_off = len(textArea.get('1.0', rs))
+                    re_off = len(textArea.get('1.0', re_))
+                    existing_spans.append((rs_off, re_off))
+            except Exception:
+                existing_spans = []
+
+            # Now run URL regex but skip any match that overlaps an existing/higher-priority span
+            for m in URL_RE.finditer(content):
+                s, e = m.span()
+                # absolute offsets within widget content
+                abs_s = base_offset + s
+                abs_e = base_offset + e
+
+                # Skip if overlaps protected spans (strings/comments) or existing hyperlink spans
+                if overlaps_protected(s, e):
+                    continue
+                overlapped = False
+                for rs_off, re_off in existing_spans:
+                    if not (abs_e <= rs_off or abs_s >= re_off):
+                        overlapped = True
+                        break
+                if overlapped:
+                    continue
+
+                start_idx = textArea.index(f"1.0 + {abs_s}c")
+                end_idx = textArea.index(f"1.0 + {abs_e}c")
+                try:
+                    textArea.tag_add("hyperlink", start_idx, end_idx)
+                except Exception:
+                    pass
+
+                key = (start_idx, end_idx)
+                if key in textArea._hyperlink_map:
+                    continue
+
+                url_text = content[s:e].strip()
+                if url_text.lower().startswith("www."):
+                    url_text = "http://" + url_text
+                try:
+                    textArea._hyperlink_map[key] = {'href': url_text}
+                except Exception:
+                    pass
         except Exception:
             pass
 
@@ -9279,7 +9911,9 @@ editorNotebook.pack(side=LEFT, fill=BOTH, expand=True)
 
 # Font family menu (render each entry in its own font) + selection-safe behavior
 font_family_var = StringVar(value=config.get("Section1", "fontName", fallback=fontName))
-font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback=str(fontSize))))
+# Avoid referencing `fontSize` here in the fallback (it may not be available in some runtime layouts).
+# Use a safe literal default so this StringVar initialization never raises a "used before declaration" error.
+font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback='12')))
 
 # Menubutton + Menu so we can set a font per menu entry
 font_menu_btn = Menubutton(presentToolBar, textvariable=font_family_var, relief=RAISED, direction='below')
@@ -9533,29 +10167,28 @@ def create_config_window():
 
     # New: open HTML/MD as source (do not parse) — still parse SIMPLEEDIT headers
     openAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
-    ttk.Checkbutton(container, text="Open HTML/MD as source (do not parse)", variable=openAsSourceVar).grid(row=6, column=1, sticky='e', pady=6, padx=(0,8))
-
-    aiMaxContextField = mk_row("Max AI Context", 7, config.get("Section1", "aiMaxContext"))
-    temperatureField = mk_row("AI Temperature", 8, config.get("Section1", "temperature"))
-    top_kField = mk_row("AI top_k", 9, config.get("Section1", "top_k"))
-    seedField = mk_row("AI seed", 10, config.get("Section1", "seed"))
-
-    loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
-    loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
-    promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
-    recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")  # "new" or "current"
-    saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
-    ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=11, column=1, sticky='w', pady=6)
-    ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=12, column=1, sticky='w', pady=6)
-    ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=13, column=1, sticky='w', pady=6)
-    # near other checkboxes in create_config_window()
+    ttk.Checkbutton(container, text="Open HTML/MD as source (do not parse)", variable=openAsSourceVar).grid(row=5, column=2, sticky='e', pady=6, padx=(0,8))
     autoDetectVar = IntVar(value=config.getboolean("Section1", "autoDetectSyntax", fallback=True))
-    ttk.Checkbutton(container, text="Autodetect syntax from file content", variable=autoDetectVar).grid(row=14, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Autodetect syntax from file content", variable=autoDetectVar).grid(row=6, column=0, sticky='w', pady=6)
     promptRecentOpenVar = IntVar(value=config.getboolean("Section1", "promptOnRecentOpen", fallback=True))
-    ttk.Checkbutton(container, text="Prompt when opening recent files", variable=promptRecentOpenVar).grid(row=16, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Prompt when opening recent files", variable=promptRecentOpenVar).grid(row=6, column=1, sticky='w', pady=6)
     # New: control whether File->Open shows the custom modal
     promptOpenDialogVar = IntVar(value=config.getboolean("Section1", "openDialogModal", fallback=True))
-    ttk.Checkbutton(container, text="Use custom Open dialog for File → Open", variable=promptOpenDialogVar).grid(row=18, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Use custom Open dialog for File → Open", variable=promptOpenDialogVar).grid(row=6, column=2, sticky='w', pady=6)
+    loadAIOnOpenVar = IntVar(value=config.getboolean("Section1", "loadAIOnOpen", fallback=False))
+    loadAIOnNewVar = IntVar(value=config.getboolean("Section1", "loadAIOnNew", fallback=False))
+    saveFormattingVar = IntVar(value=config.getboolean("Section1", "saveFormattingInFile", fallback=False))
+    ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=7, column=0, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=7, column=1, sticky='w', pady=6)
+    ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=7, column=2, sticky='w', pady=6)
+
+    aiMaxContextField = mk_row("Max AI Context", 8, config.get("Section1", "aiMaxContext"))
+    temperatureField = mk_row("AI Temperature", 9, config.get("Section1", "temperature"))
+    top_kField = mk_row("AI top_k", 10, config.get("Section1", "top_k"))
+    seedField = mk_row("AI seed", 11, config.get("Section1", "seed"))
+
+    promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
+    recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")  # "new" or "current"
     # CSS export controls
     css_mode = config.get("Section1", "exportCssMode", fallback="inline-element")
     cssModeVar = StringVar(value=css_mode)
@@ -9584,6 +10217,8 @@ def create_config_window():
     sw_bg.grid(row=3, column=2, padx=(8,0))
     sw_cursor = Label(container, width=3, relief='sunken', bg=config.get("Section1", "cursorColor"))
     sw_cursor.grid(row=4, column=2, padx=(8,0))
+    saveZoomVar = IntVar(value=config.getboolean("Section1", "saveZoom", fallback=False))
+    ttk.Checkbutton(container, text="Save zoom level (persist font size)", variable=saveZoomVar).grid(row=22, column=1, sticky='w', pady=6)
 
         # make the small color swatches clickable (left-click opens chooser)
     try:
@@ -9709,6 +10344,7 @@ def create_config_window():
         # persist new open-as-source option
         config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
         config.set("Section1", "promptOnRecentOpen", str(bool(promptRecentOpenVar.get())))
+        config.set("Section1", "saveZoom", str(bool(saveZoomVar.get())))
 
         try:
             with open(INI_PATH, 'w') as configfile:
@@ -9769,6 +10405,7 @@ def create_config_window():
         lineNumberBgField.insert(0, config.get("Section1", "lineNumberBg", fallback="#000000"))
         lineHighlightField.delete(0, END)
         lineHighlightField.insert(0, config.get("Section1", "currentLineBg", fallback="#222222"))
+        saveZoomVar.set(config.getboolean("Section1", "saveZoom", fallback=False))
 
         try:
             syntaxCheckVar.set(config.getboolean("Section1", "syntaxHighlighting", fallback=True))
