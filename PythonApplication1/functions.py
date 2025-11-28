@@ -1820,21 +1820,86 @@ def _convert_buffer_to_html_fragment(textArea):
 
                 if kind == 'table':
                     rows = [r for r in block_text.split('\n') if r is not None]
-                    out_parts.append('<table>')
                     # Try to enrich rendering using stored table metadata (if present)
                     table_meta_for_span = None
                     try:
                         tmetas = getattr(textArea, '_tables_meta', []) or []
-                        # pick a meta that matches this table span start (best-effort)
+                        # best-effort: match by start offset
                         for tm in tmetas:
                             try:
-                                if tm.get('start') == s:
+                                if int(tm.get('start', -1)) == int(s):
                                     table_meta_for_span = tm
-                                break
+                                    break
                             except Exception:
                                 continue
                     except Exception:
                         table_meta_for_span = None
+
+                    # If we can, emit a colgroup (either explicit from metadata or computed widths)
+                    colgroup_html = ''
+                    if table_meta_for_span:
+                        try:
+                            # if explicit colgroup present in metadata, prefer it
+                            cg = table_meta_for_span.get('colgroup', []) or []
+                            if cg:
+                                cols = []
+                                for c in cg:
+                                    w = c.get('width')
+                                    if w:
+                                        # allow numeric widths or strings; if numeric assume characters -> use ch
+                                        try:
+                                            wi = int(w)
+                                            cols.append(f'<col style="width:{wi}ch">')
+                                        except Exception:
+                                            cols.append(f'<col style="width:{html.escape(str(w))}">')
+                                    else:
+                                        cols.append('<col>')
+                                if cols:
+                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
+                            else:
+                                # compute widths from metadata rows (character counts)
+                                rows_meta = table_meta_for_span.get('rows', []) or []
+                                if rows_meta:
+                                    max_cols = max((len(r) for r in rows_meta), default=0)
+                                    col_widths = [0] * max_cols
+                                    for r in rows_meta:
+                                        for ci, cell in enumerate(r):
+                                            txt = (cell.get('text') or '')
+                                            # measure visible first-line length (internal markers replaced)
+                                            visible = txt.replace('\u2028', '\n').split('\n', 1)[0]
+                                            col_widths[ci] = max(col_widths[ci], len(visible))
+                                    cols = []
+                                    for w in col_widths:
+                                        # Ensure at least a small width to avoid zero-width cols
+                                        wch = max(4, int(w))
+                                        cols.append(f'<col style="width:{wch}ch">')
+                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
+                        except Exception:
+                            colgroup_html = ''
+                    else:
+                        # fallback: compute widths from the textual table if reasonable
+                        try:
+                            cell_rows = [r.split('\t') if r != '' else [''] for r in rows]
+                            if cell_rows:
+                                max_cols = max((len(r) for r in cell_rows), default=0)
+                                col_widths = [0] * max_cols
+                                for r in cell_rows:
+                                    for ci, cell in enumerate(r):
+                                        visible = cell.replace('\u2028', '\n').split('\n', 1)[0]
+                                        col_widths[ci] = max(col_widths[ci], len(visible))
+                                # only emit colgroup if we have more than 1 column or widths non-trivial
+                                if max(col_widths, default=0) > 0 and max_cols > 0:
+                                    cols = []
+                                    for w in col_widths:
+                                        wch = max(4, int(w))
+                                        cols.append(f'<col style="width:{wch}ch">')
+                                    colgroup_html = '<colgroup>' + ''.join(cols) + '</colgroup>'
+                        except Exception:
+                            colgroup_html = ''
+
+                    out_parts.append('<table>')
+                    if colgroup_html:
+                        out_parts.append(colgroup_html)
 
                     if table_meta_for_span:
                         # Use precise rows/cells with attributes
