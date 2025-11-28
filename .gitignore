@@ -385,3 +385,11 @@ FodyWeavers.xsd
 /diff PythonApplication1/PythonApplication1.py.diff
 /diff PythonApplication1
 *.diff
+/ini PythonApplication1/syntax/html_light.ini
+/PythonApplication1/atcommands.txt
+/PythonApplication1/effect_list.md
+/PythonApplication1/mapflags.txt
+/PythonApplication1/permissions.txt
+/PythonApplication1/quest_variables.txt
+/PythonApplication1/script_commands.txt
+/PythonApplication1.rar
