@@ -12,6 +12,7 @@ Copyright (c) 2024 Joshua Richards
 
 # Built-in imports
 import os
+from subprocess import CREATE_NEW_CONSOLE
 import sys
 import threading
 import re
@@ -86,7 +87,7 @@ DEFAULT_CONFIG = funcs.DEFAULT_CONFIG
 
 exportCssMode = 'inline-element'  # default
 exportCssPath = ''
-
+global scripts
 INI_PATH = 'config.ini'
 config = configparser.ConfigParser()
 if not os.path.isfile(INI_PATH):
@@ -124,7 +125,17 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             raw = fh.read()
 
         # First try to extract SIMPLEEDIT meta (preferred)
+        
         content, meta = _extract_header_and_meta(raw)
+        scripts = funcs.extract_script_tags(raw)
+        try:
+            cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+            statusBar['text'] = f"Found {cnt} script(s) in document"
+            print(f"[debug] Found {cnt} script(s) when opening {path}")
+            if cnt:
+                print("[debug] first script preview:", str(scripts[0])[:200])
+        except Exception:
+            pass
         if meta:
             if open_in_new_tab:
                 tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", content, filename=path)
@@ -226,6 +237,22 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                                 pass
                     except Exception:
                         pass
+                    # Run any inline/remote scripts found in the original raw source for in-place opens (so refresh works)
+                    try:
+                        scripts_to_run = funcs.extract_script_tags(raw)
+                        if scripts_to_run:
+                            # host callback bound to the current frame/text so scripts can call setRaw / host.setRaw
+                            host_cb = _make_host_update_cb_for_frame(frame, textArea)
+                            run_results = funcs.run_scripts(
+                                scripts_to_run,
+                                base_url=path,
+                                log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                host_update_cb=host_cb
+                            )
+                            # debug output
+                            print("[debug] run_scripts results (in-place open):", run_results)
+                    except Exception:
+                        pass
                 statusBar['text'] = f"'{path}' opened (raw source)!"
                 root.fileName = path
                 add_recent_file(path)
@@ -245,6 +272,17 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 return
 
             plain, tags_meta = funcs._parse_html_and_apply(raw)
+            # IMPORTANT: extract scripts from the original raw HTML (plain is the stripped/parsed text)
+            scripts = funcs.extract_script_tags(raw)
+            # debug: show how many scripts we found so it's easy to verify when opening a file
+            try:
+                cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                statusBar['text'] = f"Found {cnt} script(s) in document"
+                print(f"[debug] Found {cnt} script(s) when opening {path}")
+                if cnt:
+                    print("[debug] first script preview:", str(scripts[0])[:200])
+            except Exception:
+                pass
             if open_in_new_tab:
                 tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", plain, filename=path)
                 _apply_tag_configs_to_widget(tx)
@@ -254,6 +292,40 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                     fr._raw_html_plain = plain
                     fr._raw_html_tags_meta = tags_meta
                     fr._view_raw = False
+
+                    # callback exposed to scripts: when JS calls setRaw(newHtml) this updates the tab's raw buffer
+                    # and reparses/re-renders it on the UI thread.
+                    def _host_update_from_script(new_raw):
+                        try:
+                            if new_raw is None:
+                            # force re-render of current stored raw
+                                src_raw = getattr(fr, '_raw_html', None)
+                            else:
+                                src_raw = new_raw
+                            if not src_raw:
+                                return
+                            # re-parse and update stored metadata
+                            plain2, tags_meta2 = funcs._parse_html_and_apply(src_raw)
+                            fr._raw_html = src_raw
+                            fr._raw_html_plain = plain2
+                            fr._raw_html_tags_meta = tags_meta2
+                            fr._view_raw = False
+                            # replace editor content and reapply tag configs
+                            tx.delete('1.0', 'end')
+                            tx.insert('1.0', plain2)
+                            _apply_tag_configs_to_widget(tx)
+                            # apply formatting meta and refresh highlighting on UI thread
+                            try:
+                                root.after(0, lambda: _apply_formatting_from_meta(tags_meta2))
+                                root.after(0, highlightPythonInit)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+
+                    # run scripts with host callback available in JS context as setRaw(...) and host.setRaw(...)
+                    run_results = funcs.run_scripts(scripts, base_url=path, log_fn=lambda s: (print(s), statusBar.config(text=s)), host_update_cb=_host_update_from_script)
+
                 except Exception:
                     pass
                 try:
@@ -261,8 +333,10 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 except Exception:
                     pass
             else:
+
                 textArea.delete('1.0', 'end')
                 textArea.insert('1.0', plain)
+                
                 _apply_tag_configs_to_widget(textArea)
                 try:
                     sel = editorNotebook.select()
@@ -744,6 +818,62 @@ def _restore_selection_for_font():
             pass
     except Exception:
         pass
+
+
+# Helper: produce a host_update_cb bound to a tab frame + Text widget that schedules UI updates on main thread.
+def _make_host_update_cb_for_frame(fr, tw):
+    """Return a callable(new_raw) that reparses new_raw on UI thread and updates `fr`/`tw`."""
+    def host_update_cb(new_raw):
+        def ui_update():
+            try:
+                if new_raw is None:
+                    src_raw = getattr(fr, '_raw_html', None)
+                else:
+                    src_raw = new_raw
+                if not src_raw:
+                    return
+                # reparse on host side
+                try:
+                    plain2, tags_meta2 = funcs._parse_html_and_apply(src_raw)
+                except Exception:
+                    plain2, tags_meta2 = src_raw, None
+                try:
+                    fr._raw_html = src_raw
+                    fr._raw_html_plain = plain2
+                    fr._raw_html_tags_meta = tags_meta2
+                    fr._view_raw = False
+                except Exception:
+                    pass
+                try:
+                    tw.delete('1.0', 'end')
+                    tw.insert('1.0', plain2 or '')
+                    _apply_tag_configs_to_widget(tw)
+                except Exception:
+                    pass
+                try:
+                    if tags_meta2 and tags_meta2.get('tags'):
+                        # ensure _apply_formatting_from_meta runs with correct textArea context
+                        prev_ta = globals().get('textArea', None)
+                        try:
+                            globals()['textArea'] = tw
+                            _apply_formatting_from_meta(tags_meta2)
+                        finally:
+                            if prev_ta is not None:
+                                globals()['textArea'] = prev_ta
+                    # lightweight refresh
+                    root.after(0, highlightPythonInit)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            root.after(0, ui_update)
+        except Exception:
+            # fallback synchronous
+            ui_update()
+
+    return host_update_cb
 
 def apply_tag_config_to_all(tag_name: str, kwargs: dict):
     """Apply tag_config for tag_name to every Text widget in open tabs (best-effort)."""
@@ -3840,8 +3970,28 @@ def open_url_action():
                         enc = charset or 'utf-8'
                         try:
                             raw = raw_bytes.decode(enc, errors='replace')
+                            scripts = funcs.extract_script_tags(raw)
+                            try:
+                                    cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                                    statusBar['text'] = f"Found {cnt} script(s) in document"
+                                    print(f"[debug] Found {cnt} script(s) when opening {url2}")
+                                    if cnt:
+                                        print("[debug] first script preview:", str(scripts[0])[:200])
+                            except Exception:
+                               pass
+
                         except Exception:
                             raw = raw_bytes.decode('utf-8', errors='replace')
+                            scripts = funcs.extract_script_tags(raw)
+                            try:
+                                    cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                                    statusBar['text'] = f"Found {cnt} script(s) in document"
+                                    print(f"[debug] Found {cnt} script(s) when opening {url2}")
+                                    if cnt:
+                                        print("[debug] first script preview:", str(scripts[0])[:200])
+                            except Exception:
+                               pass
+
 
                     # reuse existing HTML parsing flow
                     # Respect the user preference: if configured to open HTML/MD "as source",
@@ -6285,6 +6435,20 @@ def toggle_raw_rendered():
                 statusBar['text'] = "Rendered HTML view (from current raw buffer)"
             except Exception:
                 pass
+            # Re-run scripts after switching to Rendered view (user may have edited JS in Raw)
+            try:
+                scripts_to_run = funcs.extract_script_tags(frame._raw_html or '')
+                if scripts_to_run:
+                    host_cb = _make_host_update_cb_for_frame(frame, tw)
+                    run_results = funcs.run_scripts(
+                        scripts_to_run,
+                        base_url=getattr(frame, 'fileName', None),
+                        log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                        host_update_cb=host_cb
+                    )
+                    print("[debug] run_scripts results (toggle raw->rendered):", run_results)
+            except Exception:
+                pass
         else:
             try:
                 raw_to_show = getattr(frame, '_raw_html', None) or tw.get('1.0', 'end-1c')
@@ -7739,6 +7903,16 @@ def open_file_threaded():
                 try:
                     with open(path, 'r', errors='replace', encoding='utf-8') as fh:
                         raw = fh.read()
+                        scripts = funcs.extract_script_tags(raw)
+                        try:
+                            cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                            statusBar['text'] = f"Found {cnt} script(s) in document"
+                            print(f"[debug] Found {cnt} script(s) when opening {path}")
+                            if cnt:
+                                print("[debug] first script preview:", str(scripts[0])[:200])
+                        except Exception:
+                            pass
+
                 except Exception as e:
                     root.after(0, lambda: messagebox.showerror("Error", str(e)))
                     return
@@ -7997,8 +8171,28 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                 enc = charset or 'utf-8'
                 try:
                     raw = raw_bytes.decode(enc, errors='replace')
+                    scripts = funcs.extract_script_tags(raw)
+                    try:
+                        cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                        statusBar['text'] = f"Found {cnt} script(s) in document"
+                        print(f"[debug] Found {cnt} script(s) when opening {url2}")
+                        if cnt:
+                            print("[debug] first script preview:", str(scripts[0])[:200])
+                    except Exception:
+                        pass
+
                 except Exception:
                     raw = raw_bytes.decode('utf-8', errors='replace')
+                    scripts = funcs.extract_script_tags(raw)
+                    try:
+                        cnt = len(scripts) if isinstance(scripts, (list, tuple)) else 0
+                        statusBar['text'] = f"Found {cnt} script(s) in document"
+                        print(f"[debug] Found {cnt} script(s) when opening {url2}")
+                        if cnt:
+                            print("[debug] first script preview:", str(scripts[0])[:200])
+                    except Exception:
+                        pass
+
 
             # Respect the 'open as source' preference for fetched HTML/MD
             preset_path = None
@@ -8031,6 +8225,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             fr._raw_html = raw
                             fr._raw_html_plain = plain
                             fr._raw_html_tags_meta = tags_meta
+                            root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
                             # If tags_meta contains tags -> parsed/rendered view; otherwise treat as "opened as source"
                             is_source = not bool(tags_meta and tags_meta.get('tags'))
                             fr._opened_as_source = bool(is_source)

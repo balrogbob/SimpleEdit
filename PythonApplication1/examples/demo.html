@@ -1,0 +1,66 @@
+<!doctype html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>jsmini demo</title>
+</head>
+<body>
+    <script>
+        // constructor + new
+        function Person(name) {
+        this.name = name;
+        this._created = true;
+        }
+        Person.prototype.greet = function() {
+        console.log("greet: " + this.name);
+        };
+
+        var p = new Person("Alice");
+        p.greet();
+
+        // for + switch
+        for (var i = 0; i < 3; i++) {
+        console.log("loop i=", i);
+        }
+        switch (p.name) {
+        case "Alice":
+        console.log("matched Alice");
+        break;
+        default:
+        console.log("no match");
+        }
+
+        // try/catch + throw
+        try {
+        throw "boom";
+        } catch (e) {
+        console.log("caught:", e);
+        }
+
+        // setTimeout (simulated). Will run when host calls run_timers(context)
+        setTimeout(function() {
+        var el = document.createElement('div');
+        el.setAttribute('id', 'demo');
+        // append simple text node (our shim lets append any value)
+        el.appendChild('hello-text');
+        document.body.appendChild(el);
+        console.log("timer callback: appended element, body children:", document.body.children.length);
+        }, 0);
+        // TEST: replace raw buffer and force re-render after 500ms
+        setTimeout(function() {
+            console.log("TEST: calling host.setRaw to change raw buffer");
+            // new raw HTML fragment (small example)
+            var newHtml = '<div><h1>Replaced by script</h1><p>This content was set by host.setRaw()</p></div>';
+            if (typeof host !== 'undefined' && host.setRaw) {
+                host.setRaw(newHtml);
+                // optionally force rerender of the currently stored raw value
+                host.forceRerender && host.forceRerender();
+            } else if (typeof setRaw === 'function') {
+                setRaw(newHtml);
+            } else {
+                console.log("TEST: host API not available in this context");
+            }
+        }, 500);
+    </script>
+</body>
+</html>

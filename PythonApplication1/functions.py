@@ -31,12 +31,15 @@ from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
 from tkinter import ttk
 from typing import Callable, Iterable, List, Optional
+import urllib.request as _urr
+import urllib.parse as _up
 import shutil, sys, os
 import textwrap
 
 RECENT_MAX = 10
 
 IN_CELL_NL = '\u2028'  # internal cell-newline marker (stored inside table cells so real \n doesn't break rows)
+_SCRIPT_RE = re.compile(r'(?is)<script\b([^>]*)>(.*?)</script\s*>')
 
 _DEFAULT_TAG_COLORS = {
     "number": {"fg": "#FDFD6A", "bg": ""},
@@ -1587,6 +1590,86 @@ class _SimpleHTMLToTagged(HTMLParser):
             return None
         except Exception:
             return None
+
+def extract_script_tags(html: str) -> list:
+    """Return list of scripts found in HTML in document order.
+    Each entry: {'src': <url or None>, 'inline': <source or None>, 'attrs': {k:v}}
+    """
+    out = []
+    for m in _SCRIPT_RE.finditer(html):
+        attrstr = m.group(1) or ''
+        inline = m.group(2) or ''
+        attrs = {}
+        for am in re.finditer(r'([A-Za-z_:][A-Za-z0-9_:.\-]*)\s*=\s*(?:"([^"]*)"|\'([^\']*)\'|([^\s>]+))', attrstr):
+            key = am.group(1).lower()
+            val = am.group(2) or am.group(3) or am.group(4) or ''
+            attrs[key] = val
+        src = attrs.get('src') or None
+        out.append({'src': src, 'inline': inline if inline.strip() else None, 'attrs': attrs})
+    return out
+
+def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host_update_cb: Optional[Callable[[str], None]] = None):
+    """Execute script entries in order using jsmini.
+    - scripts: list produced by extract_script_tags
+    - base_url: used to resolve relative src attributes
+    - log_fn: optional callable(str) to receive console.log messages
+    - host_update_cb: optional callable(new_raw_html: str|None). If provided the JS context will expose
+      `setRaw(...)` and `host.forceRerender()` so scripts can call back to host to replace the raw HTML
+      buffer and request a re-render. Passing None is a no-op.
+    Returns a list of (success, error_message_or_None)    """
+    results = []
+    try:
+        import jsmini
+    except Exception as e:
+        for _ in scripts:
+            results.append((False, f"jsmini import failed: {e}"))
+        return results
+
+    # prepare shared context for scripts so they share globals and timers
+    ctx = jsmini.make_context(log_fn=log_fn)
+    # expose lightweight host API so scripts can update the raw buffer and force a re-render
+    if host_update_cb:
+        # top-level helper (callable): setRaw(newHtml)
+        ctx['setRaw'] = host_update_cb
+        # nested host object with a convenience alias and forceRerender helper (None => reparse current raw)
+        ctx['host'] = {
+            'setRaw': host_update_cb,
+            'forceRerender': lambda: host_update_cb(None)
+        }    
+    for s in scripts:
+        try:
+            if s.get('src'):
+                src = s['src']
+                resolved = src
+                try:
+                    if base_url:
+                        resolved = _up.urljoin(base_url, src)
+                    req = _urr.Request(resolved, headers={"User-Agent": "SimpleEdit/jsmini"})
+                    with _urr.urlopen(req, timeout=10) as resp:
+                        raw_bytes = resp.read()
+                        script_src = raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace')
+                except Exception as fe:
+                    results.append((False, f"Failed to fetch {resolved}: {fe}"))
+                    continue
+            else:
+                script_src = s.get('inline', '') or ''
+
+            # run script and keep interpreter on ctx for timers
+            try:
+                jsmini.run_with_interpreter(script_src, ctx)
+            except Exception as rexc:
+                results.append((False, f"Execution error: {rexc}"))
+                continue
+
+            results.append((True, None))
+        except Exception as e:
+            results.append((False, str(e)))
+    # after running inline/external scripts, run timers (simulated)
+    try:
+        jsmini.run_timers(ctx)
+    except Exception:
+        pass
+    return results
 
 def get_hex_color(color_tuple):
     """Return a hex string from a colorchooser return value."""
