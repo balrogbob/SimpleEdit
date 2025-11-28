@@ -357,6 +357,19 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
+    finally:
+        try:
+            if not open_in_new_tab:
+                # OLD:
+                # _finalize_browsing_mode_navigation()
+                # NEW adaptive delay:
+                try:
+                    raw_size = len(raw.encode('utf-8')) if isinstance(raw, str) else None
+                except Exception:
+                    raw_size = None
+                _schedule_browsing_mode_finalize(raw_size)
+        except Exception:
+            pass
 
 
 def _ask_open_choice(path: str):
@@ -1004,6 +1017,8 @@ url_var = StringVar(value='')
 root.geometry("800x600")
 root.title('SimpleEdit')
 root.fileName = ""
+root._browsing_finalize_after_id = None
+root._browsing_nav_token = 0
 font_family_var = StringVar(value=config.get("Section1", "fontName", fallback=fontName))
 font_size_var = StringVar(value=str(config.get("Section1", "fontSize", fallback=str(fontSize))))
 
@@ -1376,6 +1391,11 @@ def _back_action():
         if not url_back_stack:
             return
         prev = url_back_stack[-1]
+        # Browsing Mode navigation prep (enable text widgets temporarily)
+        try:
+            _prepare_browsing_mode_navigation()
+        except Exception:
+            pass
         try:
             # Open the previous location WITHOUT recording it again on the back-stack
             _open_maybe_url(prev, open_in_new_tab=False, record_history=False)
@@ -1387,6 +1407,11 @@ def _back_action():
                     _open_path(prev, open_in_new_tab=False)
                 except Exception:
                     pass
+        # If underlying open did not finalize (non-URL failure), finalize here.
+        try:
+            _finalize_browsing_mode_navigation()
+        except Exception:
+            pass
         # do not push the back-open as a duplicate on the stack
     except Exception:
         pass
@@ -1409,6 +1434,11 @@ def _refresh_action():
             except Exception:
                 pass
             return
+        # Browsing Mode: temporary enable before refresh
+        try:
+            _prepare_browsing_mode_navigation()
+        except Exception:
+            pass
         # if URL -> fetch; if file-like -> open path
         if _is_likely_url(fn) or fn.lower().startswith('http') or fn.lower().startswith('file:///') or fn.lower().startswith('www.'):
             try:
@@ -1430,6 +1460,11 @@ def _refresh_action():
                     _open_maybe_url(fn, open_in_new_tab=False)
                 except Exception:
                     pass
+        # Finalization occurs in helpers; add fallback finalize.
+        try:
+            _finalize_browsing_mode_navigation()
+        except Exception:
+            pass
     except Exception:
         pass
 # initialize line numbers canvas placeholder
@@ -1895,6 +1930,11 @@ def _apply_tag_configs_to_widget(tw):
                                     statusBar['text'] = f"Opening: {href}"
                                 except Exception:
                                     pass
+                                # Browsing Mode: temporarily enable widgets so navigation can modify content.
+                                try:
+                                    _prepare_browsing_mode_navigation()
+                                except Exception:
+                                    pass
 
                                 # RECORD current location before navigating so Back becomes available immediately
                                 try:
@@ -1927,6 +1967,11 @@ def _apply_tag_configs_to_widget(tw):
                                         fetch_and_open_url(href, open_in_new_tab=False)
                                     except Exception:
                                         pass
+                                # Finalization happens inside fetch/open helpers; if they did not run, finalize here.
+                                try:
+                                    _finalize_browsing_mode_navigation()
+                                except Exception:
+                                    pass
                             break
                 except Exception:
                     pass
@@ -7119,6 +7164,16 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             url_var.set(url2)
                     except Exception:
                         pass
+                    # Finalize browsing-mode navigation (re-disable widgets if still in browsing mode)
+                    try:
+                        raw_size = None
+                        try:
+                            raw_size = len(raw.encode('utf-8')) if isinstance(raw, str) else None
+                        except Exception:
+                            pass
+                        _schedule_browsing_mode_finalize(raw_size)
+                    except Exception:
+                        pass
                 except Exception as e:
                     try:
                         messagebox.showerror("Error", str(e))
@@ -7178,6 +7233,101 @@ def _is_browsing_mode_active() -> bool:
     except Exception:
         return False
 
+def _prepare_browsing_mode_navigation():
+    """If browsing mode is active, temporarily enable text widgets for navigation content update."""
+    try:
+        if not _is_browsing_mode_active():
+            return
+        root._browsing_nav_in_progress = True
+        root._browsing_nav_token += 1  # new navigation
+        for tw in _current_tab_text_widgets():
+            try:
+                if str(tw.cget('state')) == 'disabled':
+                    tw.config(state='normal', cursor='arrow')
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def _finalize_browsing_mode_navigation():
+    """Re-disable text widgets after navigation if browsing mode still active."""
+    try:
+        if not _is_browsing_mode_active():
+            return
+        root._browsing_nav_in_progress = False
+        for tw in _current_tab_text_widgets():
+            try:
+                tw.config(state='disabled', cursor='arrow')
+            except Exception:
+                pass
+        try:
+            statusBar['text'] = "Browsing Mode (read-only)"
+        except Exception:
+            pass
+    except Exception:
+        pass
+
+def _schedule_browsing_mode_finalize(estimated_bytes: int | None = None):
+    """
+    Schedule a delayed finalize of Browsing Mode after navigation/content load.
+    Larger buffers get a longer grace period so the widget remains enabled
+    while big inserts/highlighting complete.
+
+    Delay tiers (before factor):
+        <= 0.5 MB  -> 1000 ms
+        <= 2 MB    -> 2000 ms
+        <= 5 MB    -> 3500 ms
+        >  5 MB    -> 6000 ms
+    A user-configurable multiplier 'browsingDelayFactor' in config Section1
+    can scale these values (default 1.0).
+    """
+    try:
+        if not _is_browsing_mode_active():
+            return
+        # Cancel any previously scheduled finalize
+        try:
+            if root._browsing_finalize_after_id:
+                root.after_cancel(root._browsing_finalize_after_id)
+        except Exception:
+            pass
+        root._browsing_finalize_after_id = None
+
+        # Base delay by size
+        size = estimated_bytes or 0
+        if size > 5_000_000:
+            delay = 6000
+        elif size > 2_000_000:
+            delay = 3500
+        elif size > 500_000:
+            delay = 2000
+        else:
+            delay = 1000
+
+        # Factor from config (fails safe to 1.0)
+        try:
+            factor = float(config.get('Section1', 'browsingDelayFactor', fallback='1.0'))
+            if factor <= 0:
+                factor = 1.0
+        except Exception:
+            factor = 1.0
+        delay = int(delay * factor)
+
+        # Navigation token to avoid finalizing after a newer navigation started
+        nav_token = root._browsing_nav_token
+
+        def _do_finalize():
+            try:
+                if nav_token != root._browsing_nav_token:
+                    return  # stale
+                _finalize_browsing_mode_navigation()
+            except Exception:
+                pass
+            finally:
+                root._browsing_finalize_after_id = None
+
+        root._browsing_finalize_after_id = root.after(delay, _do_finalize)
+    except Exception:
+        pass
 
 def _current_tab_text_widgets():
     """Return list of Text widgets in currently selected tab."""
@@ -8392,6 +8542,12 @@ def _open_maybe_url(path: str, open_in_new_tab: bool = True, record_history: boo
         pass
     # last resort: try http
     fetch_and_open_url(path, open_in_new_tab=open_in_new_tab, record_history=record_history)
+    # Finalization will occur in fetch_and_open_url; add safety finalize for immediate returns above.
+    try:
+        if not open_in_new_tab:
+            _finalize_browsing_mode_navigation()
+    except Exception:
+        pass
 
 def open_find_replace():
     fr = Toplevel(root)

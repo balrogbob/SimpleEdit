@@ -1,0 +1,244 @@
+diff --git a/PythonApplication1/PythonApplication1.py b/PythonApplication1/PythonApplication1.py
+--- a/PythonApplication1/PythonApplication1.py
++++ b/PythonApplication1/PythonApplication1.py
+@@
+ def _is_browsing_mode_active() -> bool:
+     """Return True if global Browsing Mode is enabled."""
+     try:
+         return bool(browsingModeVar.get())
+     except Exception:
+         return False
++
++def _ensure_widget_enabled_for_write(tw: Text | None = None):
++    """
++    Force-enable the provided Text widget (or current tab’s textArea) for immediate write operations.
++    Safe to call even when Browsing Mode is active; only adjusts the widget state.
++    """
++    try:
++        if tw is None:
++            tw = globals().get('textArea')
++        if not tw or not isinstance(tw, Text):
++            return
++        # If disabled, set to normal so delete/insert succeed.
++        if str(tw.cget('state')) == 'disabled':
++            try:
++                tw.config(state='normal', cursor='arrow')
++                tw.update_idletasks()
++            except Exception:
++                pass
++    except Exception:
++        pass
+@@
+ def _open_path(path: str, open_in_new_tab: bool = True):
+     """Core logic to open `path` either in a new tab or in the current tab."""
+     try:
+         with open(path, 'r', errors='replace', encoding='utf-8') as fh:
+             raw = fh.read()
+@@
+             else:
++                # Ensure text widget is writable before in-place replace
++                _ensure_widget_enabled_for_write(textArea)
+                 textArea.delete('1.0', 'end')
+                 textArea.insert('1.0', content)
+@@
+             if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
+                 if open_in_new_tab:
+                     tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
+                     _apply_tag_configs_to_widget(tx)
+                     try:
+@@
+                 else:
++                    _ensure_widget_enabled_for_write(textArea)
+                     textArea.delete('1.0', 'end')
+                     textArea.insert('1.0', raw)
+                     _apply_tag_configs_to_widget(textArea)
+@@
+             else:
++                _ensure_widget_enabled_for_write(textArea)
+                 textArea.delete('1.0', 'end')
+                 textArea.insert('1.0', plain)
+                 _apply_tag_configs_to_widget(textArea)
+@@
+         else:
++            _ensure_widget_enabled_for_write(textArea)
+             textArea.delete('1.0', 'end')
+             textArea.insert('1.0', raw)
+             _apply_tag_configs_to_widget(textArea)
+@@
+ def _refresh_action():
+     """Reload currently visible tab from its source (URL or file)."""
+     try:
+         fn = getattr(root, 'fileName', '') or ''
+@@
+         # Browsing Mode: temporary enable before refresh
+         try:
+             _prepare_browsing_mode_navigation()
+         except Exception:
+             pass
++        # Also force-enable the current text widget for immediate write
++        try:
++            _ensure_widget_enabled_for_write(textArea)
++        except Exception:
++            pass
+@@
+ def toggle_raw_rendered():
+     try:
+         sel = editorNotebook.select()
+         if not sel:
+             return
+@@
+         if currently_raw:
+             try:
+                 raw_text = tw.get('1.0', 'end-1c')
+             except Exception:
+                 raw_text = raw_stored or ''
+             try:
+                 frame._raw_html = raw_text
+             except Exception:
+                 pass
+             try:
+                 plain, tags_meta = funcs._parse_html_and_apply(raw_text)
+             except Exception:
+                 plain, tags_meta = raw_text, None
+             try:
++                _ensure_widget_enabled_for_write(tw)
+                 frame._raw_html_plain = plain
+                 frame._raw_html_tags_meta = tags_meta
+             except Exception:
+                 pass
+             try:
+                 tw.delete('1.0', 'end')
+                 tw.insert('1.0', plain or '')
+                 _apply_tag_configs_to_widget(tw)
+@@
+         else:
+             try:
+                 raw_to_show = getattr(frame, '_raw_html', None) or tw.get('1.0', 'end-1c')
+                 frame._raw_html = raw_to_show
++                _ensure_widget_enabled_for_write(tw)
+                 tw.delete('1.0', 'end')
+                 tw.insert('1.0', raw_to_show or '')
+                 _apply_tag_configs_to_widget(tw)
+                 frame._view_raw = True
+                 statusBar['text'] = "Raw HTML view"
+@@
+ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: bool = True):
+@@
+             def ui():
+                 try:
+                     title = up.urlsplit(url2).netloc or url2
+                     if open_tab:
+                         tx, fr = create_editor_tab(title, plain, filename=url2)
+                         tx.focus_set()
+                         _apply_tag_configs_to_widget(tx)
+@@
+                     else:
+                         # When navigating in the current tab, record the previous URL (if any)
+                         try:
+                             sel = editorNotebook.select()
+                             prev = ''
+                             if sel:
+                                 frame = root.nametowidget(sel)
+                                 prev = getattr(frame, 'fileName', '') or getattr(root, 'fileName', '') or ''
+                             else:
+                                 prev = getattr(root, 'fileName', '') or ''
+                         except Exception:
+                             pass
+-
++                        # Ensure current text widget is writable before replace
++                        _ensure_widget_enabled_for_write(textArea)
+                         # replace current tab content and set per-tab filename so refresh/back work
+                         textArea.delete('1.0', 'end')
+                         textArea.insert('1.0', plain)
+                         _apply_tag_configs_to_widget(textArea)
+@@
+ def _open_maybe_url(path: str, open_in_new_tab: bool = True, record_history: bool = True):
+@@
+         if scheme == 'file':
+             p = parsed.path
+             if re.match(r'^/[A-Za-z]:', p):
+                 p = p.lstrip('/')
+             p = p.replace('/', os.sep)
++            # Before opening into current tab (if requested), ensure widget is writable
++            if not open_in_new_tab:
++                _ensure_widget_enabled_for_write(textArea)
+             _open_path(p, open_in_new_tab=open_in_new_tab)
+             return
+@@
+     try:
+         if os.path.exists(path):
++            if not open_in_new_tab:
++                _ensure_widget_enabled_for_write(textArea)
+             _open_path(path, open_in_new_tab=open_in_new_tab)
+             return
+     except Exception:
+         pass
+     # last resort: try http
+-    fetch_and_open_url(path, open_in_new_tab=open_in_new_tab, record_history=record_history)
++    # Ensure widget write state if loading into current tab
++    if not open_in_new_tab:
++        _ensure_widget_enabled_for_write(textArea)
++    fetch_and_open_url(path, open_in_new_tab=open_in_new_tab, record_history=record_history)
+@@
+             def do_open():
+                 u = url_var.get().strip()
+                 if not u:
+                     status.config(text="No URL provided.")
+                     return
+@@
+             Thread(target=worker, args=(u, bool(new_tab_var.get())), daemon=True).start()
+ 
+         btn_frame = ttk.Frame(container)
+         btn_frame.grid(row=3, column=0, columnspan=2, pady=(6,0), sticky='e')
+         ttk.Button(btn_frame, text="Open", command=do_open).pack(side=RIGHT, padx=(6,0))
+         ttk.Button(btn_frame, text="Cancel", command=do_cancel).pack(side=RIGHT)
+@@
+ def create_template(kind: str, open_in_new_tab: bool = True):
+@@
+         else:  # python (default)
+             tpl = (
+                 "#!/usr/bin/env python3\n"
+                 "# -*- coding: utf-8 -*-\n"
+                 "\"\"\"\n"
+                 "Module description.\n"
+                 "\"\"\"\n\n"
+                 "def main():\n"
+                 "    pass\n\n\n"
+                 "if __name__ == \"__main__\":\n"
+                 "    main()\n"
+             )
+ 
+-        tw.delete('1.0', 'end')
++        _ensure_widget_enabled_for_write(tw)
++        tw.delete('1.0', 'end')
+         tw.insert('1.0', tpl)
+@@
+         if open_in_new_tab:
+             tx, fr = create_editor_tab(title, '', filename='')
+             # Insert template into the new text widget
+             try:
+                 _apply_template_to_widget(tx, kind_norm)
+                 _apply_tag_configs_to_widget(tx)
+                 tx.focus_set()
+             except Exception:
+                 pass
+@@
+         # fallback: replace current tab content
+         try:
+-            textArea.delete('1.0', 'end')
++            _ensure_widget_enabled_for_write(textArea)
++            textArea.delete('1.0', 'end')
+             _apply_template_to_widget(textArea, kind_norm)
+             _apply_tag_configs_to_widget(textArea)
+             textArea.focus_set()
+             # ensure per-tab metadata updated
+             sel = editorNotebook.select()
+             if sel:
+                 try:
+                     frame = root.nametowidget(sel)
+                     frame.fileName = ''
+                 except Exception:
+                     pass
+             root.fileName = ''
+         except Exception:
+             pass

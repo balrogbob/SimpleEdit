@@ -1749,6 +1749,8 @@ def _convert_buffer_to_html_fragment(textArea):
 
                 block_text = content[s:e]
 
+                # Use inline tag renderer for block content so inline formatting (bold/italic/spans)
+                # is preserved inside block elements.
                 if kind == 'table':
                     rows = [r for r in block_text.split('\n') if r is not None]
                     out_parts.append('<table>')
@@ -1757,55 +1759,58 @@ def _convert_buffer_to_html_fragment(textArea):
                             continue
                         out_parts.append('<tr>')
                         cells = row.split('\t')
-                        # Header inference: first row only if any th tag ranges exist globally
                         is_header_table = bool('th' in tags_by_name and tags_by_name['th'])
-                        for cell_text in cells:
-                            cell_text_escaped = html.escape(cell_text)
-                            if is_header_table and ridx == 0:
-                                out_parts.append(f'<th>{cell_text_escaped}</th>')
-                            else:
-                                out_parts.append(f'<td>{cell_text_escaped}</td>')
+                        for ci, cell_text in enumerate(cells):
+                            # escape cell text but preserve inline spans inside that cell if present
+                            cell_start = s + sum(len(r) + 1 for r in rows[:ridx])  # approximate start of row
+                            # fall back to plain escape (tables are already plain text)
+                            out_parts.append(f'<{"th" if is_header_table and ridx == 0 else "td"}>{html.escape(cell_text)}</{"th" if is_header_table and ridx == 0 else "td"}>')
                         out_parts.append('</tr>')
                     out_parts.append('</table>')
 
                 elif kind == 'code_block':
-                    # Wrap exact slice in <pre> to allow CSS styling
-                    # Preserve content; it's already "raw" text, so escape for HTML.
                     out_parts.append('<pre>')
                     out_parts.append(html.escape(block_text))
                     out_parts.append('</pre>')
 
                 elif kind == 'div_nav':
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append('<div class="nav">')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered)
                     out_parts.append('</div>')
 
                 elif kind == 'div_content':
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append('<div class="content">')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered)
                     out_parts.append('</div>')
 
                 elif kind == 'div':
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append('<div>')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered)
                     out_parts.append('</div>')
 
                 elif kind == 'p':
+                    # trim only outer newlines but preserve inline formatting
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append('<p>')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered.strip())
                     out_parts.append('</p>')
 
                 elif kind in ('h1','h2','h3','h4','h5','h6'):
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append(f'<{kind}>')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered.strip())
                     out_parts.append(f'</{kind}>')
 
                 elif kind == 'hr':
                     out_parts.append('<hr />')
 
                 elif kind == 'blockquote':
+                    rendered = _render_segment_with_inline_tags(content, s, e, tags_by_name)
                     out_parts.append('<blockquote>')
-                    out_parts.append(html.escape(block_text))
+                    out_parts.append(rendered.strip())
                     out_parts.append('</blockquote>')
 
                 last = e
@@ -1951,6 +1956,107 @@ def _generate_css():
         return "\n".join(parts)
     except Exception:
         return ""
+
+def _render_segment_with_inline_tags(content: str, start: int, end: int, tags_by_name: dict) -> str:
+    """
+    Render content[start:end] to HTML honoring inline tag ranges from tags_by_name.
+    This clones the inline-span rendering used in the non-structural fallback,
+    but operates on a clipped substring so block renderers can embed formatted HTML.
+    """
+    seg = content[start:end]
+    # collect events clipped to segment (relative positions)
+    events = []
+    for tag, ranges in (tags_by_name or {}).items():
+        for s, e in ranges:
+            if e <= start or s >= end:
+                continue
+            rs = max(s, start) - start
+            re_ = min(e, end) - start
+            events.append((rs, 'start', tag))
+            events.append((re_, 'end', tag))
+    if not events:
+        return html.escape(seg)
+
+    events_by_pos = {}
+    for pos, kind, tag in events:
+        events_by_pos.setdefault(pos, []).append((kind, tag))
+    # end events first at the same position
+    for pos in events_by_pos:
+        events_by_pos[pos].sort(key=lambda x: 0 if x[0] == 'end' else 1)
+
+    positions = sorted(set(list(events_by_pos.keys()) + [0, len(seg)]))
+    out_parts = []
+    active = []
+
+    for i in range(len(positions) - 1):
+        pos = positions[i]
+        for kind, tag in events_by_pos.get(pos, []):
+            if kind == 'end':
+                # pop until tag
+                for j in range(len(active) - 1, -1, -1):
+                    if active[j] == tag:
+                        for _ in range(len(active) - 1, j - 1, -1):
+                            t = active.pop()
+                            if t in ('bold', 'italic', 'underline'):
+                                if t == 'bold':
+                                    out_parts.append('</strong>')
+                                elif t == 'italic':
+                                    out_parts.append('</em>')
+                                elif t == 'underline':
+                                    out_parts.append('</u>')
+                            else:
+                                out_parts.append('</span>')
+                        break
+            elif kind == 'start':
+                if tag in ('bold', 'italic', 'underline'):
+                    if exportCssMode in ('inline-block', 'external'):
+                        if tag == 'bold':
+                            out_parts.append('<strong class="se-bold">')
+                        elif tag == 'italic':
+                            out_parts.append('<em class="se-italic">')
+                        elif tag == 'underline':
+                            out_parts.append('<u class="se-underline">')
+                    else:
+                        if tag == 'bold':
+                            out_parts.append('<strong>')
+                        elif tag == 'italic':
+                            out_parts.append('<em>')
+                        elif tag == 'underline':
+                            out_parts.append('<u>')
+                    active.append(tag)
+                else:
+                    if exportCssMode in ('inline-block', 'external'):
+                        out_parts.append(f'<span class="se-{tag}">')
+                    else:
+                        if tag == 'todo':
+                            out_parts.append(f'<span style="color:#ffffff;background-color:#B22222">')
+                        else:
+                            color = _TAG_COLOR_MAP.get(tag)
+                            if color:
+                                out_parts.append(f'<span style="color:{color}">')
+                            else:
+                                out_parts.append('<span>')
+                    active.append(tag)
+
+        next_pos = positions[i + 1]
+        if next_pos > pos:
+            piece = seg[pos:next_pos]
+            out_parts.append(html.escape(piece))
+
+    # close any remaining open tags
+    while active:
+        t = active.pop()
+        if t in ('bold', 'italic', 'underline'):
+            if t == 'bold':
+                out_parts.append('</strong>')
+            elif t == 'italic':
+                out_parts.append('</em>')
+            elif t == 'underline':
+                out_parts.append('</u>')
+        else:
+            out_parts.append('</span>')
+
+    return ''.join(out_parts)
 
 _TAG_COLOR_MAP = {
     'number': '#FDFD6A',
