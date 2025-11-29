@@ -31,20 +31,56 @@ TOKEN_SPEC = [
 TOKEN_RE = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPEC), re.M)
 
 def tokenize(src: str) -> List[Token]:
+    """Tokenize source and include token start/end offsets for enhanced error reporting.
+
+    Returns list of 4-tuples (type, value, start, end).
+    """
     out = []
     for m in TOKEN_RE.finditer(src):
         typ = m.lastgroup
         val = m.group(0)
+        start = m.start()
+        end = m.end()
         if typ == 'SKIP' or typ == 'COMMENT':
             continue
-        out.append((typ, val))
-    out.append(('EOF',''))
+        out.append((typ, val, start, end))
+    out.append(('EOF', '', len(src), len(src)))
     return out
 
+def _format_parse_error_context(src: str, err_pos: int, err_len: int = 1, window: int = 40) -> str:
+    """Return a short snippet around err_pos with a caret marker and (line,col) info."""
+    try:
+        if not isinstance(src, str):
+            src = str(src or '')
+        # compute line/col
+        before = src[:err_pos]
+        lineno = before.count('\n') + 1
+        last_nl = before.rfind('\n')
+        if last_nl == -1:
+            col = err_pos + 1
+            line_start = 0
+        else:
+            col = err_pos - last_nl
+            line_start = last_nl + 1
+        line_end = src.find('\n', err_pos)
+        if line_end == -1:
+            line_end = len(src)
+        line_text = src[line_start:line_end]
+        # produce truncated context for very long lines (minified single-line)
+        start = max(0, err_pos - window)
+        end = min(len(src), err_pos + err_len + window)
+        snippet = src[start:end].replace('\n', '\\n')
+        # caret relative to snippet start
+        caret_pos = err_pos - start
+        caret_line = ' ' * caret_pos + '^' * max(1, err_len)
+        return f"Line {lineno}, Col {col}\n{snippet}\n{caret_line}"
+    except Exception:
+        return f"(pos {err_pos})"
 # --- AST nodes (simple tuples) ----------------------------------------------
 # Use small node tuples like ('num', value), ('bin', op, left, right), ('var', name), etc.
 
 # --- Parser -----------------------------------------------------------------
+
 class Parser:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
@@ -128,15 +164,26 @@ class Parser:
         return ('block', stmts)
 
     def parse_var_decl(self):
-        self.eat('IDENT','var')
-        name = self.eat('IDENT')[1]
-        init = None
-        if self.match('OP','='):
-            self.eat('OP','=')
-            init = self.parse_expression()
-        if self.match('PUNC',';'):
-            self.eat('PUNC',';')
-        return ('var', name, init)
+        """Parse `var` with one-or-more declarators (e.g. `var a, b = 2, c;`)."""
+        self.eat('IDENT', 'var')
+        decls = []
+        # one or more declarators separated by commas
+        while True:
+            if not self.match('IDENT'):
+                raise SyntaxError("Expected identifier after 'var'")
+            name = self.eat('IDENT')[1]
+            init = None
+            if self.match('OP', '='):
+                self.eat('OP', '=')
+                init = self.parse_expression()
+            decls.append((name, init))
+            if self.match('PUNC', ','):
+                self.eat('PUNC', ',')
+                continue
+            break
+        if self.match('PUNC', ';'):
+            self.eat('PUNC', ';')
+        return ('var', decls)
 
     def parse_function_decl(self):
         self.eat('IDENT','function')
@@ -260,6 +307,7 @@ class Parser:
             right = self.parse_assignment()
             return ('assign', left, right)
         return left
+
 
     # Pratt-like binary precedence (very small table)
     # Higher number => higher precedence. Added logical OR/AND with lower precedence
@@ -428,9 +476,44 @@ class Parser:
         raise SyntaxError(f"Unexpected token {t} {v}")
 
 def parse(src: str):
-    toks = tokenize(src)
+    """
+    Parse source into AST with improved SyntaxError messages.
+    - Tokenizer now returns positional info; parser instance keeps positions so
+      we can map token index to source offsets on error.
+    """
+    # produce raw tokens with positions
+    raw_toks = tokenize(src)
+    # keep tokens in Parser as (type,value) for backwards-compatible parsing
+    toks = [(t, v) for (t, v, s, e) in raw_toks]
+    positions = [(s, e) for (t, v, s, e) in raw_toks]
+
     p = Parser(toks)
-    return p.parse_program()
+    # attach helper metadata for error reporting
+    p._token_positions = positions
+    p._src_text = src
+
+    try:
+        return p.parse_program()
+    except SyntaxError as se:
+        # try to locate failure token index and position
+        try:
+            idx = getattr(p, 'i', None)
+            if idx is None:
+                raise se
+            # clamp idx
+            if idx < 0:
+                idx = 0
+            if idx >= len(p._token_positions):
+                idx = len(p._token_positions) - 1
+            start, end = p._token_positions[idx]
+            token = toks[idx] if idx < len(toks) else ('', '')
+            context = _format_parse_error_context(src, start, max(1, end - start))
+            # augment message with token info + snippet
+            msg = f"SyntaxError at token #{idx} {token!r}: {se}\n{context}"
+            raise SyntaxError(msg) from se
+        except Exception:
+            # fallback: re-raise original
+            raise
 
 # --- Runtime / evaluator ---------------------------------------------------
 class Undefined:
@@ -525,10 +608,18 @@ class Interpreter:
         if typ == 'empty':
             return undefined
         if typ == 'var':
-            _, name, init = node
-            val = undefined if init is None else self._eval_expr(init, env, this)
-            env.set_local(name, val)
-            return val
+            # support multiple declarators: node format ('var', [(name, init), ...])
+            _, decls = node
+            last_val = undefined
+            try:
+                for name, init in decls:
+                    val = undefined if init is None else self._eval_expr(init, env, this)
+                    env.set_local(name, val)
+                    last_val = val
+            except Exception:
+                # best-effort: if any declarator evaluation fails, leave previous ones intact
+                pass
+            return last_val
         if typ == 'func':
             _, name, params, body = node
             fn = JSFunction(params, body, env, name)

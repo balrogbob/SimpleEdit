@@ -232,6 +232,18 @@ def set_js_console_default(value: bool) -> None:
         # best-effort: do not raise to caller
         pass
 
+def _strip_leading_license_comment(src: str) -> str:
+    """Remove a leading /*! ... */ license header (common in minified libs) to avoid jsmini parse issues.
+    Keeps everything else intact. Safe no-op when nothing matches.
+    """
+    try:
+        if not src:
+            return src
+        # remove a single leading /*! ... */ (and surrounding whitespace) if present
+        return re.sub(r'^\s*/\*![\s\S]*?\*/\s*', '', src, count=1)
+    except Exception:
+        return src
+
 def add_recent_file(
     config,
     ini_path: str,
@@ -2127,32 +2139,46 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                     else:
                         script_src = s.get('inline', '') or ''
 
-                    try:
-                        jsmini.run_with_interpreter(script_src, ctx)
-                        _combined_log(f"[jsconsole] Script {idx + 1} executed successfully.")
-                        # bring console forward briefly if present so user sees progress
+                    run_src = _strip_leading_license_comment(script_src if 'script_src' in locals() else (s.get('inline') or ''))
+                    if run_src != (script_src if 'script_src' in locals() else (s.get('inline') or '')):
                         try:
-                            if actual_show_console:
-                                _bring_console_to_front()
+                            _console_append("[jsconsole] Stripped leading /*!...*/ license header before execution (common in minified libs).")
                         except Exception:
                             pass
-                        local_results.append((True, None))
+                    
+                    try:
+                        jsmini.run_with_interpreter(run_src, ctx)
+                        _combined_log(f"[jsconsole] Script {idx + 1} executed successfully.")
                     except Exception as rexc:
                         # capture traceback string (best-effort)
                         try:
                             tb_str = _traceback.format_exc()
                         except Exception:
                             tb_str = None
-                        _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                    
+                        # Primary context from original source (helps identify problematic header/content)
                         try:
-                            # `script_src` is the source text executed for this script in the loop
-                            ctx = _format_js_error_context(script_src if 'script_src' in locals() else (s.get('inline') or ''), rexc, tb_str)
-                            if ctx:
-                                _console_append("[jsconsole] Error context (approx):")
-                                for ln in str(ctx).splitlines():
+                            original_src = script_src if 'script_src' in locals() else (s.get('inline') or '')
+                            ctx_primary = _format_js_error_context(original_src, rexc, tb_str)
+                            _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                            if ctx_primary:
+                                _console_append("[jsconsole] Error context (from original source, approx):")
+                                for ln in str(ctx_primary).splitlines():
                                     _console_append("  " + ln)
                         except Exception:
+                            _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                    
+                        # Secondary context from cleaned source (if different) to show where execution actually reached
+                        try:
+                            if run_src and run_src != (original_src if 'original_src' in locals() else ''):
+                                ctx_clean = _format_js_error_context(run_src, rexc, tb_str)
+                                if ctx_clean:
+                                    _console_append("[jsconsole] Error context (from cleaned source, approx):")
+                                    for ln in str(ctx_clean).splitlines():
+                                        _console_append("  " + ln)
+                        except Exception:
                             pass
+                    
                         results.append((False, f"Execution error: {rexc}"))
                         continue
 
@@ -2179,6 +2205,7 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
 
         Thread(target=_worker, daemon=True).start()
         return [('async', None)]
+
 
     # Synchronous (blocking) path: run in current thread (used when run_blocking=True or not on main thread)
     console_created = False
@@ -2210,6 +2237,7 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                 print(s)
             except Exception:
                 pass
+
 
     ctx = jsmini.make_context(log_fn=_combined_log_sync if (actual_show_console or callable(log_fn)) else None)
     if host_update_cb:
@@ -2250,8 +2278,15 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
             else:
                 script_src = s.get('inline', '') or ''
 
+            run_src = _strip_leading_license_comment(script_src if 'script_src' in locals() else (s.get('inline') or ''))
+            if run_src != (script_src if 'script_src' in locals() else (s.get('inline') or '')):
+                try:
+                    _console_append("[jsconsole] Stripped leading /*!...*/ license header before execution (common in minified libs).")
+                except Exception:
+                    pass
+            
             try:
-                jsmini.run_with_interpreter(script_src, ctx)
+                jsmini.run_with_interpreter(run_src, ctx)
                 _combined_log_sync(f"[jsconsole] Script {idx + 1} executed successfully.")
             except Exception as rexc:
                 # capture traceback string (best-effort)
@@ -2259,16 +2294,30 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                     tb_str = _traceback.format_exc()
                 except Exception:
                     tb_str = None
-                _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+            
+                # Primary context from original source (helps identify problematic header/content)
                 try:
-                    # `script_src` is the source text executed for this script in the loop
-                    ctx = _format_js_error_context(script_src if 'script_src' in locals() else (s.get('inline') or ''), rexc, tb_str)
-                    if ctx:
-                        _console_append("[jsconsole] Error context (approx):")
-                        for ln in str(ctx).splitlines():
+                    original_src = script_src if 'script_src' in locals() else (s.get('inline') or '')
+                    ctx_primary = _format_js_error_context(original_src, rexc, tb_str)
+                    _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                    if ctx_primary:
+                        _console_append("[jsconsole] Error context (from original source, approx):")
+                        for ln in str(ctx_primary).splitlines():
                             _console_append("  " + ln)
                 except Exception:
+                    _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+            
+                # Secondary context from cleaned source (if different) to show where execution actually reached
+                try:
+                    if run_src and run_src != (original_src if 'original_src' in locals() else ''):
+                        ctx_clean = _format_js_error_context(run_src, rexc, tb_str)
+                        if ctx_clean:
+                            _console_append("[jsconsole] Error context (from cleaned source, approx):")
+                            for ln in str(ctx_clean).splitlines():
+                                _console_append("  " + ln)
+                except Exception:
                     pass
+            
                 results.append((False, f"Execution error: {rexc}"))
                 continue
 
