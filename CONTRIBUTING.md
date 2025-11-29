@@ -58,7 +58,7 @@ Details:
 
  ## Developer workflow
  
-- Branch from `prototype-javascript-support` for JS/HTML related work.
+- Branch from `alpha-javascript-support` for JS/HTML related work.
 - Run the app and manually test open/save flows for both local files and URLs.
 - If adding a new config key, update `DEFAULT_CONFIG` in `functions.py` and add UI to `Settings` where appropriate.
  
