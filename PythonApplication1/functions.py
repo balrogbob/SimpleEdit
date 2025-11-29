@@ -73,6 +73,7 @@ _DEFAULT_TAG_COLORS = {
     "html_comment": {"fg": "#6A9955", "bg": ""}         # HTML comments
 }
 
+# Update DEFAULT_CONFIG to include JS console preference (persisted)
 DEFAULT_CONFIG = {
     'Section1': {
         'fontName': 'consolas',
@@ -90,10 +91,10 @@ DEFAULT_CONFIG = {
         'loadAIOnNew': 'False',
         'saveFormattingInFile': 'False',   # new: persist whether to embed formatting header
         'exportCssMode': 'inline-element', # 'inline-element' | 'inline-block' | 'external'
-        'exportCssPath': ''                # used when 'external' chosen; default generated at save time
+        'exportCssPath': '',               # used when 'external' chosen; default generated at save time
+        'jsConsoleOnRun': 'False'          # new: when True open JS Console popup by default for run_scripts
     }
 }
-
 exportCssMode = 'inline-element'  # default
 exportCssPath = ''
 
@@ -147,6 +148,23 @@ def save_recent_files(config, ini_path: str, lst: Iterable[str]) -> None:
         # Best-effort: don't crash caller for IO/config errors
         pass
 
+# New helpers to get/set the persisted JS console preference
+def get_js_console_default() -> bool:
+    """Return whether JS Console should open by default when running scripts."""
+    try:
+        return config.getboolean("Section1", "jsConsoleOnRun", fallback=False)
+    except Exception:
+        return False
+
+def set_js_console_default(value: bool) -> None:
+    """Persist the JS Console default preference into config.ini (Section1/jsConsoleOnRun)."""
+    try:
+        config.set("Section1", "jsConsoleOnRun", str(bool(value)))
+        with open(INI_PATH, "w", encoding="utf-8") as fh:
+            config.write(fh)
+    except Exception:
+        # best-effort: do not raise to caller
+        pass
 
 def add_recent_file(
     config,
@@ -176,6 +194,118 @@ def add_recent_file(
     except Exception:
         pass
 
+
+_js_console_window = None
+_js_console_text = None
+_js_console_lock = None
+
+def _init_js_console_lock():
+    global _js_console_lock
+    import threading as _thr
+    if _js_console_lock is None:
+        _js_console_lock = _thr.Lock()
+
+def _ensure_js_console():
+    """Create or reuse a single JS Console Toplevel and text widget (main-thread-safe calls via .after)."""
+    global _js_console_window, _js_console_text
+    _init_js_console_lock()
+    try:
+        # If already exists and is alive, return it
+        try:
+            if _js_console_window and str(_js_console_window.winfo_exists()) == '1':
+                return _js_console_window, _js_console_text
+        except Exception:
+            pass
+
+        # Create console UI on main thread synchronously if possible
+        try:
+            dlg = Toplevel()
+            dlg.title("JS Console")
+            dlg.geometry("800x320")
+            frm = Frame(dlg)
+            frm.pack(fill=BOTH, expand=True)
+            txt = Text(frm, wrap='none', state='normal')
+            txt.pack(side=LEFT, fill=BOTH, expand=True)
+            vs = Scrollbar(frm, orient=VERTICAL, command=txt.yview)
+            vs.pack(side=RIGHT, fill=Y)
+            txt.config(yscrollcommand=vs.set)
+            btn_frame = Frame(dlg)
+            btn_frame.pack(fill=X)
+            def _clear():
+                try:
+                    txt.delete('1.0', 'end')
+                except Exception:
+                    pass
+            def _close():
+                try:
+                    dlg.destroy()
+                except Exception:
+                    pass
+            Button(btn_frame, text="Clear", command=_clear).pack(side=LEFT, padx=6, pady=4)
+            Button(btn_frame, text="Close", command=_close).pack(side=RIGHT, padx=6, pady=4)
+            _js_console_window = dlg
+            _js_console_text = txt
+            try:
+                dlg.lift()
+                dlg.attributes('-topmost', True)
+                dlg.after(100, lambda: dlg.attributes('-topmost', False))
+            except Exception:
+                pass
+            return _js_console_window, _js_console_text
+        except Exception:
+            # Fallback: don't raise UI errors - console not available
+            _js_console_window = None
+            _js_console_text = None
+            return None, None
+    except Exception:
+        return None, None
+
+def _console_append(msg: str):
+    """Append line to the shared JS console (thread-safe via .after)."""
+    try:
+        _init_js_console_lock()
+        # ensure console exists (create on main thread if necessary)
+        try:
+            dlg, txt = _js_console_window, _js_console_text
+            if not dlg or not txt or str(dlg.winfo_exists()) != '1':
+                dlg, txt = _ensure_js_console()
+        except Exception:
+            dlg, txt = _ensure_js_console()
+        if txt and dlg:
+            try:
+                # schedule insertion on UI thread
+                txt.after(0, lambda m=msg, t=txt, d=dlg: (t.insert('end', m + '\n'), t.see('end'), d.update_idletasks()))
+            except Exception:
+                try:
+                    txt.insert('end', msg + '\n')
+                    txt.see('end')
+                except Exception:
+                    print(msg)
+        else:
+            # fallback to stdout
+            print(msg)
+    except Exception:
+        try:
+            print(msg)
+        except Exception:
+            pass
+
+def _bring_console_to_front():
+    """Bring the console to front briefly and allow UI to refresh."""
+    try:
+        dlg = _js_console_window
+        if not dlg or str(dlg.winfo_exists()) != '1':
+            return
+        try:
+            dlg.lift()
+            dlg.focus_force()
+            dlg.attributes('-topmost', True)
+            dlg.after(150, lambda: dlg.attributes('-topmost', False))
+            dlg.update_idletasks()
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 def clear_recent_files(config, ini_path: str, on_update: Optional[Callable[[], None]] = None) -> None:
     """Clear persisted recent list and optionally call on_update."""
@@ -1820,15 +1950,19 @@ def extract_script_tags(html: str) -> list:
         out.append({'src': src, 'inline': inline if inline.strip() else None, 'attrs': attrs})
     return out
 
-def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host_update_cb: Optional[Callable[[str], None]] = None):
-    """Execute script entries in order using jsmini.
-    - scripts: list produced by extract_script_tags
-    - base_url: used to resolve relative src attributes
-    - log_fn: optional callable(str) to receive console.log messages
-    - host_update_cb: optional callable(new_raw_html: str|None). If provided the JS context will expose
-      `setRaw(...)` and `host.forceRerender()` so scripts can call back to host to replace the raw HTML
-      buffer and request a re-render. Passing None is a no-op.
-    Returns a list of (success, error_message_or_None)    """
+def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host_update_cb: Optional[Callable[[str], None]] = None, show_console: Optional[bool] = None, run_blocking: bool = False):
+    """Execute script entries using jsmini.
+
+    Behaviour changes:
+    - When called from the Tk main thread and `run_blocking` is False (default),
+      scripts will run asynchronously on a background thread and this function
+      returns immediately with `[('async', None)]`. This gives the same perceived
+      responsiveness whether or not the JS Console is open.
+    - Callers that need synchronous results can pass `run_blocking=True`.
+    - `show_console` controls whether a reusable popup console is opened (when True)
+      or the persisted default is used when None.
+    - `log_fn` is still supported and will receive the same log lines as the console.
+    """
     results = []
     try:
         import jsmini
@@ -1837,19 +1971,183 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
             results.append((False, f"jsmini import failed: {e}"))
         return results
 
-    # prepare shared context for scripts so they share globals and timers
-    ctx = jsmini.make_context(log_fn=log_fn)
-    # expose lightweight host API so scripts can update the raw buffer and force a re-render
-    if host_update_cb:
-        # top-level helper (callable): setRaw(newHtml)
-        ctx['setRaw'] = host_update_cb
-        # nested host object with a convenience alias and forceRerender helper (None => reparse current raw)
-        ctx['host'] = {
-            'setRaw': host_update_cb,
-            'forceRerender': lambda: host_update_cb(None)
-        }    
-    for s in scripts:
+    try:
+        actual_show_console = show_console if show_console is not None else get_js_console_default()
+    except Exception:
+        actual_show_console = bool(show_console)
+
+    on_main = threading.current_thread().name == 'MainThread'
+
+    # If caller is on main thread and not forcing blocking, run asynchronously on a worker
+    if on_main and not run_blocking:
+        def _worker():
+            local_results = []
+            try:
+                # create console if requested (scheduled on UI thread inside helper)
+                try:
+                    if actual_show_console:
+                        _ensure_js_console()
+                except Exception:
+                    pass
+
+                # combined logger: writes to console (if available) and to provided log_fn
+                def _combined_log(s: str):
+                    try:
+                        if actual_show_console:
+                            _console_append(s)
+                        elif callable(log_fn):
+                            # still forward to provided log_fn even when no console
+                            try:
+                                log_fn(s)
+                            except Exception:
+                                pass
+                        else:
+                            # fallback: print so there's some visible output
+                            try:
+                                print(s)
+                            except Exception:
+                                pass
+                        # always call external log_fn as well if present
+                        if callable(log_fn):
+                            try:
+                                log_fn(s)
+                            except Exception:
+                                pass
+                    except Exception:
+                        try:
+                            print(s)
+                        except Exception:
+                            pass
+
+                # create a shared context so timers/globals persist across scripts
+                ctx = jsmini.make_context(log_fn=_combined_log if (actual_show_console or callable(log_fn)) else None)
+
+                if host_update_cb:
+                    try:
+                        ctx['setRaw'] = host_update_cb
+                        ctx['host'] = {'setRaw': host_update_cb, 'forceRerender': lambda: host_update_cb(None)}
+                    except Exception:
+                        pass
+
+                for idx, s in enumerate(scripts):
+                    try:
+                        src_info = s.get('src') or '<inline>'
+                        _combined_log(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}")
+                        preview = (s.get('inline') or '')[:400] if not s.get('src') else None
+                        if preview:
+                            _combined_log(f"[jsconsole] Inline preview: {preview!r}{'...' if len(s.get('inline') or '')>400 else ''}")
+                    except Exception:
+                        pass
+
+                    if s.get('src'):
+                        src = s['src']
+                        resolved = src
+                        try:
+                            if base_url:
+                                resolved = _up.urljoin(base_url, src)
+                            req = _urr.Request(resolved, headers={"User-Agent": "SimpleEdit/jsmini"})
+                            with _urr.urlopen(req, timeout=10) as resp:
+                                raw_bytes = resp.read()
+                                script_src = raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace')
+                        except Exception as fe:
+                            _combined_log(f"[jsconsole] Failed to fetch {resolved}: {fe}")
+                            local_results.append((False, f"Failed to fetch {resolved}: {fe}"))
+                            continue
+                    else:
+                        script_src = s.get('inline', '') or ''
+
+                    try:
+                        jsmini.run_with_interpreter(script_src, ctx)
+                        _combined_log(f"[jsconsole] Script {idx + 1} executed successfully.")
+                        # bring console forward briefly if present so user sees progress
+                        try:
+                            if actual_show_console:
+                                _bring_console_to_front()
+                        except Exception:
+                            pass
+                        local_results.append((True, None))
+                    except Exception as rexc:
+                        _combined_log(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                        local_results.append((False, f"Execution error: {rexc}"))
+                        continue
+
+                # run timers after scripts
+                try:
+                    _combined_log("[jsconsole] Running timers...")
+                    jsmini.run_timers(ctx)
+                    _combined_log("[jsconsole] Timers run complete.")
+                except Exception as exc:
+                    _combined_log(f"[jsconsole] Timers error: {exc}")
+
+                _combined_log("[jsconsole] All scripts processed.")
+            except Exception as e:
+                try:
+                    _console_append(f"[jsconsole] Unexpected error in async worker: {e}")
+                except Exception:
+                    try:
+                        print(f"[jsconsole] Unexpected error in async worker: {e}")
+                    except Exception:
+                        pass
+            finally:
+                # If a caller later inspects results via side-channel you could persist them somewhere.
+                return
+
+        Thread(target=_worker, daemon=True).start()
+        return [('async', None)]
+
+    # Synchronous (blocking) path: run in current thread (used when run_blocking=True or not on main thread)
+    console_created = False
+    if actual_show_console:
         try:
+            _ensure_js_console()
+            console_created = True
+            _console_append(f"[jsconsole] Opened console for {len(scripts)} script(s).")
+        except Exception:
+            console_created = False
+
+    # combined logger for sync path
+    def _combined_log_sync(s: str):
+        try:
+            if actual_show_console:
+                _console_append(s)
+            if callable(log_fn):
+                try:
+                    log_fn(s)
+                except Exception:
+                    pass
+            if not actual_show_console and not callable(log_fn):
+                try:
+                    print(s)
+                except Exception:
+                    pass
+        except Exception:
+            try:
+                print(s)
+            except Exception:
+                pass
+
+    ctx = jsmini.make_context(log_fn=_combined_log_sync if (actual_show_console or callable(log_fn)) else None)
+    if host_update_cb:
+        try:
+            ctx['setRaw'] = host_update_cb
+            ctx['host'] = {
+                'setRaw': host_update_cb,
+                'forceRerender': lambda: host_update_cb(None)
+            }
+        except Exception:
+            pass
+
+    for idx, s in enumerate(scripts):
+        try:
+            try:
+                src_info = s.get('src') or '<inline>'
+                _combined_log_sync(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}")
+                preview = (s.get('inline') or '')[:400] if not s.get('src') else None
+                if preview:
+                    _combined_log_sync(f"[jsconsole] Inline preview: {preview!r}{'...' if len(s.get('inline') or '')>400 else ''}")
+            except Exception:
+                pass
+
             if s.get('src'):
                 src = s['src']
                 resolved = src
@@ -1861,26 +2159,39 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                         raw_bytes = resp.read()
                         script_src = raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace')
                 except Exception as fe:
+                    _combined_log_sync(f"[jsconsole] Failed to fetch {resolved}: {fe}")
                     results.append((False, f"Failed to fetch {resolved}: {fe}"))
                     continue
             else:
                 script_src = s.get('inline', '') or ''
 
-            # run script and keep interpreter on ctx for timers
             try:
                 jsmini.run_with_interpreter(script_src, ctx)
+                _combined_log_sync(f"[jsconsole] Script {idx + 1} executed successfully.")
             except Exception as rexc:
+                _combined_log_sync(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
                 results.append((False, f"Execution error: {rexc}"))
                 continue
 
+            try:
+                if console_created:
+                    _bring_console_to_front()
+            except Exception:
+                pass
+
             results.append((True, None))
         except Exception as e:
+            _combined_log_sync(f"[jsconsole] Unexpected error running script {idx + 1}: {e}")
             results.append((False, str(e)))
-    # after running inline/external scripts, run timers (simulated)
+
     try:
+        _combined_log_sync("[jsconsole] Running timers...")
         jsmini.run_timers(ctx)
-    except Exception:
-        pass
+        _combined_log_sync("[jsconsole] Timers run complete.")
+    except Exception as exc:
+        _combined_log_sync(f"[jsconsole] Timers error: {exc}")
+
+    _combined_log_sync("[jsconsole] All scripts processed.")
     return results
 
 def get_hex_color(color_tuple):

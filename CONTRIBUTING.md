@@ -1,0 +1,101 @@
+# CONTRIBUTING.md
+# Contributing to SimpleEdit
+ 
+Thank you for contributing to SimpleEdit. This document describes the project's coding standards, configuration conventions, and a few project-level preferences contributors must follow.
+ 
+## Guidelines
+
+This repository follows a small set of UI and editor behavior invariants that must be preserved by all code changes. The goal is predictable editor UX and avoiding surprising global side-effects caused by syntax preset application.
+- Keep changes small and focused. Open a pull request with a clear title and description.
+- Add or update tests for non-trivial logic when possible.
+- Preserve existing public behavior unless explicitly changing defaults; document any behavioral changes in the PR description.
+- Keep UI text and error messages clear and user-friendly.
+ 
+## Coding Standards
+
+- Follow Python idioms consistent with the existing codebase.
+- Use 4-space indentation.
+- Keep functions small and focused; prefer helper functions for repeated logic.
+- Preserve the project's exception-handling style (defensive, best-effort to keep UI responsive).
+- Use descriptive variable and function names. Prefer `snake_case` for functions and variables and `CamelCase` for classes.
+- Do not modify or remove the mandatory configuration keys unless accompanied by a migration and clear documentation.
+- Always keep code style consistent with .editorconfig (when present).
+- Avoid global side-effects when making per-tab visual changes. Prefer per-frame / per-widget transient state.
+
+ ## Configuration and preferences
+ 
+ Project-wide runtime settings live in `config.ini` under the `Section1` header. When adding a new configurable behavior, use an explicit key under `Section1` and provide a reasonable default in the code and the `DEFAULT_CONFIG` structure.
+ 
+ New preference introduced in this change:
+ 
+-`renderOnOpenExtensions` (Section: `Section1`)
+  - Type: comma-separated string
+  - Default: `html,htm,md,markdown,php,js`
+  - Purpose: lists file extensions (without leading dots) that should default to the "Rendered" view when opened. Files matching these extensions and any URL-like location (http/https/file:// or `www.`) will default to rendered mode unless the user checks the "Open as source" option or the per-tab "Load as source" override.
+ 
+ Behavioral notes related to this preference:
+ 
+- When a tab is in Rendered view (i.e. parsed HTML/MD/markup display), the standard worker-driven syntax highlighter is disabled to avoid conflicts with the rendering engine. Users can still toggle between Raw and Rendered view per-tab.
+- Changes that alter the default set of extensions should update `DEFAULT_CONFIG` in `functions.py` and the settings UI so users can edit the list via the Settings dialog.
+ 
+## Syntax highlighting policy (critical)
+
+This project enforces a strict rule:
+
+- Syntax highlighting MUST NEVER be applied while a tab is in Rendered view (i.e. when the tab/frame property `_view_raw` is False).
+
+Details:
+
+- "Rendered view" refers to the editor state where parsed HTML/Markdown has been converted to a presentational form and is being displayed. The frame attribute `_view_raw` is used in the codebase to indicate raw/source vs rendered state. When `_view_raw` is False, the tab is Rendered.
+
+- Under no circumstance should any syntax tags (e.g. `string`, `keyword`, `comment`, `html_tag`, `html_attr`, `table`, etc.), transient preset colors, or regex-based highlighting be applied to a Text widget showing Rendered content.
+
+- Detection (auto-detect presets) MAY run in the background for convenience, but it MUST NOT apply presets to widgets in Rendered view. If detection finds a matching preset for a rendered document, the code SHOULD store the detected preset path on the frame (for example `frame._detected_syntax_preset`) or on root for later manual application. It should NOT call functions that configure tags on the Text widget, and it should NOT mutate the global `config` via `apply_syntax_preset` while the tab is rendered.
+
+- When a user switches a rendered tab to Raw/Source view (via toggle), any stored detected preset may be applied at that point (if the user requests it or as explicitly permitted by user-configured options). Only then may transient or persistent syntax tag configs be applied to the Text widget.
+
+- All code paths that open content (file dialog, URL bar, hyperlink click, history/back/refresh, templates) must respect this rule. This includes both immediate application and transient application on new tab creation.
+
+ ## Developer workflow
+ 
+- Branch from `prototype-javascript-support` for JS/HTML related work.
+- Run the app and manually test open/save flows for both local files and URLs.
+- If adding a new config key, update `DEFAULT_CONFIG` in `functions.py` and add UI to `Settings` where appropriate.
+ 
+## Implementation guidance
+
+When making code changes refer to these concrete rules:
+
+1. apply_syntax_preset_transient(path, text_widget) MUST return without configuring the widget if the target widget's parent frame reports `_view_raw == False`. The function may still record the detected preset on the frame for later application.
+
+2. Any calls to `apply_syntax_preset(...)` (persistent apply to global config) MUST NOT be invoked for content that is opened in rendered mode. Instead, detected presets may be stored for later use (e.g., `frame._detected_syntax_preset`).
+
+3. `manual_detect_syntax()` and UI-driven detection flows must respect the frame's `_view_raw` state and only apply transient/persistent presets when the frame is in Raw/Source mode.
+
+4. `highlight_python_helper`, `safe_highlight_event`, and other highlighter entry points already short-circuit when `_view_raw` is False; ensure no other code path configures tags unconditionally.
+
+5. If a code path currently applies transient presets when opening a URL/file in a new tab (e.g. `open_url_action`, `fetch_and_open_url`, `_open_path`), update it to either:
+   - only apply transient presets when the new tab is opened in Raw/Source mode; or
+   - store the detected preset on the frame (e.g. `fr._detected_syntax_preset = path`) and set a status message indicating the preset is detected but suppressed for Rendered view.
+
+## Testing requirements
+
+- Add unit or manual tests validating all open flows (File -> Open modal, native Open, Open URL dialog/toolbar, hyperlink clicks, history/back/refresh) do not apply syntax tags on tabs that end up in Rendered mode.
+- Validate that when a preset has been detected for a rendered page it is only applied after switching the tab to Raw/Source view (and not before).
+
+## Rationale
+
+Applying syntax highlighting while the editor is showing a Rendered representation produces confusing UI: highlighting may change the visual appearance of parsed HTML, and persistent config changes can surprise users when following hyperlinks or toggling views. This rule preserves a clear separation between presentational rendering and source-mode editing.
+
+## Style / Formatting
+
+- Follow the project's `.editorconfig` if present (create one if missing with standard Python rules: 4-space indent, UTF-8, LF). If you add or modify `.editorconfig`, ensure it matches the expectations described in this document.
+ 
+## Contact
+ 
+If you're unsure about a change or need help testing, open an issue or contact the maintainers via GitHub.
+
+## Notes for contributors
+
+- If you modify detection or apply flows, update this document accordingly.
+- When in doubt, prefer *not applying* highlighting in Rendered mode; store the detected preset for an explicit later application instead.

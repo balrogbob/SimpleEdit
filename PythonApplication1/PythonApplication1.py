@@ -233,13 +233,9 @@ def _open_path(path: str, open_in_new_tab: bool = True):
         ext = path.lower() if isinstance(path, str) else ''
         want_rendered = _should_open_rendered_by_default(path, load_as_source_flag=config.getboolean("Section1", "openHtmlAsSource", fallback=False), sample_content=(raw[:2048] if raw else None))
         if want_rendered:
-            # IMPORTANT: Do NOT auto-detect/apply syntax presets when opening rendered content by default.
-            # Auto-applying syntax here caused unwanted preset changes when following hyperlinks.
-            # Respect existing user preference `autoDetectSyntax` only for source-mode opens, or allow
-            # opt-in behavior for rendered-mode via a separate config flag if needed.
+            # optional autodetect -> apply a matching syntax preset before parsing if enabled
             try:
-                allow_in_rendered = config.getboolean("Section1", "autoDetectSyntaxInRendered", fallback=False)
-                if allow_in_rendered and config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
                     preset_path = detect_syntax_preset_from_content(raw)
                     if preset_path:
                         applied = apply_syntax_preset(preset_path)
@@ -483,6 +479,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
+
 
 def _ask_open_choice(path: str):
     """Modal: ask user whether to open a recent item in current or new tab, optional 'remember' checkbox."""
@@ -1237,7 +1234,11 @@ def _toggle_browsing_mode_from_menu():
     except Exception:
         pass
 settingsMenu.add_command(label="Toggle Browsing Mode", command=_toggle_browsing_mode_from_menu)
-
+try:
+    # funcs is imported near top of the file already
+    funcs.install_js_console_menu_item(settingsMenu)
+except Exception:
+    pass
 # Helper to return a nicely formatted parameter count string for the loaded model
 def _get_model_param_text():
     try:
@@ -3763,6 +3764,7 @@ def _close_tab_immediate(frame):
             parent=root
         )
         pass
+
 
 def _on_tab_changed(event):
     try:
@@ -6569,7 +6571,21 @@ def toggle_raw_rendered():
             return
         raw_stored = getattr(frame, '_raw_html', None)
         currently_raw = bool(getattr(frame, '_view_raw', False))
+
+        # Helper tag lists for mutual-exclusive views
+        SYNTAX_TAGS = (
+            'string', 'keyword', 'comment', 'selfs', 'def', 'number', 'variable',
+            'decorator', 'class_name', 'constant', 'attribute', 'builtin', 'todo',
+        )
+        PRESENTATION_TAGS = (
+            'html_tag', 'html_attr', 'html_attr_value', 'html_comment',
+            'table', 'tr', 'td', 'th', 'table_sep',
+            'td_colspan', 'td_rowspan', 'td_has_attrs',
+            'hyperlink', 'marquee'
+        )
+
         if currently_raw:
+            # Raw -> Rendered
             try:
                 raw_text = tw.get('1.0', 'end-1c')
             except Exception:
@@ -6582,15 +6598,19 @@ def toggle_raw_rendered():
                 plain, tags_meta = funcs._parse_html_and_apply(raw_text)
             except Exception:
                 plain, tags_meta = raw_text, None
+
             try:
-                frame._raw_html_plain = plain
-                frame._raw_html_tags_meta = tags_meta
-            except Exception:
-                pass
-            try:
+                # Clear syntax tags before inserting rendered content to avoid collisions
+                for t in SYNTAX_TAGS:
+                    try:
+                        tw.tag_remove(t, '1.0', 'end')
+                    except Exception:
+                        pass
+                # Replace content with rendered/plain text and apply presentation tag configs
                 tw.delete('1.0', 'end')
                 tw.insert('1.0', plain or '')
                 _apply_tag_configs_to_widget(tw)
+
                 if tags_meta and tags_meta.get('tags'):
                     prev_ta = globals().get('textArea', None)
                     try:
@@ -6599,10 +6619,12 @@ def toggle_raw_rendered():
                     finally:
                         if prev_ta is not None:
                             globals()['textArea'] = prev_ta
+
                 frame._view_raw = False
                 statusBar['text'] = "Rendered HTML view (from current raw buffer)"
             except Exception:
                 pass
+
             # Re-run scripts after switching to Rendered view (user may have edited JS in Raw)
             try:
                 scripts_to_run = funcs.extract_script_tags(frame._raw_html or '')
@@ -6617,17 +6639,43 @@ def toggle_raw_rendered():
                     print("[debug] run_scripts results (toggle raw->rendered):", run_results)
             except Exception:
                 pass
+
         else:
+            # Rendered -> Raw
             try:
                 raw_to_show = getattr(frame, '_raw_html', None) or tw.get('1.0', 'end-1c')
                 frame._raw_html = raw_to_show
+
+                # Clear presentation/parser-applied tags and hyperlink mappings to avoid collisions with syntax tags
+                try:
+                    for t in PRESENTATION_TAGS:
+                        try:
+                            tw.tag_remove(t, '1.0', 'end')
+                        except Exception:
+                            pass
+                    # clear any stored hyperlink mapping (parser-provided or detected)
+                    try:
+                        if hasattr(tw, '_hyperlink_map'):
+                            tw._hyperlink_map.clear()
+                    except Exception:
+                        try:
+                            tw._hyperlink_map = {}
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+
+                # Replace content with raw HTML/source and reconfigure tags appropriate for source editing
                 tw.delete('1.0', 'end')
                 tw.insert('1.0', raw_to_show or '')
                 _apply_tag_configs_to_widget(tw)
+
                 frame._view_raw = True
                 statusBar['text'] = "Raw HTML view"
             except Exception:
                 statusBar['text'] = "Failed to switch to Raw view"
+
+        # Common refresh: trigger lightweight/highlighting updates and UI indicator
         try:
             safe_highlight_event(None)
         except Exception:
@@ -6640,9 +6688,13 @@ def toggle_raw_rendered():
         _apply_browsing_mode_for_current_tab()
     except Exception:
         pass
-
 def update_view_status_indicator():
-    """Update the small status label indicating Raw/Rendered and source/URL state for current tab."""
+    """Update the small status label indicating Raw/Rendered and source/URL state for current tab.
+
+    When switching views we adjust the runtime syntax-checkbox state but DO NOT persist that
+    adjustment to config. The user-controlled checkbox persists only on explicit user action.
+    """
+    global _suppress_syntax_toggle_persist
     try:
         # If viewIndicator doesn't exist (older UI), skip
         if 'viewIndicator' not in globals():
@@ -6655,6 +6707,27 @@ def update_view_status_indicator():
         view_raw = bool(getattr(frame, '_view_raw', False))
         opened_src = bool(getattr(frame, '_opened_as_source', False))
         fn = getattr(frame, 'fileName', '') or ''
+
+        # 1) Adjust the runtime syntax checkbox variable depending on view_raw.
+        #    - Rendered view => turn the checkbox OFF at runtime (no persistence).
+        #    - Raw view      => restore runtime checkbox to the persisted config value (no persistence).
+        try:
+            _suppress_syntax_toggle_persist = True
+            if view_raw:
+                # restore runtime state from config (do NOT write it)
+                desired = 1 if config.getboolean("Section1", "syntaxHighlighting", fallback=True) else 0
+            else:
+                # rendered view -> runtime off
+                desired = 0
+            try:
+                updateSyntaxHighlighting.set(desired)
+            except Exception:
+                # best-effort: ignore failures here
+                pass
+        finally:
+            _suppress_syntax_toggle_persist = False
+
+        # Build status text
         if view_raw:
             txt = 'View: Raw'
         else:
@@ -6718,7 +6791,6 @@ def update_view_status_indicator():
 
     except Exception:
         pass
-
 def safe_highlight_event(event=None):
     """
     Centralized event handler used by input/scroll/click bindings.
@@ -8168,12 +8240,20 @@ def _on_status_syntax_toggle():
 
     When disabling: remove all syntax and HTML-specific tags from every open Text widget
     (so parser-applied html_tag/html_attr/html_comment/ table/hyperlink ranges do not remain).
+
+    Note: programmatic updates (from view-switch code) set `_suppress_syntax_toggle_persist`
+    to True to avoid overwriting the saved config when we only want to change runtime behavior.
     """
+    global _suppress_syntax_toggle_persist
     try:
-        # persist change to config immediately
-        config.set("Section1", "syntaxHighlighting", str(bool(updateSyntaxHighlighting.get())))
-        with open(INI_PATH, 'w') as cfgf:
-            config.write(cfgf)
+        # Persist change to config only when not suppressed
+        if not _suppress_syntax_toggle_persist:
+            try:
+                config.set("Section1", "syntaxHighlighting", str(bool(updateSyntaxHighlighting.get())))
+                with open(INI_PATH, 'w') as cfgf:
+                    config.write(cfgf)
+            except Exception:
+                pass
     except Exception:
         pass
 
@@ -8222,13 +8302,6 @@ def _on_status_syntax_toggle():
                                 tw.tag_remove(t, "1.0", "end")
                             except Exception:
                                 pass
-                        # remove any hex_ tags? keep them so color tokens still show; if you want to remove, uncomment:
-                        # for t in list(tw.tag_names()):
-                        #     if t.startswith('hex_'):
-                        #         try:
-                        #             tw.tag_remove(t, "1.0", "end")
-                        #         except Exception:
-                        #             pass
                     except Exception:
                         pass
 
@@ -8263,7 +8336,6 @@ def _on_status_syntax_toggle():
             statusBar['text'] = "Syntax highlighting disabled."
     except Exception:
         pass
-
 def _collect_formatting_ranges():
     """Return dict mapping formatting tag -> list of (start_offset, end_offset)."""
     tags_to_check = ('bold', 'italic', 'underline', 'all',
@@ -8436,11 +8508,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                     preset_path = None
             else:
                 plain, tags_meta = funcs._parse_html_and_apply(raw)
-                try:
-                    if config.getboolean("Section1", "autoDetectSyntax", fallback=True) and not preset_path:
-                        preset_path = detect_syntax_preset_from_content(raw, filename_hint=url2)
-                except Exception:
-                    preset_path = None
+                preset_path = None
 
             def ui():
                 try:
@@ -8581,6 +8649,7 @@ updateSyntaxHighlighting = IntVar(value=config.getboolean("Section1", "syntaxHig
 fullScanEnabled = IntVar(value=config.getboolean("Section1", "fullScanEnabled", fallback=True))
 openHtmlAsSourceVar = IntVar(value=config.getboolean("Section1", "openHtmlAsSource", fallback=False))
 browsingModeVar = IntVar(value=0)
+_suppress_syntax_toggle_persist = False
 
 def _on_open_as_source_toggle():
     """Persist the 'Open HTML/MD as source' toggle and update status text."""
@@ -10605,7 +10674,12 @@ def create_config_window():
     ttk.Checkbutton(container, text="Save formatting into file (hidden header)", variable=saveFormattingVar).grid(row=7, column=0, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when opening a file", variable=loadAIOnOpenVar).grid(row=7, column=1, sticky='w', pady=6)
     ttk.Checkbutton(container, text="Load AI when creating a new file", variable=loadAIOnNewVar).grid(row=7, column=2, sticky='w', pady=6)
-
+        # Persisted JS Console default (added)
+    try:
+        jsConsoleVar = IntVar(value=(funcs.get_js_console_default() if funcs else False))
+    except Exception:
+        jsConsoleVar = IntVar(value=0)
+    ttk.Checkbutton(container, text="Open JS Console for scripts (persisted default)", variable=jsConsoleVar).grid(row=13, column=0, columnspan=2, sticky='w', pady=6)
     aiMaxContextField = mk_row("Max AI Context", 8, config.get("Section1", "aiMaxContext"))
     temperatureField = mk_row("AI Temperature", 9, config.get("Section1", "temperature"))
     top_kField = mk_row("AI top_k", 10, config.get("Section1", "top_k"))
@@ -10765,6 +10839,12 @@ def create_config_window():
         config.set("Section1", "loadAIOnOpen", str(bool(loadAIOnOpenVar.get())))
         config.set("Section1", "loadAIOnNew", str(bool(loadAIOnNewVar.get())))
         config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
+                # Persist JS Console default
+        try:
+            if 'jsConsoleVar' in locals() or 'jsConsoleVar' in globals():
+                funcs.set_js_console_default(bool(jsConsoleVar.get()))
+        except Exception:
+            pass
         config.set("Section1", "exportCssMode", cssModeVar.get())
         config.set("Section1", "exportCssPath", cssPathField.get())
         config.set("Section1", "renderOnOpenExtensions", renderExtField.get().strip())
@@ -10860,6 +10940,10 @@ def create_config_window():
         except Exception:
             pass
 
+        try:
+            jsConsoleVar.set(funcs.get_js_console_default() if funcs else 0)
+        except Exception:
+            pass
     ttk.Button(action_frame, text="Save", command=on_closing).grid(row=0, column=1, padx=6)
     ttk.Button(action_frame, text="Refresh from file", command=refresh_from_file).grid(row=0, column=2, padx=6)
     ttk.Button(action_frame, text="Close", command=top.destroy).grid(row=0, column=3, padx=6)
