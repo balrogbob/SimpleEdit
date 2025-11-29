@@ -1247,9 +1247,44 @@ class _SimpleHTMLToTagged(HTMLParser):
             meta = {'tags': self.ranges}
             if self.hrefs:
                 meta['links'] = list(self.hrefs)
+
             # Build rich table metadata (rows, cells with attrs) using recorded _table_meta and _cell_meta.
             try:
                 tables = []
+
+                def _looks_like_layout_table(table_meta) -> bool:
+                    """Heuristic: return True for tables that look like layout (styling, floats, images, inconsistent cols)."""
+                    try:
+                        attrs = table_meta.get('attrs') or {}
+                        style = (attrs.get('style') or '').lower()
+                        layout_kw = ('width', 'padding', 'float', 'position', 'max-width', 'min-width')
+                        if any(kw in style for kw in layout_kw):
+                            return True
+
+                        rows = table_meta.get('rows') or []
+                        # inconsistent column counts hint at layout tables (cells merged/uneven)
+                        col_counts = [len(r) for r in rows if isinstance(r, list) and r]
+                        if col_counts and (max(col_counts) != min(col_counts)):
+                            return True
+                        # inspect cell-level attrs and visible text for images/blocks
+                        for r in rows:
+                            for cell in r:
+                                cattrs = (cell.get('attrs') or {}) if isinstance(cell, dict) else {}
+                                cstyle = (cattrs.get('style') or '').lower()
+                                if any(kw in cstyle for kw in ('width', 'padding', 'float')):
+                                    return True
+                                txt = (cell.get('text') or '') if isinstance(cell, dict) else ''
+                                txt_l = str(txt).lower()
+                                # parser stores image placeholders like "[img:" when encountering <img>
+                                if 'img:' in txt_l or '<img' in txt_l or 'art-lightbox' in txt_l:
+                                    return True
+                                # headings or block-level markers in a cell suggest layout usage
+                                if re.search(r'\b(h1|h2|h3|h4|h5|h6)\b', txt_l):
+                                    return True
+                        return False
+                    except Exception:
+                        return False
+
                 for t in self._table_meta:
                     try:
                         tstart = int(t.get('start', 0))
@@ -1289,33 +1324,43 @@ class _SimpleHTMLToTagged(HTMLParser):
                             table_rows.append(row_cells)
                             abs_cursor += len(rtext) + 1
 
-                        # Ensure colgroup information is present (best-effort). If source provided a colgroup prefer it,
-                        # otherwise compute widths from measured cell first-line lengths.
+                        # Decide whether this is a layout table; if so, avoid aggressive column-padding
                         colgroup = t.get('colgroup', []) or []
                         if not colgroup:
-                            # compute per-column widths heuristically
                             try:
-                                max_cols = max((len(r) for r in table_rows), default=0)
-                                if max_cols:
-                                    col_widths = [0] * max_cols
-                                    for r in table_rows:
-                                        for ci, cell in enumerate(r):
-                                            txt = (cell.get('text') or '')
-                                            visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
-                                            col_widths[ci] = max(col_widths[ci], len(visible))
-                                    # only include reasonable widths (non-zero)
-                                    colgroup = [{'width': int(max(1, w))} for w in col_widths]
+                                # Use the recorded t (which contains 'rows' metadata from parse) to test layout heuristics.
+                                layout_like = _looks_like_layout_table(t)
+                                if not layout_like:
+                                    # compute per-column widths heuristically only for data-like tables
+                                    max_cols = max((len(r) for r in table_rows), default=0)
+                                    if max_cols:
+                                        col_widths = [0] * max_cols
+                                        for r in table_rows:
+                                            for ci, cell in enumerate(r):
+                                                txt = (cell.get('text') or '')
+                                                visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
+                                                col_widths[ci] = max(col_widths[ci], len(visible))
+                                        if max(col_widths, default=0) > 0 and max_cols > 0:
+                                            colgroup = [{'width': max(4, int(w))} for w in col_widths]
+                                else:
+                                    # keep colgroup empty for layout tables so downstream rendering preserves original structure
+                                    colgroup = []
                             except Exception:
                                 colgroup = []
 
                         table_entry = {'start': tstart, 'end': tend, 'attrs': t.get('attrs', {}), 'rows': table_rows, 'colgroup': colgroup}
+                        # mark layout tables explicitly to aid downstream rendering decisions
+                        try:
+                            if _looks_like_layout_table(t):
+                                table_entry['layout_table'] = True
+                        except Exception:
+                            pass
+
                         tables.append(table_entry)
                     except Exception:
                         continue
                 if tables:
                     meta['tables'] = tables
-            except Exception:
-                pass
             except Exception:
                 pass
             try:
@@ -1328,6 +1373,7 @@ class _SimpleHTMLToTagged(HTMLParser):
             return full, meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
+
     # --- Codeblock syntax helpers (isolated tags: cb_*) ----------------------
     def _cb_apply_syntax(self, lang: str, text: str, base_off: int):
         lang = (lang or '').lower()
