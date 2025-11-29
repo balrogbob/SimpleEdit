@@ -80,6 +80,52 @@ try:
     import functions as funcs
 except Exception:
     import functions as funcs  # fallback if running as script
+# --- Render / view helpers (config-driven) ------------------------------
+# Decide which file extensions / locations should default to Rendered view.
+def _get_render_on_open_extensions() -> set:
+    try:
+        raw = config.get("Section1", "renderOnOpenExtensions", fallback="html,htm,md,markdown,php,js")
+        items = [x.strip().lstrip('.').lower() for x in re.split(r'[,\s;]+', raw) if x.strip()]
+        return set(items)
+    except Exception:
+        return {"html", "htm", "md", "markdown", "php", "js"}
+
+def _is_html_compliant(path_or_url: str | None, sample_content: str | None = None) -> bool:
+    """
+    Heuristic: return True for file paths or URLs that are HTML/markup-like.
+    - URLs (http/https/file:/// or starting with www.) -> True
+    - extension in config.renderOnOpenExtensions -> True
+    - sample_content sniff: look for <!doctype html>, <html>, <body>, <table>, common tags
+    """
+    try:
+        if isinstance(path_or_url, str) and path_or_url:
+            s = path_or_url.strip()
+            lower = s.lower()
+            if lower.startswith("http://") or lower.startswith("https://") or lower.startswith("file:///") or lower.startswith("www."):
+                return True
+            # extension check
+            _, ext = os.path.splitext(lower.split('?', 1)[0].split('#', 1)[0])
+            if ext:
+                ext = ext.lstrip('.')
+                if ext and ext in _get_render_on_open_extensions():
+                    return True
+        if sample_content:
+            sample = (sample_content or '')[:2048].lower()
+            if '<!doctype html' in sample or '<html' in sample or '<body' in sample or '<table' in sample or '<div' in sample or '<script' in sample:
+                return True
+        return False
+    except Exception:
+        return False
+
+def _should_open_rendered_by_default(path_or_url: str | None, load_as_source_flag: bool = False, sample_content: str | None = None) -> bool:
+    """Master decision: returns True when the file/URL should default to Rendered view."""
+    try:
+        if load_as_source_flag:
+            return False
+        return _is_html_compliant(path_or_url, sample_content)
+    except Exception:
+        return False
+
 # -------------------------
 # Config / MRU initialization
 # -------------------------
@@ -183,8 +229,10 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 root.after(0, highlightPythonInit)
             return
 
-        ext = path.lower().split('.')[-1] if isinstance(path, str) else ''
-        if ext in ('md', 'html', 'htm'):
+        # Decide whether this file should be treated as HTML/markdown-like (default to rendered view)
+        ext = path.lower() if isinstance(path, str) else ''
+        want_rendered = _should_open_rendered_by_default(path, load_as_source_flag=config.getboolean("Section1", "openHtmlAsSource", fallback=False), sample_content=(raw[:2048] if raw else None))
+        if want_rendered:
             # optional autodetect -> apply a matching syntax preset before parsing if enabled
             try:
                 if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
@@ -196,7 +244,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             except Exception:
                 pass
 
-            # respect "open as source" setting
+            # If user explicitly requested "open as source", treat as source regardless
             if config.getboolean("Section1", "openHtmlAsSource", fallback=False):
                 if open_in_new_tab:
                     tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", raw, filename=path)
@@ -6659,8 +6707,22 @@ def safe_highlight_event(event=None):
     except Exception:
         pass
     try:
-        # only run the (potentially expensive) syntax pass when enabled
-        if updateSyntaxHighlighting.get():
+        # only run the (potentially expensive) syntax pass when enabled AND when the current tab is in RAW view.
+        run_highlighter = False
+        try:
+            if updateSyntaxHighlighting.get():
+                sel = editorNotebook.select()
+                if sel:
+                    frame = root.nametowidget(sel)
+                    # _view_raw==False => currently rendered view; skip worker highlighter in rendered mode
+                    if getattr(frame, '_view_raw', True):
+                        run_highlighter = True
+                else:
+                    run_highlighter = True
+        except Exception:
+            run_highlighter = bool(updateSyntaxHighlighting.get())
+
+        if run_highlighter:
             try:
                 highlight_python_helper(event)
             except Exception:
@@ -10498,6 +10560,8 @@ def create_config_window():
     temperatureField = mk_row("AI Temperature", 9, config.get("Section1", "temperature"))
     top_kField = mk_row("AI top_k", 10, config.get("Section1", "top_k"))
     seedField = mk_row("AI seed", 11, config.get("Section1", "seed"))
+    # New: render-on-open extensions (comma-separated, no leading dots) -> controls which extensions default to rendered view
+    renderExtField = mk_row("Render-on-open extensions", 12, config.get("Section1", "renderOnOpenExtensions", fallback="html,htm,md,markdown,php,js"))
 
     promptOnRecentOpen = config.getboolean("Section1", "promptOnRecentOpen", fallback=True)
     recentOpenDefault = config.get("Section1", "recentOpenDefault", fallback="new")  # "new" or "current"
@@ -10653,7 +10717,7 @@ def create_config_window():
         config.set("Section1", "saveFormattingInFile", str(bool(saveFormattingVar.get())))
         config.set("Section1", "exportCssMode", cssModeVar.get())
         config.set("Section1", "exportCssPath", cssPathField.get())
-        # persist new open-as-source option
+        config.set("Section1", "renderOnOpenExtensions", renderExtField.get().strip())
         config.set("Section1", "openHtmlAsSource", str(bool(openAsSourceVar.get())))
         config.set("Section1", "promptOnRecentOpen", str(bool(promptRecentOpenVar.get())))
         config.set("Section1", "saveZoom", str(bool(saveZoomVar.get())))

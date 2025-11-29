@@ -1187,8 +1187,15 @@ class _SimpleHTMLToTagged(HTMLParser):
             pass
 
     def get_result(self):
+        """Produce final plain text and meta (tags, links, tables).
+        This implementation preserves existing link/code metadata while applying
+        aggressive, safe whitespace normalization for table cells and conservative
+        padding that avoids pathological column expansion.
+        """
         try:
             full = ''.join(self.out)
+
+            # --- map markdown-style [text](url) into hyperlink ranges (preserve code blocks) ---
             try:
                 md_link_re = re.compile(
                     r'\[([^\]]+)\]\('
@@ -1241,19 +1248,15 @@ class _SimpleHTMLToTagged(HTMLParser):
             except Exception:
                 pass
 
-            # Build meta and perform a final soft top-of-document whitespace collapse.
-            # This keeps the first rendered content at the top (or one line down),
-            # without touching code/pre or internal spacing elsewhere.
             meta = {'tags': self.ranges}
             if self.hrefs:
                 meta['links'] = list(self.hrefs)
 
-            # Build rich table metadata (rows, cells with attrs) using recorded _table_meta and _cell_meta.
+            # --- Build table metadata with safe whitespace normalization and padding ---
             try:
                 tables = []
 
                 def _looks_like_layout_table(table_meta) -> bool:
-                    """Heuristic: return True for tables that look like layout (styling, floats, images, inconsistent cols)."""
                     try:
                         attrs = table_meta.get('attrs') or {}
                         style = (attrs.get('style') or '').lower()
@@ -1262,11 +1265,10 @@ class _SimpleHTMLToTagged(HTMLParser):
                             return True
 
                         rows = table_meta.get('rows') or []
-                        # inconsistent column counts hint at layout tables (cells merged/uneven)
                         col_counts = [len(r) for r in rows if isinstance(r, list) and r]
                         if col_counts and (max(col_counts) != min(col_counts)):
                             return True
-                        # inspect cell-level attrs and visible text for images/blocks
+
                         for r in rows:
                             for cell in r:
                                 cattrs = (cell.get('attrs') or {}) if isinstance(cell, dict) else {}
@@ -1275,15 +1277,33 @@ class _SimpleHTMLToTagged(HTMLParser):
                                     return True
                                 txt = (cell.get('text') or '') if isinstance(cell, dict) else ''
                                 txt_l = str(txt).lower()
-                                # parser stores image placeholders like "[img:" when encountering <img>
                                 if 'img:' in txt_l or '<img' in txt_l or 'art-lightbox' in txt_l:
                                     return True
-                                # headings or block-level markers in a cell suggest layout usage
                                 if re.search(r'\b(h1|h2|h3|h4|h5|h6)\b', txt_l):
                                     return True
                         return False
                     except Exception:
                         return False
+
+                def _normalize_cell_text(s: str) -> str:
+                    """Collapse runs of whitespace but preserve IN_CELL_NL as line separators."""
+                    try:
+                        if not isinstance(s, str):
+                            return '' if s is None else str(s).strip()
+                        # Protect IN_CELL_NL while collapsing other whitespace
+                        placeholder = "__IN_CELL_NL__"
+                        s2 = s.replace(IN_CELL_NL, placeholder)
+                        # Collapse any whitespace (spaces, tabs, newlines) to single space
+                        s2 = re.sub(r'\s+', ' ', s2)
+                        # Restore protected cell-newlines and trim
+                        s2 = s2.replace(placeholder, IN_CELL_NL)
+                        return s2.strip()
+                    except Exception:
+                        return (s or '').strip()
+
+                # Safety caps and thresholds
+                MAX_COL_WIDTH_GLOBAL = 120      # prevents unbounded column width inflation
+                LAYOUT_LONG_CELL_THRESHOLD = 200  # if any cell exceeds this, treat table as layout-like
 
                 for t in self._table_meta:
                     try:
@@ -1292,69 +1312,207 @@ class _SimpleHTMLToTagged(HTMLParser):
                         if tstart < 0 or tend <= tstart or tstart >= len(full):
                             continue
                         tend = min(tend, len(full))
-                        seg = full[tstart:tend]
-                        rows = seg.split('\n')
-                        # build cell offsets by scanning rows/cells and map to nearest recorded cell meta (by overlap)
-                        abs_cursor = tstart
-                        table_rows = []
-                        for rtext in rows:
-                            cells = rtext.split('\t') if rtext != '' else ['']
-                            row_cells = []
-                            cell_cursor = abs_cursor
-                            for cell_text in cells:
-                                cs = cell_cursor
-                                ce = cs + len(cell_text)
-                                # find matching recorded cell meta overlapping this region
-                                matched = None
-                                for cm in t.get('cells', []):
-                                    # simple overlap test
-                                    if not (cm.get('end') <= cs or cm.get('start') >= ce):
-                                        matched = cm
-                                        break
-                                cell_entry = {
-                                    'start': cs,
-                                    'end': ce,
-                                    'text': cell_text,
-                                    'attrs': dict(matched.get('attrs', {})) if matched else {},
-                                    'type': (matched.get('type') if matched else 'td')
-                                }
-                                row_cells.append(cell_entry)
-                                # advance by cell length plus one for tab (except last)
-                                cell_cursor = ce + 1
-                            table_rows.append(row_cells)
-                            abs_cursor += len(rtext) + 1
 
-                        # Decide whether this is a layout table; if so, avoid aggressive column-padding
+                        # Prefer structured rows if parser has them, else fall back to textual split
+                        rows_meta = t.get('rows') if isinstance(t.get('rows'), list) and t.get('rows') else None
+                        table_rows: List[List[dict]] = []
+
+                        if rows_meta:
+                            # Use recorded cell metas; normalize cell text in place
+                            for r in rows_meta:
+                                row_cells = []
+                                for cm in r:
+                                    cell_text = _normalize_cell_text(cm.get('text') or '')
+                                    cell_entry = {
+                                        'start': int(cm.get('start', 0)),
+                                        'end': int(cm.get('end', 0)),
+                                        'text': cell_text,
+                                        'attrs': dict(cm.get('attrs', {})) if isinstance(cm.get('attrs', {}), dict) else {},
+                                        'type': cm.get('type', 'td')
+                                    }
+                                    row_cells.append(cell_entry)
+                                table_rows.append(row_cells)
+                        else:
+                            # Fallback: reconstruct rows/cells from raw slice using \n and \t
+                            seg = full[tstart:tend]
+                            rows = seg.split('\n')
+                            abs_cursor = tstart
+                            for rtext in rows:
+                                cells = rtext.split('\t') if rtext != '' else ['']
+                                row_cells = []
+                                cell_cursor = abs_cursor
+                                for cell_text in cells:
+                                    cs = cell_cursor
+                                    ce = cs + len(cell_text)
+                                    norm = _normalize_cell_text(cell_text)
+                                    cell_entry = {'start': cs, 'end': ce, 'text': norm, 'attrs': {}, 'type': 'td'}
+                                    row_cells.append(cell_entry)
+                                    cell_cursor = ce + 1
+                                table_rows.append(row_cells)
+                                abs_cursor += len(rtext) + 1
+
+                        if not table_rows:
+                            continue
+
+                        # detect layout-like
+                        layout_like = _looks_like_layout_table(t)
+
+                        # Also treat tables with any extremely long cell as layout-like
+                        any_long = any(len(cell.get('text') or '') >= LAYOUT_LONG_CELL_THRESHOLD for row in table_rows for cell in row)
+                        if any_long:
+                            layout_like = True
+
+                        # Compute colgroup for data-like tables; otherwise leave empty and apply row padding
                         colgroup = t.get('colgroup', []) or []
-                        if not colgroup:
-                            try:
-                                # Use the recorded t (which contains 'rows' metadata from parse) to test layout heuristics.
-                                layout_like = _looks_like_layout_table(t)
-                                if not layout_like:
-                                    # compute per-column widths heuristically only for data-like tables
-                                    max_cols = max((len(r) for r in table_rows), default=0)
-                                    if max_cols:
-                                        col_widths = [0] * max_cols
-                                        for r in table_rows:
-                                            for ci, cell in enumerate(r):
-                                                txt = (cell.get('text') or '')
-                                                visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
-                                                col_widths[ci] = max(col_widths[ci], len(visible))
-                                        if max(col_widths, default=0) > 0 and max_cols > 0:
-                                            colgroup = [{'width': max(4, int(w))} for w in col_widths]
-                                else:
-                                    # keep colgroup empty for layout tables so downstream rendering preserves original structure
-                                    colgroup = []
-                            except Exception:
-                                colgroup = []
+                        if not colgroup and not layout_like:
+                            max_cols = max((len(r) for r in table_rows), default=0)
+                            if max_cols:
+                                col_widths = [0] * max_cols
+                                for r in table_rows:
+                                    for ci, cell in enumerate(r):
+                                        txt = (cell.get('text') or '')
+                                        col_widths[ci] = max(col_widths[ci], len(txt))
+                                # apply safety cap
+                                col_widths = [min(w, MAX_COL_WIDTH_GLOBAL) for w in col_widths]
+                                if max(col_widths, default=0) > 0 and max_cols > 0:
+                                    colgroup = [{'width': max(4, int(w))} for w in col_widths]
 
-                        table_entry = {'start': tstart, 'end': tend, 'attrs': t.get('attrs', {}), 'rows': table_rows, 'colgroup': colgroup}
-                        # mark layout tables explicitly to aid downstream rendering decisions
-                        try:
-                            if _looks_like_layout_table(t):
-                                table_entry['layout_table'] = True
-                        except Exception:
-                            pass
+                        # Build normalized/padded rows for metadata (tabs separate cells)
+                        new_rows: List[str] = []
+
+                        # Determine column count
+                        max_cols = max((len(r) for r in table_rows), default=0)
+
+                        # Helper: pad all logical lines inside a cell to a given width,
+                        # preserving IN_CELL_NL as line separator.
+                        def _pad_cell_lines(cell_text: str, width: int) -> str:
+                            try:
+                                if not isinstance(cell_text, str):
+                                    cell_text = '' if cell_text is None else str(cell_text)
+                                parts = cell_text.split(IN_CELL_NL) if IN_CELL_NL in cell_text else [cell_text]
+                                out_parts = []
+                                for p in parts:
+                                    # collapse internal whitespace already done; just pad
+                                    txt = p
+                                    if len(txt) > width:
+                                        txt = txt[:width]
+                                    out_parts.append(txt.ljust(width))
+                                # Rejoin with IN_CELL_NL so downstream renderer can convert to <br>
+                                return IN_CELL_NL.join(out_parts)
+                            except Exception:
+                                return cell_text.ljust(width) if isinstance(cell_text, str) else ''
+
+                        # Special-case: single-column tables should be padded to the table-wide width so they render as a solid block.
+                        if max_cols == 1:
+                            # Determine table width: prefer colgroup width if present, else compute from data and cap.
+                            if colgroup and isinstance(colgroup, list) and len(colgroup) >= 1 and str(colgroup[0].get('width', '')).isdigit():
+                                table_width = min(MAX_COL_WIDTH_GLOBAL, int(colgroup[0].get('width', MAX_COL_WIDTH_GLOBAL)))
+                            else:
+                                # compute longest logical line inside any cell (respect IN_CELL_NL)
+                                max_len = 0
+                                for r in table_rows:
+                                    raw = (r[0].get('text') or '')
+                                    # consider longest sub-line
+                                    for sub in (raw.split(IN_CELL_NL) if IN_CELL_NL in raw else [raw]):
+                                        max_len = max(max_len, len(sub))
+                                table_width = min(MAX_COL_WIDTH_GLOBAL, max_len)
+
+                            if table_width <= 0:
+                                table_width = min(MAX_COL_WIDTH_GLOBAL, max((len(r[0].get('text') or '') for r in table_rows), default=0))
+
+                            # Build rows: pad each logical line in the single cell to table_width
+                            for r in table_rows:
+                                txt = (r[0].get('text') or '')
+                                padded = _pad_cell_lines(txt, table_width)
+                                # for plain metadata rows, store as single-line (tabs separate cells)
+                                # join logical lines into a single visible string by replacing IN_CELL_NL with spaces
+                                # but keep metadata text containing IN_CELL_NL so renderer shows breaks
+                                # For the plain text index we use IN_CELL_NL-preserved string.
+                                # Use a single tab-less cell (no '\t') for single-column table row.
+                                new_rows.append(padded)
+
+                        else:
+                            if not layout_like and colgroup:
+                                # data-like: pad columns according to colgroup widths
+                                widths = []
+                                for c in colgroup:
+                                    w = c.get('width')
+                                    try:
+                                        widths.append(int(w))
+                                    except Exception:
+                                        widths.append(0)
+                                # fallback to computed widths if necessary
+                                if not widths or any((not isinstance(w, int) or w <= 0) for w in widths):
+                                    max_cols = max((len(r) for r in table_rows), default=0)
+                                    widths = [0] * max_cols
+                                    for r in table_rows:
+                                        for ci, cell in enumerate(r):
+                                            widths[ci] = max(widths[ci], len(cell.get('text') or ''))
+                                    widths = [min(w, MAX_COL_WIDTH_GLOBAL) for w in widths]
+                                for r in table_rows:
+                                    padded = []
+                                    for ci in range(len(widths)):
+                                        text = r[ci].get('text') if ci < len(r) else ''
+                                        # If cell contains multiple logical lines, pad each line then collapse for metadata row
+                                        if IN_CELL_NL in (text or ''):
+                                            cell_p = _pad_cell_lines(text, widths[ci] if widths[ci] > 0 else 0)
+                                            # Convert logical-line separators to space for the plain cell string so it fits in a single tab field
+                                            cell_for_field = cell_p.replace(IN_CELL_NL, ' ')
+                                            padded.append(cell_for_field)
+                                        else:
+                                            padded.append((text or '').ljust(widths[ci] if widths[ci] > 0 else 0))
+                                    new_rows.append('\t'.join(padded))
+                            else:
+                                # layout-like or no colgroup: strip excess whitespace already done;
+                                # pad each row to its own max (capped), padding inside multi-line cells as well.
+                                for r in table_rows:
+                                    # compute per-cell max of its logical lines
+                                    row_texts = [cell.get('text') or '' for cell in r]
+                                    # compute longest logical sub-line across the row
+                                    row_max = 0
+                                    for txt in row_texts:
+                                        if IN_CELL_NL in txt:
+                                            for sub in txt.split(IN_CELL_NL):
+                                                row_max = max(row_max, len(sub))
+                                        else:
+                                            row_max = max(row_max, len(txt))
+                                    if row_max > MAX_COL_WIDTH_GLOBAL:
+                                        row_max = MAX_COL_WIDTH_GLOBAL
+                                    padded = []
+                                    for txt in row_texts:
+                                        # pad internal logical lines
+                                        pcell = _pad_cell_lines(txt, row_max)
+                                        # metadata row must be tab-separated single field; collapse IN_CELL_NL to space
+                                        padded.append(pcell.replace(IN_CELL_NL, ' '))
+                                    new_rows.append('\t'.join(padded))
+
+                        new_seg = '\n'.join(new_rows)
+
+                        # Update overall text and adjust offsets
+                        start_abs = tstart + offset_shift if (tstart + offset_shift) < len(full) else tstart
+                        end_abs = tend + offset_shift if (tend + offset_shift) <= len(full) else min(tend, len(full))
+                        full = full[:start_abs] + new_seg + full[end_abs:]
+                        delta = len(new_seg) - (end_abs - start_abs)
+                        offset_shift += delta
+
+                        # Build table_entry rows metadata to return (use normalized texts)
+                        meta_rows = []
+                        cursor = start_abs
+                        for rstr in new_rows:
+                            cells = rstr.split('\t') if rstr != '' else ['']
+                            row_cells = []
+                            cell_cursor = cursor
+                            for c in cells:
+                                cs = cell_cursor
+                                ce = cs + len(c)
+                                row_cells.append({'start': cs, 'end': ce, 'text': c, 'attrs': {}, 'type': 'td'})
+                                cell_cursor = ce + 1
+                            meta_rows.append(row_cells)
+                            cursor = cursor + len(rstr) + 1
+
+                        table_entry = {'start': start_abs, 'end': start_abs + len(new_seg), 'attrs': t.get('attrs', {}), 'rows': meta_rows, 'colgroup': colgroup}
+                        if layout_like:
+                            table_entry['layout_table'] = True
 
                         tables.append(table_entry)
                     except Exception:
@@ -1363,6 +1521,8 @@ class _SimpleHTMLToTagged(HTMLParser):
                     meta['tables'] = tables
             except Exception:
                 pass
+
+            # final top-of-document soft collapse (keep first content at top)
             try:
                 new_full, removed = self._collapse_leading_blank_region(full)
                 if removed > 0:
@@ -1370,10 +1530,10 @@ class _SimpleHTMLToTagged(HTMLParser):
                     full = new_full
             except Exception:
                 pass
+
             return full, meta
         except Exception:
             return ''.join(self.out), {'tags': self.ranges, 'links': list(self.hrefs)}
-
     # --- Codeblock syntax helpers (isolated tags: cb_*) ----------------------
     def _cb_apply_syntax(self, lang: str, text: str, base_off: int):
         lang = (lang or '').lower()
