@@ -893,6 +893,11 @@ def _make_host_update_cb_for_frame(fr, tw):
                 except Exception:
                     pass
                 try:
+                    # Clear any leftover parser state before replacing content to avoid stale offsets
+                    _clear_widget_parser_state(tw)
+                except Exception:
+                    pass
+                try:
                     tw.delete('1.0', 'end')
                     tw.insert('1.0', plain2 or '')
                     _apply_tag_configs_to_widget(tw)
@@ -4078,6 +4083,7 @@ def open_url_action():
                                     fr._raw_html = raw
                                     fr._raw_html_plain = plain
                                     fr._raw_html_tags_meta = tags_meta
+
                                     fr._view_raw = False
                                 except Exception:
                                     pass
@@ -4099,11 +4105,16 @@ def open_url_action():
                                         pass
                                 except Exception:
                                     pass
-
+                                try:
+                                    _clear_widget_parser_state(textArea)
+                                except Exception:
+                                    pass
                                 # replace current tab content and set metadata to new URL
                                 textArea.delete('1.0', 'end')
                                 textArea.insert('1.0', plain)
                                 _apply_tag_configs_to_widget(textArea)
+                                root.after(60, lambda: ( _ensure_widget_tables_meta(textArea), _pad_table_columns(textArea)))
+
                                 try:
                                     sel = editorNotebook.select()
                                     if sel:
@@ -4113,6 +4124,8 @@ def open_url_action():
                                         frame._raw_html = raw
                                         frame._raw_html_plain = plain
                                         frame._raw_html_tags_meta = tags_meta
+                                        root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
+
                                         frame._view_raw = False
                                     root.fileName = url2
                                 except Exception:
@@ -4137,6 +4150,7 @@ def open_url_action():
                             # Do NOT add URLs to recent files (recent list is for local files only)
                             if tags_meta and tags_meta.get('tags'):
                                 root.after(0, lambda: _apply_formatting_from_meta(tags_meta))
+
                             if updateSyntaxHighlighting.get():
                                 root.after(0, highlightPythonInit)
                             # keep the toolbar field in sync with what we opened
@@ -7592,6 +7606,77 @@ def _ensure_widget_tables_meta(tw):
     except Exception:
         pass
 
+def _clear_widget_parser_state(tw: Text):
+    """Clear parser/renderer transient state on `tw` so subsequent inserts start fresh.
+
+    Removes parser-applied tags, hyperlink mappings and tables metadata that may reference
+    absolute offsets in the previous buffer and cause incorrect padding/inserts.
+    Safe to call before deleting/inserting new content into a Text widget.
+    """
+    try:
+        if not tw or not isinstance(tw, Text):
+            return
+        # Remove presentation/parser tags that carry absolute ranges
+        parser_tags = (
+            'table', 'tr', 'td', 'th', 'table_sep',
+            'td_colspan', 'td_rowspan', 'td_has_attrs',
+            'hyperlink'
+        )
+        for t in parser_tags:
+            try:
+                tw.tag_remove(t, '1.0', 'end')
+            except Exception:
+                pass
+
+        # Clear hyperlink mapping used by click handlers
+        try:
+            if hasattr(tw, '_hyperlink_map'):
+                try:
+                    tw._hyperlink_map.clear()
+                except Exception:
+                    tw._hyperlink_map = {}
+            else:
+                tw._hyperlink_map = {}
+        except Exception:
+            try:
+                tw._hyperlink_map = {}
+            except Exception:
+                pass
+
+        # Clear any stored tables meta the parser attached (these contain absolute offsets)
+        try:
+            if hasattr(tw, '_tables_meta'):
+                try:
+                    setattr(tw, '_tables_meta', [])
+                except Exception:
+                    tw._tables_meta = []
+            else:
+                tw._tables_meta = []
+        except Exception:
+            try:
+                tw._tables_meta = []
+            except Exception:
+                pass
+
+        # Remove any left-over dynamic tags that could confuse later passes (font_/style_/hex_)
+        try:
+            for tag in list(tw.tag_names()):
+                if tag.startswith('font_') or tag.startswith('style_') or tag.startswith('hex_'):
+                    try:
+                        tw.tag_remove(tag, '1.0', 'end')
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # Ensure widget is visually up-to-date
+        try:
+            tw.update_idletasks()
+        except Exception:
+            pass
+    except Exception:
+        pass
+
 def _pad_table_columns(tw: Text):
     """Pad first-line content of shorter cells to the max column width for each table in widget.
 
@@ -8517,7 +8602,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                         tx, fr = create_editor_tab(title, plain, filename=url2)
                         tx.focus_set()
                         _apply_tag_configs_to_widget(tx)
-                        # store raw/parsed data and view flags on the new tab like _open_path does
+                        # store raw/parsed data and view flags on the new tab like _open_path does markz
                         try:
                             fr._raw_html = raw
                             fr._raw_html_plain = plain
@@ -8551,24 +8636,29 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                         except Exception:
                             pass
 
-                        # replace current tab content and set per-tab filename so refresh/back work
-                        textArea.delete('1.0', 'end')
-                        textArea.insert('1.0', plain)
-                        _apply_tag_configs_to_widget(textArea)
+                       # replace current tab content and set per-tab filename so refresh/back work
+                        
+
                         try:
                             sel = editorNotebook.select()
                             if sel:
                                 frame = root.nametowidget(sel)
+                                frame = root.nametowidget(sel)
+                                frame.destroy()
+                                tx, frame = create_editor_tab(title, plain, filename=url2)
+                                tx.focus_set()
+                                _apply_tag_configs_to_widget(tx)
+                                frame._raw_html = raw
+                                frame._raw_html_plain = plain
+                                frame._raw_html_tags_meta = tags_meta
+                                root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
+                                # If tags_meta contains tags -> parsed/rendered view; otherwise treat as "opened as source"
+                                is_source = not bool(tags_meta and tags_meta.get('tags'))
+                                frame._opened_as_source = bool(is_source)
+                                frame._view_raw = bool(is_source)
                                 frame.fileName = url2
                                 # store raw/parsed for toggle and source flag
-                                try:
-                                    frame._raw_html = raw
-                                    frame._raw_html_plain = plain
-                                    frame._raw_html_tags_meta = tags_meta
-                                    frame._view_raw = not bool(tags_meta and tags_meta.get('tags'))  # show raw if no parsed tags
-                                    frame._opened_as_source = not bool(tags_meta and tags_meta.get('tags'))
-                                except Exception:
-                                    pass
+                        
                                 # mark whether this tab contains raw source (no tags) or parsed HTML
                                 try:
                                     frame._opened_as_source = not bool(tags_meta and tags_meta.get('tags'))

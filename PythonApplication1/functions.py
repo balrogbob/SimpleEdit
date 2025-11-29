@@ -1135,8 +1135,13 @@ class _SimpleHTMLToTagged(HTMLParser):
                                         txt = (cell.get('text') or '')
                                     except Exception:
                                         txt = ''
-                                    visible = txt.replace(IN_CELL_NL, '\n').split('\n', 1)[0]
-                                    col_widths[ci] = max(col_widths[ci], len(visible))
+                         # Use the longest logical line inside the cell (respect IN_CELL_NL)
+                                    try:
+                                         logical_lines = txt.replace(IN_CELL_NL, '\n').split('\n')
+                                         longest = max((len(ln) for ln in logical_lines), default=0)
+                                    except Exception:
+                                         longest = len(txt)
+                                    col_widths[ci] = max(col_widths[ci], longest)                            
                             if max(col_widths, default=0) > 0 and max_cols > 0:
                                 colgroup = [{'width': max(4, int(w))} for w in col_widths]
                     except Exception:
