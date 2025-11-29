@@ -34,7 +34,73 @@ from typing import Callable, Iterable, List, Optional
 import urllib.request as _urr
 import urllib.parse as _up
 import shutil, sys, os
-import textwrap
+import traceback as _traceback
+import re as _re
+
+def _format_js_error_context(script_src: str, exc: Exception, tb: str | None = None, context_lines: int = 2) -> str:
+    """
+    Best-effort: return a small snippet (with line numbers) from `script_src`
+    that most likely relates to `exc` / `tb`. Uses:
+      - numeric "line N" hints in traceback/message when available
+      - quoted tokens from the exception message (searches script for token)
+      - first non-empty line as fallback
+    """
+    try:
+        tb_text = tb if tb is not None else (_traceback.format_exc() or "")
+    except Exception:
+        tb_text = ""
+
+    # 1) try to find an explicit line number in traceback/text ("line 12", "Line:12", ":12")
+    try:
+        m = _re.search(r'line\s+(\d+)', tb_text, flags=_re.I)
+        if not m:
+            m = _re.search(r'[:@](\d{1,6})(?:\b|:)', tb_text)
+        if m:
+            ln = int(m.group(1))
+        else:
+            ln = None
+    except Exception:
+        ln = None
+
+    lines = (script_src or "").splitlines()
+
+    # If we have a plausible line number, return a small surrounding context.
+    if ln and 1 <= ln <= len(lines):
+        start = max(0, ln - 1 - context_lines)
+        end = min(len(lines), ln - 1 + context_lines + 1)
+        out = []
+        for i in range(start, end):
+            prefix = f"{i+1:>4}: " if (i == ln - 1) else "     "
+            out.append(f"{prefix}{lines[i]}")
+        return "\n".join(out)
+
+    # 2) try to extract a quoted token from the exception message and locate it in the script
+    try:
+        msg = str(exc) or tb_text or ""
+        qm = _re.search(r'["\']([^"\']{2,160})["\']', msg)
+        if qm:
+            token = qm.group(1)
+            for idx, ln_text in enumerate(lines):
+                if token in ln_text:
+                    start = max(0, idx - context_lines)
+                    end = min(len(lines), idx + context_lines + 1)
+                    out = []
+                    for j in range(start, end):
+                        prefix = f"{j+1:>4}: " if (j == idx) else "     "
+                        out.append(f"{prefix}{lines[j]}")
+                    return "\n".join(out)
+    except Exception:
+        pass
+
+    # 3) fallback: first non-empty line, or head truncated
+    try:
+        for idx, ln_text in enumerate(lines):
+            if ln_text.strip():
+                return f"{idx+1:>4}: {ln_text}"
+    except Exception:
+        pass
+
+    return (script_src or "")[:400]
 
 RECENT_MAX = 10
 
@@ -2072,8 +2138,22 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                             pass
                         local_results.append((True, None))
                     except Exception as rexc:
-                        _combined_log(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
-                        local_results.append((False, f"Execution error: {rexc}"))
+                        # capture traceback string (best-effort)
+                        try:
+                            tb_str = _traceback.format_exc()
+                        except Exception:
+                            tb_str = None
+                        _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                        try:
+                            # `script_src` is the source text executed for this script in the loop
+                            ctx = _format_js_error_context(script_src if 'script_src' in locals() else (s.get('inline') or ''), rexc, tb_str)
+                            if ctx:
+                                _console_append("[jsconsole] Error context (approx):")
+                                for ln in str(ctx).splitlines():
+                                    _console_append("  " + ln)
+                        except Exception:
+                            pass
+                        results.append((False, f"Execution error: {rexc}"))
                         continue
 
                 # run timers after scripts
@@ -2174,7 +2254,21 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                 jsmini.run_with_interpreter(script_src, ctx)
                 _combined_log_sync(f"[jsconsole] Script {idx + 1} executed successfully.")
             except Exception as rexc:
-                _combined_log_sync(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                # capture traceback string (best-effort)
+                try:
+                    tb_str = _traceback.format_exc()
+                except Exception:
+                    tb_str = None
+                _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                try:
+                    # `script_src` is the source text executed for this script in the loop
+                    ctx = _format_js_error_context(script_src if 'script_src' in locals() else (s.get('inline') or ''), rexc, tb_str)
+                    if ctx:
+                        _console_append("[jsconsole] Error context (approx):")
+                        for ln in str(ctx).splitlines():
+                            _console_append("  " + ln)
+                except Exception:
+                    pass
                 results.append((False, f"Execution error: {rexc}"))
                 continue
 

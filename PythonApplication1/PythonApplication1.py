@@ -187,7 +187,8 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 tx, fr = create_editor_tab(os.path.basename(path) or "Untitled", content, filename=path)
                 _apply_tag_configs_to_widget(tx)
             else:
-                textArea.delete('1.0', 'end')
+                textArea.delete('0.0', 'end')
+                textArea.tag_remove('0.0', 'end')
                 textArea.insert('1.0', content)
                 # update current frame metadata
                 try:
@@ -262,7 +263,8 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                     except Exception:
                         pass
                 else:
-                    textArea.delete('1.0', 'end')
+                    textArea.delete('0.0', 'end')
+                    textArea.tag_remove('0.0', 'end')
                     textArea.insert('1.0', raw)
                     _apply_tag_configs_to_widget(textArea)
                     try:
@@ -359,8 +361,10 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                             fr._raw_html_tags_meta = tags_meta2
                             fr._view_raw = False
                             # replace editor content and reapply tag configs
-                            tx.delete('1.0', 'end')
+                            tx.delete('0.0', 'end')
+                            tx.tag_remove('0.0', 'end')
                             tx.insert('1.0', plain2)
+                            tx.tag_remove('0.0', 'end')
                             _apply_tag_configs_to_widget(tx)
                             # apply formatting meta and refresh highlighting on UI thread
                             try:
@@ -383,6 +387,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             else:
 
                 textArea.delete('1.0', 'end')
+                textArea.tag_remove('0.0', 'end')
                 textArea.insert('1.0', plain)
                 
                 _apply_tag_configs_to_widget(textArea)
@@ -439,6 +444,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                 pass
         else:
             textArea.delete('1.0', 'end')
+            textArea.tag_remove('0.0', 'end')
             textArea.insert('1.0', raw)
             _apply_tag_configs_to_widget(textArea)
             try:
@@ -899,6 +905,7 @@ def _make_host_update_cb_for_frame(fr, tw):
                     pass
                 try:
                     tw.delete('1.0', 'end')
+                    textArea.tag_remove('0.0', 'end')
                     tw.insert('1.0', plain2 or '')
                     _apply_tag_configs_to_widget(tw)
                 except Exception:
@@ -2405,6 +2412,7 @@ def reflow_numbered_lists():
             # fallback: plain replace
             try:
                 textArea.delete('1.0', 'end')
+                textArea.tag_remove('0.0', 'end')
                 textArea.insert('1.0', new_content)
             except Exception:
                 pass
@@ -3349,6 +3357,7 @@ def create_editor_tab(title='Untitled', content='', filename=''):
 
     # apply per-widget configuration and insert content
     _configure_text_widget(tx)
+    tx.tag_remove('0.0', 'end')
     _apply_tag_configs_to_widget(tx)
     tx.insert('1.0', content)
     # color literal hex codes in this new widget (so #rrggbb/#rgb are shown)
@@ -4111,6 +4120,7 @@ def open_url_action():
                                     pass
                                 # replace current tab content and set metadata to new URL
                                 textArea.delete('1.0', 'end')
+                                textArea.tag_remove('0.0', 'end')
                                 textArea.insert('1.0', plain)
                                 _apply_tag_configs_to_widget(textArea)
                                 root.after(60, lambda: ( _ensure_widget_tables_meta(textArea), _pad_table_columns(textArea)))
@@ -4124,8 +4134,14 @@ def open_url_action():
                                         frame._raw_html = raw
                                         frame._raw_html_plain = plain
                                         frame._raw_html_tags_meta = tags_meta
-                                        root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
-
+                                        host_cb = _make_host_update_cb_for_frame(frame, tx)
+                                        run_results = funcs.run_scripts(
+                                            scripts,
+                                            base_url=url2,
+                                            log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                            host_update_cb=host_cb
+                                        )
+                                        print("[debug] run_scripts results (toggle raw->rendered):", run_results)
                                         frame._view_raw = False
                                     root.fileName = url2
                                 except Exception:
@@ -4840,6 +4856,7 @@ def _make_host_update_cb_for_frame(fr, tw):
                 # Replace editor content and apply tags
                 try:
                     tw.delete('1.0', 'end')
+                    textArea.tag_remove('0.0', 'end')
                     tw.insert('1.0', plain2 or '')
                     _apply_tag_configs_to_widget(tw)
                 except Exception:
@@ -5205,6 +5222,7 @@ def open_syntax_editor():
             # regexes
             for key, ent in regex_entries.items():
                 ent.delete('1.0', 'end')
+                ent.tag_remove('0.0', 'end')
                 ent.insert('1.0', cp.get('Syntax', f'regex.{key}', fallback=_DEFAULT_REGEXES.get(key, '')))
         except Exception:
             pass
@@ -5381,6 +5399,7 @@ def open_syntax_editor():
         bk_ent.insert(0, ','.join(BUILTINS))
         for key, ent in regex_entries.items():
             ent.delete('1.0', 'end')
+            ent.tag_remove('0.0', 'end')
             ent.insert('1.0', _DEFAULT_REGEXES.get(key, ''))
 
     ttk.Button(btn_frame, text='Save', command=do_save).grid(row=0, column=1, padx=6)
@@ -6038,6 +6057,7 @@ def _apply_template_to_widget(tw, kind: str):
             )
 
         tw.delete('1.0', 'end')
+        tw.tag_remove('0.0', 'end')
         tw.insert('1.0', tpl)
 
         # Apply tag configs & quick highlight (kept from original implementation)
@@ -6130,6 +6150,7 @@ def create_template(kind: str, open_in_new_tab: bool = True):
 
                     # ensure UI shows raw state (reinsert raw to be explicit)
                     tx.delete('1.0', 'end')
+                    tx.tag_remove('0.0', 'end')
                     tx.insert('1.0', raw_buf or '')
                     _apply_tag_configs_to_widget(tx)
 
@@ -6149,6 +6170,7 @@ def create_template(kind: str, open_in_new_tab: bool = True):
         # fallback: replace current tab content
         try:
             textArea.delete('1.0', 'end')
+            textArea.tag_remove('0.0', 'end')
             _apply_template_to_widget(textArea, kind_norm)
             _apply_tag_configs_to_widget(textArea)
             textArea.focus_set()
@@ -6179,6 +6201,7 @@ def create_template(kind: str, open_in_new_tab: bool = True):
 
                     # reinsert raw explicitly
                     textArea.delete('1.0', 'end')
+                    textArea.tag_remove('0.0', 'end')
                     textArea.insert('1.0', raw_buf or '')
                     _apply_tag_configs_to_widget(textArea)
 
@@ -6621,7 +6644,9 @@ def toggle_raw_rendered():
                     except Exception:
                         pass
                 # Replace content with rendered/plain text and apply presentation tag configs
-                tw.delete('1.0', 'end')
+                
+                tw.delete('0.0', 'end')
+                tw.tag_remove('0.0', 'end')
                 tw.insert('1.0', plain or '')
                 _apply_tag_configs_to_widget(tw)
 
@@ -6681,6 +6706,7 @@ def toggle_raw_rendered():
 
                 # Replace content with raw HTML/source and reconfigure tags appropriate for source editing
                 tw.delete('1.0', 'end')
+                tw.tag_remove('0.0', 'end')
                 tw.insert('1.0', raw_to_show or '')
                 _apply_tag_configs_to_widget(tw)
 
@@ -8607,7 +8633,16 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             fr._raw_html = raw
                             fr._raw_html_plain = plain
                             fr._raw_html_tags_meta = tags_meta
-                            root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
+                            host_cb = _make_host_update_cb_for_frame(fr, tx)
+                            run_results = funcs.run_scripts(
+                                scripts,
+                                base_url=url2,
+                                log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                host_update_cb=host_cb
+                            )
+                            # debug output
+                            print("[debug] run_scripts results (in-place open):", run_results)
+                            
                             # If tags_meta contains tags -> parsed/rendered view; otherwise treat as "opened as source"
                             is_source = not bool(tags_meta and tags_meta.get('tags'))
                             fr._opened_as_source = bool(is_source)
@@ -8651,7 +8686,16 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                                 frame._raw_html = raw
                                 frame._raw_html_plain = plain
                                 frame._raw_html_tags_meta = tags_meta
-                                root.after(0, lambda: funcs.run_scripts(scripts, base_url=url2, log_fn=lambda s: (print(s), statusBar.config(text=s))))                            
+                                host_cb = _make_host_update_cb_for_frame(frame, tx)
+                                run_results = funcs.run_scripts(
+                                    scripts,
+                                    base_url=url2,
+                                    log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                    host_update_cb=host_cb
+                                )
+                                # debug output
+                                print("[debug] run_scripts results (in-place open):", run_results)
+                                
                                 # If tags_meta contains tags -> parsed/rendered view; otherwise treat as "opened as source"
                                 is_source = not bool(tags_meta and tags_meta.get('tags'))
                                 frame._opened_as_source = bool(is_source)
@@ -10107,6 +10151,7 @@ def open_find_replace():
         content = textArea.get('1.0', 'end-1c')
         new_content = content.replace(pat, repl)
         textArea.delete('1.0', 'end')
+        textArea.tag_remove('0.0', 'end')
         textArea.insert('1.0', new_content)
         do_find()
 
@@ -11113,7 +11158,8 @@ def newFile():
     except Exception:
         # fallback to old behavior if something goes wrong
         try:
-            textArea.delete('1.0', 'end')
+            textArea.delete('0.0', 'end')
+            textArea.tag_remove('0.0', 'end')
             statusBar['text'] = "New Document!"
         except Exception:
             pass
