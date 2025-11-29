@@ -1132,6 +1132,13 @@ class _SimpleHTMLToTagged(HTMLParser):
             # Mixed or non-whitespace content: collapse internal whitespace runs to single spaces.
             # Normalize all whitespace (including newlines) to a single space like HTML flow.
             s = re.sub(r'\s+', ' ', s)
+
+            # Avoid inserting spaces around percent-encoded sequences like %20 (fixes " %20 " artifacts)
+            try:
+                s = re.sub(r'\s*(%[0-9A-Fa-f]{2})\s*', r'\1', s)
+            except Exception:
+                pass
+
             # Avoid leading pad if we're at start or after whitespace already.
             if s and self.pos == 0:
                 s = s.lstrip()
@@ -1148,7 +1155,6 @@ class _SimpleHTMLToTagged(HTMLParser):
             self._pending_block_leading = None
         except Exception:
             pass
-
     def handle_entityref(self, name):
         try:
             if self._in_code_capture():
@@ -2052,7 +2058,13 @@ def _strip_whitespace_between_tags(html: str) -> str:
                             continue
                         if p.startswith('<'):
                             continue
+                        # collapse whitespace in text fragments
                         parts[i] = re.sub(r'\s+', ' ', p)
+                        # remove spaces that were accidentally placed around percent-encoded tokens like %20
+                        try:
+                            parts[i] = re.sub(r'\s*(%[0-9A-Fa-f]{2})\s*', r'\1', parts[i])
+                        except Exception:
+                            pass
                     new_inner = ''.join(parts).strip()
                 return f"<a{m.group(1)}>{new_inner}</a>"
 
@@ -2075,7 +2087,6 @@ def _strip_whitespace_between_tags(html: str) -> str:
         return working
     except Exception:
         return html
-
 def _parse_html_and_apply(raw) -> tuple[str, dict]:
     """
     Parse raw HTML fragment or document and extract plain text and tag ranges.

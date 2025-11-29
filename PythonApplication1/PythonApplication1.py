@@ -233,9 +233,13 @@ def _open_path(path: str, open_in_new_tab: bool = True):
         ext = path.lower() if isinstance(path, str) else ''
         want_rendered = _should_open_rendered_by_default(path, load_as_source_flag=config.getboolean("Section1", "openHtmlAsSource", fallback=False), sample_content=(raw[:2048] if raw else None))
         if want_rendered:
-            # optional autodetect -> apply a matching syntax preset before parsing if enabled
+            # IMPORTANT: Do NOT auto-detect/apply syntax presets when opening rendered content by default.
+            # Auto-applying syntax here caused unwanted preset changes when following hyperlinks.
+            # Respect existing user preference `autoDetectSyntax` only for source-mode opens, or allow
+            # opt-in behavior for rendered-mode via a separate config flag if needed.
             try:
-                if config.getboolean("Section1", "autoDetectSyntax", fallback=True):
+                allow_in_rendered = config.getboolean("Section1", "autoDetectSyntaxInRendered", fallback=False)
+                if allow_in_rendered and config.getboolean("Section1", "autoDetectSyntax", fallback=True):
                     preset_path = detect_syntax_preset_from_content(raw)
                     if preset_path:
                         applied = apply_syntax_preset(preset_path)
@@ -479,7 +483,6 @@ def _open_path(path: str, open_in_new_tab: bool = True):
             root.after(0, highlightPythonInit)
     except Exception as e:
         messagebox.showerror("Error", str(e))
-
 
 def _ask_open_choice(path: str):
     """Modal: ask user whether to open a recent item in current or new tab, optional 'remember' checkbox."""
@@ -6666,6 +6669,53 @@ def update_view_status_indicator():
             except Exception:
                 pass
         viewIndicator.config(text=txt)
+
+        # Disable/enable syntax-related controls while in Rendered view to avoid conflicting highlights.
+        # Controls: syntaxToggleCheckbox, detectSyntaxButton, refreshSyntaxButton, fullScanToggleCheckbox
+        try:
+            state = 'normal' if view_raw else 'disabled'
+            # syntax toggle (ttk.Checkbutton)
+            if 'syntaxToggleCheckbox' in globals() and syntaxToggleCheckbox is not None:
+                try:
+                    syntaxToggleCheckbox.config(state=state)
+                except Exception:
+                    try:
+                        syntaxToggleCheckbox.state(['!disabled'] if view_raw else ['disabled'])
+                    except Exception:
+                        pass
+
+            # detect syntax button
+            if 'detectSyntaxButton' in globals() and detectSyntaxButton is not None:
+                try:
+                    detectSyntaxButton.config(state=state)
+                except Exception:
+                    try:
+                        detectSyntaxButton.state = state  # best-effort fallback
+                    except Exception:
+                        pass
+
+            # refresh syntax button
+            if 'refreshSyntaxButton' in globals() and refreshSyntaxButton is not None:
+                try:
+                    refreshSyntaxButton.config(state=state)
+                except Exception:
+                    try:
+                        refreshSyntaxButton.state = state
+                    except Exception:
+                        pass
+
+            # full-scan checkbox (ttk.Checkbutton) - disable while rendered
+            if 'fullScanToggleCheckbox' in globals() and fullScanToggleCheckbox is not None:
+                try:
+                    fullScanToggleCheckbox.config(state=state)
+                except Exception:
+                    try:
+                        fullScanToggleCheckbox.state(['!disabled'] if view_raw else ['disabled'])
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     except Exception:
         pass
 
@@ -8613,7 +8663,7 @@ def _enter_browsing_mode():
         # Make current tab's Text widgets read-only
         for tw in _current_tab_text_widgets():
             try:
-                tw.config(state='disabled', cursor='arrow')
+                tw.config(state='', cursor='arrow')
                 # Strip line highlight & trailing whitespace tags
                 try:
                     tw.tag_remove('currentLine', '1.0', 'end')
