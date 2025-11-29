@@ -4687,6 +4687,123 @@ def load_syntax_config():
     except Exception:
         pass
 
+def _make_host_update_cb_for_frame(fr, tw):
+    """Return a callable(arg) that reparses/updates the tab's raw HTML on the UI thread.
+
+    Supported call signatures from JS (via jsmini):
+      - host.setRaw("...")                     -> inserts the string (default insert-before-</body>)
+      - host.setRaw({ "html": "...",            # HTML fragment to apply
+                      "mode": "insert"|"replace",# default = "insert"
+                      "pos": <int>|"end"|<str> })# optional insertion position (int offset, "end", or search string)
+      - host.forceRerender()                   -> call with None (no change; reparse current raw)
+    Overwrite (replace whole buffer) is available via mode="replace".
+    Insert semantics:
+      - pos omitted or "end" -> insert just before the closing </body> if present, otherwise append
+      - pos as int -> insert at that absolute character offset into the stored raw buffer
+      - pos as string -> search for the first occurrence and insert before it (fallback append)
+    """
+    import re
+    def host_update_cb(arg):
+        def ui_update():
+            try:
+                # get current stored raw HTML
+                base_raw = getattr(fr, '_raw_html', '') or ''
+                # None => force re-render using current stored raw
+                if arg is None:
+                    src_raw = base_raw
+                else:
+                    # normalize input
+                    if isinstance(arg, dict):
+                        html_frag = arg.get('html') or ''
+                        mode = (arg.get('mode') or 'insert').lower()
+                        pos = arg.get('pos', None)
+                        replace_flag = (mode == 'replace') or bool(arg.get('replace', False))
+                    else:
+                        # treat simple string as fragment to insert (default insert behavior)
+                        html_frag = str(arg)
+                        replace_flag = False
+                        pos = None
+
+                    if replace_flag:
+                        # replace whole buffer
+                        src_raw = html_frag
+                    else:
+                        # insert behavior (default)
+                        if base_raw is None:
+                            base_raw = ''
+                        if pos is None or pos == 'end':
+                            # insert before </body> if present
+                            m = re.search(r'</body\s*>', base_raw, flags=re.I)
+                            if m:
+                                idx = m.start()
+                                src_raw = base_raw[:idx] + html_frag + base_raw[idx:]
+                            else:
+                                src_raw = base_raw + html_frag
+                        elif isinstance(pos, int):
+                            off = max(0, min(len(base_raw), int(pos)))
+                            src_raw = base_raw[:off] + html_frag + base_raw[off:]
+                        else:
+                            # pos as search string: find and insert before first occurrence
+                            try:
+                                idx = base_raw.find(str(pos))
+                                if idx >= 0:
+                                    src_raw = base_raw[:idx] + html_frag + base_raw[idx:]
+                                else:
+                                    src_raw = base_raw + html_frag
+                            except Exception:
+                                src_raw = base_raw + html_frag
+
+                if not src_raw:
+                    return
+
+                # Re-parse and update stored metadata
+                try:
+                    plain2, tags_meta2 = funcs._parse_html_and_apply(src_raw)
+                except Exception:
+                    plain2, tags_meta2 = src_raw, None
+
+                try:
+                    fr._raw_html = src_raw
+                    fr._raw_html_plain = plain2
+                    fr._raw_html_tags_meta = tags_meta2
+                    fr._view_raw = False
+                except Exception:
+                    pass
+
+                # Replace editor content and apply tags
+                try:
+                    tw.delete('1.0', 'end')
+                    tw.insert('1.0', plain2 or '')
+                    _apply_tag_configs_to_widget(tw)
+                except Exception:
+                    pass
+
+                # Apply formatting meta on the right widget context
+                try:
+                    if tags_meta2 and tags_meta2.get('tags'):
+                        prev_ta = globals().get('textArea', None)
+                        try:
+                            globals()['textArea'] = tw
+                            _apply_formatting_from_meta(tags_meta2)
+                        finally:
+                            if prev_ta is not None:
+                                globals()['textArea'] = prev_ta
+                    # lightweight re-highlight
+                    try:
+                        root.after(0, highlightPythonInit)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+        try:
+            root.after(0, ui_update)
+        except Exception:
+            ui_update()
+
+    return host_update_cb
 
 def setting_syntax_modal():
     """Wrapper for backward compatibility and toolbar/button binding."""

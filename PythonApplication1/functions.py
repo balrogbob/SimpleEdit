@@ -1799,12 +1799,11 @@ def _compute_complementary(hexcol: str, fallback: str = "#F8F8F8") -> str:
 
 def _strip_whitespace_between_tags(html: str) -> str:
     """
-    Return a copy of `html` with all inter-tag whitespace removed (">   <" -> "><"),
+    Return a copy of `html` with inter-tag layout whitespace removed (">   <" -> "><"),
     while preserving content inside sensitive tags (script/style/pre/code).
 
-    Additionally: trim/collapse leading/trailing/layout whitespace inside
-    <a>...</a> anchor labels so generators that emit lots of indentation/newlines
-    between the anchor tags do not confuse downstream link parsing.
+    Also normalizes anchor inner text and avoids merging adjacent anchors by inserting
+    a single separator space when necessary (prevents adjacent anchors from collapsing).
     """
     try:
         if not isinstance(html, str) or html == '':
@@ -1824,49 +1823,41 @@ def _strip_whitespace_between_tags(html: str) -> str:
         working = block_re.sub(_preserve_match, html)
 
         # Remove whitespace between tags: any ">" then whitespace then "<" -> "><"
-        # This collapses newlines/tabs/spaces used for pretty-printing.
+        # This collapses pretty-printing indentation/newlines used for layout.
         working = re.sub(r'>\s+<', '><', working)
 
-        # Trim excessive leading/trailing whitespace around whole document tag edges
+        # Trim excessive leading/trailing whitespace around document edges
         working = re.sub(r'^\s+<', '<', working)
         working = re.sub(r'>\s+$', '>', working)
 
-        # --- NEW: Normalize anchor inner HTML ---
-        # For each <a ...>...</a> remove leading/trailing layout whitespace inside the anchor,
-        # and collapse runs of whitespace in text nodes to single spaces while preserving any inline tags.
+        # --- Normalize anchor inner HTML ---
+        # Trim/collapse whitespace inside anchors but preserve inline tags.
         try:
             anchor_re = re.compile(r'(?is)<a\b([^>]*)>(.*?)</a\s*>')
 
             def _trim_anchor_inner(m):
-               # full = m.group(0)
                 inner = m.group(2) or ''
-                # If inner is only whitespace -> empty
                 if inner.strip() == '':
                     new_inner = ''
                 else:
-                    # Split into tags and text so we only collapse whitespace in text nodes
                     parts = re.split(r'(<[^>]+>)', inner)
                     for i, p in enumerate(parts):
                         if not p:
                             continue
                         if p.startswith('<'):
-                            # keep tags untouched
                             continue
-                        # collapse any whitespace run to single space in text nodes
                         parts[i] = re.sub(r'\s+', ' ', p)
                     new_inner = ''.join(parts).strip()
-                # Reconstruct by replacing the original inner region inside the full match
-                # compute opening/closing segments relative to the match
                 return f"<a{m.group(1)}>{new_inner}</a>"
 
             working = anchor_re.sub(_trim_anchor_inner, working)
         except Exception:
-            # best-effort: if anything goes wrong leave anchors as-is
             pass
 
-        # Small spacing safety so adjacent anchors remain separated when tags were collapsed
+        # Ensure adjacent anchors remain visually separated but avoid inserting excessive spaces.
         try:
-            working = re.sub(r'</\s*a\s*>\s*<\s*a\b', '</a>  <a', working, flags=re.I)
+            # Insert a single space between adjacent anchors if they were collapsed to `</a><a...`
+            working = re.sub(r'</\s*a\s*>\s*<\s*a\b', '</a> <a', working, flags=re.I)
         except Exception:
             pass
 
