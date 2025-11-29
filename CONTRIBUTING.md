@@ -99,3 +99,31 @@ If you're unsure about a change or need help testing, open an issue or contact t
 
 - If you modify detection or apply flows, update this document accordingly.
 - When in doubt, prefer *not applying* highlighting in Rendered mode; store the detected preset for an explicit later application instead.
+
+## Tooling
+
+We maintain a small set of helper scripts in the repository for diagnostic and development tasks. Tools should be small, dependency-free where possible, and placed in the repository root or the `PythonApplication1` package when they import project modules.
+
+- tokendiag.py — A minimal CLI utility to fetch a JS file (HTTP or local path) and run the project's `jsmini` tokenizer/parser diagnostics. Usage example:
+  - `python -u tokendiag.py -src=http://example.com/jquery.js`
+  - `python -u tokendiag.py -file=path/to/file.js --dump-tokens 215`
+
+Tooling guidelines:
+- Prefer using the project's internal diagnostic helpers (e.g., `jsmini.diagnose_parse`) so diagnostics match runtime behavior.
+- Keep CLI options simple and document usage in the script header and this file.
+- Avoid adding heavy third-party dependencies for small utilities; prefer `urllib.request`, `argparse`, and standard library modules.
+
+## Tests
+
+Add tests for non-trivial parser or interpreter behavior. When adding a new diagnostic script that becomes part of CI, include a short unit test that verifies basic operation.
+
+## Contribution process
+
+1. Fork the repository and create a feature branch.
+2. Make small, focused commits and include tests where appropriate.
+3. Ensure `flake8`/`black` (if used by the project) pass locally. Keep formatting consistent with `.editorconfig`.
+4. Open a PR with a clear description of changes and rationale. Mention any user-facing behavior changes in the PR body.
+
+---
+
+Thank you for helping improve SimpleEdit.

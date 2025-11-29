@@ -23,9 +23,9 @@ TOKEN_SPEC = [
     ('STRING',   r'"([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\''),
     ('IDENT',    r'[A-Za-z_$][A-Za-z0-9_$]*'),
     ('COMMENT',  r'//[^\n]*|/\*[\s\S]*?\*/'),            # <--- ensure comments are matched first
-    # include logical operators && and || here (longer ops first)
-    ('OP',       r'===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|\+|-|\*|/|%|<|>|='),
-    ('PUNC',     r'[(){},;\[\].:]'),
+    # include logical operators && and || and bitwise ops here (longer ops first)
+    ('OP',       r'===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
+    ('PUNC',     r'[(){},;\[\].:?]'),  # '?' token for ternary
     ('SKIP',     r'[ \t\r\n]+'),
 ]
 TOKEN_RE = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPEC), re.M)
@@ -34,17 +34,76 @@ def tokenize(src: str) -> List[Token]:
     """Tokenize source and include token start/end offsets for enhanced error reporting.
 
     Returns list of 4-tuples (type, value, start, end).
+    Heuristic: tries to detect JS regex literals starting with '/' when context allows.
     """
     out = []
-    for m in TOKEN_RE.finditer(src):
+    pos = 0
+    prev_type = None
+    prev_val = None
+    L = len(src)
+
+    def _prev_allows_regex():
+        # Heuristic: allow regex at start, or after punctuation that starts an expression,
+        # or after an operator. Disallow after identifiers/numbers/strings except certain keywords.
+        if prev_type is None:
+            return True
+        if prev_type == 'PUNC' and prev_val in ('(', '{', '[', ',', ';', ':'):
+            return True
+        if prev_type == 'OP':
+            return True
+        if prev_type == 'IDENT' and prev_val in ('return', 'case', 'throw', 'else', 'new', 'typeof', 'instanceof'):
+            return True
+        return False
+
+    # helper regex to recognize a regex literal (no newlines inside; supports escaped slashes/classes)
+    _regex_re = re.compile(r'/((?:\\.|[^/\\\n])*)/([gimuy]*)')
+
+    while pos < L:
+        m = TOKEN_RE.match(src, pos)
+        if not m:
+            # Build informative error with surrounding snippet and offending character info
+            ch = src[pos] if pos < L else ''
+            ord_ch = ord(ch) if ch else None
+            window = 40
+            start_snip = max(0, pos - window)
+            end_snip = min(L, pos + window)
+            snippet = src[start_snip:end_snip].replace('\n', '\\n')
+            caret_pos = pos - start_snip
+            caret_line = ' ' * caret_pos + '^'
+            msg = (
+                f"Illegal character {repr(ch)} (ord={ord_ch}) in input at position {pos}.\n"
+                f"...{snippet}...\n   {caret_line}"
+            )
+            raise SyntaxError(msg)
         typ = m.lastgroup
         val = m.group(0)
         start = m.start()
         end = m.end()
+
+        # skip whitespace / comments
         if typ == 'SKIP' or typ == 'COMMENT':
+            pos = end
             continue
+
+        # Heuristic: when we see a slash token, decide whether it's a regex literal
+        if typ == 'OP' and val == '/':
+            if _prev_allows_regex():
+                # try to match a regex literal starting at current pos
+                rm = _regex_re.match(src, pos)
+                if rm:
+                    lit = rm.group(0)
+                    out.append(('REGEX', lit, pos, pos + len(lit)))
+                    prev_type = 'REGEX'
+                    prev_val = lit
+                    pos += len(lit)
+                    continue
+            # else fall through and treat as OP ('/')
         out.append((typ, val, start, end))
-    out.append(('EOF', '', len(src), len(src)))
+        prev_type = typ
+        prev_val = val
+        pos = end
+
+    out.append(('EOF', '', L, L))
     return out
 
 def _format_parse_error_context(src: str, err_pos: int, err_len: int = 1, window: int = 40) -> str:
@@ -175,7 +234,8 @@ class Parser:
             init = None
             if self.match('OP', '='):
                 self.eat('OP', '=')
-                init = self.parse_expression()
+                # use parse_assignment here so comma separators in surrounding syntax are not consumed
+                init = self.parse_assignment()
             decls.append((name, init))
             if self.match('PUNC', ','):
                 self.eat('PUNC', ',')
@@ -295,25 +355,46 @@ class Parser:
         if self.match('PUNC',';'): self.eat('PUNC',';')
         return ('throw', expr)
 
-    # Expressions: assignment (=) lowest precedence
     def parse_expression(self):
+        # Support comma operator: a, b  (returns last expression)
         node = self.parse_assignment()
+        # comma has lowest precedence in JS expressions
+        while self.match('PUNC', ','):
+            self.eat('PUNC', ',')
+            right = self.parse_assignment()
+            node = ('comma', node, right)
         return node
 
     def parse_assignment(self):
+        """
+        Parse assignment and (new) conditional expression:
+        - assignment: left = right
+        - conditional: left ? true_expr : false_expr
+        """
         left = self.parse_binary(-2)   # lowered min_prec to include ||/&&
+
+        # assignment (=) has right-associative behavior
         if self.match('OP', '='):
             self.eat('OP','=')
             right = self.parse_assignment()
             return ('assign', left, right)
+
+        # conditional (ternary) operator
+        if self.match('PUNC', '?'):
+            self.eat('PUNC', '?')
+            true_expr = self.parse_assignment()
+            self.eat('PUNC', ':')
+            false_expr = self.parse_assignment()
+            return ('cond', left, true_expr, false_expr)
+
         return left
-
-
     # Pratt-like binary precedence (very small table)
-    # Higher number => higher precedence. Added logical OR/AND with lower precedence
+    # Higher number => higher precedence.
+    # Added bitwise &, ^, | with precedence near equality (conservative).
     BINOPS = {
         '||': -2, '&&': -1,               # logical OR / AND (short-circuit)
         '==': 0, '!=': 0, '===': 0, '!==': 0,
+        '&': 0, '^': 0, '|': 0,            # bitwise ops (conservative precedence)
         '<': 1, '>': 1, '<=': 1, '>=': 1,
         '+': 2, '-': 2,
         '*': 3, '/': 3, '%': 3,
@@ -334,11 +415,19 @@ class Parser:
         return left
 
     def parse_unary(self):
-        # support prefix unary operators including ++ and --
+        # support prefix unary operators including ++, --, logical-not '!' and bitwise-not '~'
         if self.match('OP','-'):
             self.eat('OP','-')
             node = self.parse_unary()
             return ('unary','-', node)
+        if self.match('OP','!'):
+            self.eat('OP','!')
+            node = self.parse_unary()
+            return ('unary','!', node)
+        if self.match('OP','~'):
+            self.eat('OP','~')
+            node = self.parse_unary()
+            return ('unary','~', node)
         if self.match('OP','++'):
             self.eat('OP','++')
             node = self.parse_unary()
@@ -368,7 +457,8 @@ class Parser:
                 args = []
                 if not self.match('PUNC',')'):
                     while True:
-                        args.append(self.parse_expression())
+                        # use parse_assignment so argument separators (commas) remain delimiters
+                        args.append(self.parse_assignment())
                         if self.match('PUNC',')'):
                             break
                         self.eat('PUNC',',')
@@ -382,7 +472,8 @@ class Parser:
                 continue
             if self.match('PUNC','['):
                 self.eat('PUNC','[')
-                idx = self.parse_expression()
+                # use parse_assignment so commas inside expressions aren't mistaken for element separators
+                idx = self.parse_assignment()
                 self.eat('PUNC',']')
                 node = ('get', node, idx)
                 continue
@@ -408,6 +499,10 @@ class Parser:
             s = v[1:-1]
             s = s.encode('utf-8').decode('unicode_escape')
             return ('str', s)
+        if t == 'REGEX':
+            # regex literal token (kept as raw literal including slashes and flags)
+            self.eat('REGEX')
+            return ('regex', v)
         if t == 'IDENT':
             # support function expression here (anonymous or named)
             if v == 'function':
@@ -455,7 +550,8 @@ class Parser:
                     else:
                         key = self.eat('IDENT')[1]
                     self.eat('PUNC',':')
-                    val = self.parse_expression()
+                    # use parse_assignment so the object-property separator comma is not consumed
+                    val = self.parse_assignment()
                     props.append((key, val))
                     if self.match('PUNC','}'):
                         break
@@ -467,7 +563,8 @@ class Parser:
             elems = []
             if not self.match('PUNC',']'):
                 while True:
-                    elems.append(self.parse_expression())
+                    # element expressions should use parse_assignment to preserve separators
+                    elems.append(self.parse_assignment())
                     if self.match('PUNC',']'):
                         break
                     self.eat('PUNC',',')
@@ -721,6 +818,9 @@ class Interpreter:
         t = node[0]
         if t == 'num': return node[1]
         if t == 'str': return node[1]
+        if t == 'regex': 
+            # Return regex literal as its raw source for now (consumer may parse flags/pattern later)
+            return node[1]
         if t == 'bool': return node[1]
         if t == 'null': return None
         if t == 'undef': return undefined
@@ -868,11 +968,91 @@ class Interpreter:
             lhs = self._eval_expr(a, env, this)
             rhs = self._eval_expr(b, env, this)
             return self._apply_bin(op, lhs, rhs)
+        # Conditional (ternary) expression: ('cond', cond, true_expr, false_expr)
+        if t == 'cond':
+            _, cond_node, true_node, false_node = node
+            c = self._eval_expr(cond_node, env, this)
+            if self._is_truthy(c):
+                return self._eval_expr(true_node, env, this)
+            return self._eval_expr(false_node, env, this)
+
+        # Comma operator: evaluate left (for side-effects) then return right
+        if t == 'comma':
+            _, left_node, right_node = node
+            try:
+                self._eval_expr(left_node, env, this)
+            except Exception:
+                # best-effort continue to evaluate right
+                pass
+            return self._eval_expr(right_node, env, this)
+
         if t == 'unary':
             _, op, x = node
             v = self._eval_expr(x, env, this)
             if op == '-':
                 return -float(v)
+            if op == '!':
+                # JS '!' returns boolean - invert JS truthiness
+                return not self._is_truthy(v)
+            if op == '~':
+                # JS bitwise NOT: ToInt32 then bitwise not, return signed 32-bit result
+                def _to_int32(val):
+                    try:
+                        n = int(float(val))
+                    except Exception:
+                        try:
+                            n = int(str(val))
+                        except Exception:
+                            n = 0
+                    n = n & 0xFFFFFFFF
+                    return n - 0x100000000 if n & 0x80000000 else n
+                iv = _to_int32(v)
+                res = (~iv) & 0xFFFFFFFF
+                return res - 0x100000000 if res & 0x80000000 else res
+
+        if t == 'bin':
+            _, op, a, b = node
+            # short-circuit logical operators with JS-like truthiness and short-circuit semantics
+            if op == '&&':
+                lhs = self._eval_expr(a, env, this)
+                if not self._is_truthy(lhs):
+                    return lhs
+                return self._eval_expr(b, env, this)
+            if op == '||':
+                lhs = self._eval_expr(a, env, this)
+                if self._is_truthy(lhs):
+                    return lhs
+                return self._eval_expr(b, env, this)
+            lhs = self._eval_expr(a, env, this)
+            rhs = self._eval_expr(b, env, this)
+
+            # Bitwise operations: ToInt32 semantics (best-effort)
+            def _to_int32_local(x):
+                try:
+                    n = int(float(x))
+                except Exception:
+                    try:
+                        n = int(str(x))
+                    except Exception:
+                        n = 0
+                n = n & 0xFFFFFFFF
+                return n - 0x100000000 if n & 0x80000000 else n
+
+            if op == '&' or op == '|' or op == '^':
+                ai = _to_int32_local(lhs)
+                bi = _to_int32_local(rhs)
+                if op == '&':
+                    r = ai & bi
+                elif op == '|':
+                    r = ai | bi
+                else:  # '^'
+                    r = ai ^ bi
+                # normalize to signed-32
+                r = r & 0xFFFFFFFF
+                return r - 0x100000000 if r & 0x80000000 else r
+
+            return self._apply_bin(op, lhs, rhs)
+
         if t == 'assign':
             _, left, right = node
             r = self._eval_expr(right, env, this)
@@ -1147,6 +1327,72 @@ def run_with_interpreter(src: str, context: Optional[Dict[str,Any]]=None):
 def run_timers(context: Dict[str,Any]):
     """Convenience wrapper to execute stored timers in given context."""
     run_timers_from_context(context)
+
+def dump_tokens(src: str, start_index: int, count: int = 40) -> str:
+    """
+    Return a readable token dump around `start_index`.
+    start_index may be negative (interpreted as 0).
+    """
+    try:
+        raw = tokenize(src)
+    except Exception as e:
+        return f"tokenize() failed: {e}"
+    toks = [(t, v, s, e) for (t, v, s, e) in raw]
+    n = len(toks)
+    idx = max(0, start_index)
+    lo = max(0, idx - count // 2)
+    hi = min(n, lo + count)
+    lines = []
+    lines.append(f"Tokens {lo}..{hi-1} (total {n}):")
+    for i in range(lo, hi):
+        t, v, s, e = toks[i]
+        snippet = src[s:e].replace('\n', '\\n')
+        markers = '<--' if i == idx else ''
+        lines.append(f"{i:4}: {t:7} {v!r}  [{s}:{e}]  {snippet} {markers}")
+    return "\n".join(lines)
+
+def diagnose_parse(src: str, radius_tokens: int = 24, radius_chars: int = 80) -> str:
+    """
+    Try parsing and on SyntaxError return:
+      - parser index
+      - token dump around index
+      - source snippet with caret
+    Use this to quickly locate why the parser expected a different token.
+    """
+    try:
+        # attempt parse (this will raise on SyntaxError)
+        parse(src)
+        return "Parsed successfully (no error)"
+    except SyntaxError as se:
+        # Try to get parser index by running Parser and catching the same error position
+        try:
+            # produce raw tokens with positions
+            raw = tokenize(src)
+            toks = [(t, v) for (t, v, s, e) in raw]
+            positions = [(s, e) for (t, v, s, e) in raw]
+            p = Parser(toks)
+            try:
+                p.parse_program()
+            except SyntaxError:
+                idx = getattr(p, 'i', None)
+                if idx is None:
+                    raise
+                start, end = positions[idx] if idx < len(positions) else (0, 0)
+                token = toks[idx] if idx < len(toks) else ('', '')
+                token_ctx = dump_tokens(src, idx, count=radius_tokens)
+                # source char snippet
+                start_char = max(0, start - radius_chars)
+                end_char = min(len(src), end + radius_chars)
+                text_snip = src[start_char:end_char].replace('\n', '\\n')
+                caret = ' ' * (start - start_char) + '^' * max(1, end - start)
+                return (
+                    f"SyntaxError: {se}\nParser token index: {idx} token={token!r}\n\n"
+                    f"{token_ctx}\n\nSource context:\n...{text_snip}...\n{caret}"
+                )
+        except Exception:
+            pass
+        # fallback: return original message
+        return f"SyntaxError (no parser index): {se}"
 
 # quick test when executed as script
 if __name__ == '__main__':
