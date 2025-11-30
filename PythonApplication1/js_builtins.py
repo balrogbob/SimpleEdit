@@ -16,6 +16,19 @@ from typing import Any, Dict, List, Optional
 
 
 def register_builtins(context: Dict[str, Any], JSFunction):
+    # --- Host environment shims (conservative, inert defaults) ---
+    # Provide aliases and minimal google_tag* structures so real-world tag code
+    # probing these globals won't spin in tight re-check loops.
+    context.setdefault('window', context)
+    context.setdefault('globalThis', context)
+    context.setdefault('google_tags_first_party', [])
+
+    # Ensure google_tag_data.tidr has the minimal expected shape:
+    #   google_tag_data = { 'tidr': { 'container': {}, 'injectedFirstPartyContainers': {} } }
+    gtd = context.setdefault('google_tag_data', {})
+    tidr = gtd.setdefault('tidr', {})
+    tidr.setdefault('container', {})
+    tidr.setdefault('injectedFirstPartyContainers', {})
     # --- Array constructor + prototype methods --------------------------------
     def _array_ctor(interp, this, args):
         # this is created by Interpreter.new as a dict with '__proto__' set

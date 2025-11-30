@@ -2444,6 +2444,12 @@ def make_context(log_fn=None):
         'setTimeout': setTimeout
     }
 
+        # --- Host shims to satisfy common tag runtime checks (avoid tight re-check loops) ---
+    # Real environments expose `window.google_tags_first_party` and `google_tag_data`.
+    # Provide minimal sane defaults so minified code paths that probe these don't loop.
+    context_ref['google_tags_first_party'] = []           # empty list of first-party container ids
+    # google_tag_data.tidr is used by Pj() to store container state; give a minimal holder
+    context_ref['google_tag_data'] = {'tidr': {}}
     # --- Register minimal built-ins: Array and Object -----------------------
     # Array constructor (native): ensures `this` is an object with length and optional initial items
     def _array_ctor(interp, this, args):
