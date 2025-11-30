@@ -27,6 +27,7 @@
     <Compile Include="examples\run_jsmini_demo.py" />
     <Compile Include="functions.py" />
     <Compile Include="jsmini.py" />
+    <Compile Include="minitokentester.py" />
     <Compile Include="model.py" />
     <Compile Include="PythonApplication1.py" />
     <Compile Include="recent_files.py" />

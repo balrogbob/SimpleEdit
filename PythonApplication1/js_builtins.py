@@ -90,7 +90,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 rv = cb.call(interp, this_arg, [val, i, this])
             elif callable(cb):
                 try:
-                    rv = cb(this_arg, val, i, this) if this_arg is not None : cb(val, i, this)
+                    rv = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
                 except Exception:
                     rv = context.get("undefined")
             else:
@@ -117,7 +117,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 test = cb.call(interp, this_arg, [val, i, this])
             elif callable(cb):
                 try:
-                    test = cb(this_arg, val, i, this) if this_arg is not None : cb(val, i, this)
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
                 except Exception:
                     test = False
             else:
@@ -314,8 +314,12 @@ def register_builtins(context: Dict[str, Any], JSFunction):
 
         return JSFunction(params=[], body=None, env=None, name="bound", native_impl=_bound_native)
 
-    # Attach call/apply/bind as attributes on the JSFunction class so getattr(fn, 'call') works
-    # (jsmini's property getter falls back to getattr for non-dict objects).
-    setattr(JSFunction, "call", JSFunction(params=[], body=None, env=None, name="call", native_impl=_fn_call))
-    setattr(JSFunction, "apply", JSFunction(params=[], body=None, env=None, name="apply", native_impl=_fn_apply))
-    setattr(JSFunction, "bind", JSFunction(params=[], body=None, env=None, name="bind", native_impl=_fn_bind)
+    # Attach call/apply/bind as prototype methods on JSFunction so JS `fn.call(...)` resolves
+    # via prototype lookup instead of shadowing the Python method on the class.
+    # These are JSFunction instances (native_impl) so interpreter will treat them as JS functions.
+    JSFunction.prototype['call'] = JSFunction(params=[], body=None, env=None, name='call', native_impl=_fn_call)
+    JSFunction.prototype['apply'] = JSFunction(params=[], body=None, env=None, name='apply', native_impl=_fn_apply)
+    JSFunction.prototype['bind'] = JSFunction(params=[], body=None, env=None, name='bind', native_impl=_fn_bind)
+    # expose helper functions if host expects them
+    context.setdefault("undefined", context.get("undefined", None))
+    return None

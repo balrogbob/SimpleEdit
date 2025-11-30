@@ -15,7 +15,7 @@ import re
 import random
 from typing import Any, Dict, List, Optional, Tuple
 try:
-    from PythonApplication1 import js_builtins
+    import js_builtins
 except Exception:
     js_builtins = None
 # --- Tokenizer --------------------------------------------------------------
@@ -26,8 +26,8 @@ TOKEN_SPEC = [
     ('STRING',   r'"([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\''),
     ('IDENT',    r'[A-Za-z_$][A-Za-z0-9_$]*'),
     ('COMMENT',  r'//[^\n]*|/\*[\s\S]*?\*/'),            # <--- ensure comments are matched first
-    # include logical operators && and || and bitwise ops here (longer ops first)
-    ('OP',       r'===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
+    # include compound-assignment and shift ops + logical operators (longer ops first)
+    ('OP',       r'\+=|-=|\*=|/=|%=|<<=|>>=|>>>=|<<|>>|===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
     ('PUNC',     r'[(){},;\[\].:?]'),  # '?' token for ternary
     ('SKIP',     r'[ \t\r\n]+'),
 ]
@@ -186,7 +186,17 @@ class Parser:
         if self.match('PUNC','{'):
             return self.parse_block()
         if self.match('IDENT','return'):
+            # `return` may be followed by an expression or by nothing (automatic semicolon/closing brace).
+            # Treat missing expression as `undefined`.
             self.eat('IDENT','return')
+            # if next token cannot start an expression (semicolon, closing brace, EOF), it's an empty return
+            t, v = self.peek()
+            if t == 'PUNC' and v in (';', '}', ')') or t == 'EOF':
+                # optional semicolon following empty return
+                if self.match('PUNC',';'):
+                    self.eat('PUNC',';')
+                return ('return', ('undef', None))
+            # otherwise parse expression as normal
             expr = self.parse_expression()
             if self.match('PUNC',';'):
                 self.eat('PUNC',';')
@@ -330,7 +340,19 @@ class Parser:
                 if lhs_candidate is None:
                     init = self.parse_expression()
                 else:
-                    init = lhs_candidate
+                    # parse_call_member may have consumed only a left-hand prefix (e.g. a string or id)
+                    # while the full init expression continues (e.g. `"boolean" == typeof s ...`).
+                    # If the next token can continue an expression, restore and parse the full expression.
+                    try:
+                        t, v = self.peek()
+                    except Exception:
+                        t, v = None, None
+                    if t == 'OP' or (t == 'IDENT' and v in self.BINOPS):
+                        # restore position and parse the complete expression
+                        self.i = saved_i
+                        init = self.parse_expression()
+                    else:
+                        init = lhs_candidate
 
                 # consume required semicolon (best-effort recovery if missing)
                 if self.match('PUNC', ';'):
@@ -416,15 +438,21 @@ class Parser:
         """
         Parse assignment and (new) conditional expression:
         - assignment: left = right
+        - compound-assignment: left += right, left -= right, ...
         - conditional: left ? true_expr : false_expr
         """
         left = self.parse_binary(-2)   # lowered min_prec to include ||/&&
 
-        # assignment (=) has right-associative behavior
-        if self.match('OP', '='):
-            self.eat('OP','=')
+        # assignment (=) and compound assignments (+=, -=, etc.)
+        if self.match('OP') and self.peek()[1] in ('=', '+=', '-=', '*=', '/=', '%=', '&=', '|=', '^=', '<<=', '>>=', '>>>='):
+            op = self.eat('OP')[1]
             right = self.parse_assignment()
-            return ('assign', left, right)
+            if op == '=':
+                return ('assign', left, right)
+            # desugar compound assignment `L op= R` into `L = L op R`
+            # map '<<=' -> '<<', '>>>=' -> '>>>', etc.
+            bin_op = op[:-1]  # removes trailing '=' -> '+='=>'+'; '<<='=>'<<'
+            return ('assign', left, ('bin', bin_op, left, right))
 
         # conditional (ternary) operator
         if self.match('PUNC', '?'):
@@ -435,6 +463,7 @@ class Parser:
             return ('cond', left, true_expr, false_expr)
 
         return left
+
     # Pratt-like binary precedence (very small table)
     # Higher number => higher precedence.
     # Added bitwise &, ^, | with precedence near equality (conservative).
@@ -495,6 +524,11 @@ class Parser:
             self.eat('OP','--')
             node = self.parse_unary()
             return ('preop','--', node)
+        # support `delete` as a unary operator (identifier token)
+        if self.match('IDENT', 'delete'):
+            self.eat('IDENT', 'delete')
+            node = self.parse_unary()
+            return ('delete', node)
         # support typeof as a unary operator
         if self.match('IDENT','typeof'):
             self.eat('IDENT','typeof')
@@ -717,6 +751,9 @@ class Env:
         self.vars[name] = value
 
 class JSFunction:
+    # Shared class-level prototype dict so callers can set JS-level Function.prototype safely.
+    prototype: Dict[str, Any] = {}
+
     def __init__(self, params=None, body=None, env: Optional[Env]=None, name: Optional[str]=None, native_impl: Optional[callable]=None):
         # Scripted function fields
         self.params = params or []
@@ -725,12 +762,22 @@ class JSFunction:
         self.name = name
         # Optional native implementation: native_impl(interpreter, this, args) -> value
         self.native_impl = native_impl
-        # simple prototype object (plain dict). `constructor` links back for instanceof semantics.
-        self.prototype: Dict[str, Any] = {}
+        # each function gets its own prototype object by default; fall back to class-level shared prototype
         try:
-            self.prototype['constructor'] = self
+            # keep per-instance prototype but if absent, point at class prototype
+            self.prototype: Dict[str, Any] = {} if not getattr(self.__class__, 'prototype', None) else self.__class__.prototype
+            # ensure constructor link exists (best-effort)
+            try:
+                self.prototype.setdefault('constructor', self)
+            except Exception:
+                pass
         except Exception:
-            pass
+            # defensive fallback
+            try:
+                self.prototype = {}
+                self.prototype.setdefault('constructor', self)
+            except Exception:
+                self.prototype = {}
 
     def call(self, interpreter, this, args):
         # Native implementation takes precedence
@@ -769,9 +816,11 @@ class Interpreter:
             for k,v in globals_map.items():
                 self.global_env.set_local(k, v)
 
+
     def _prop_get(self, obj, key):
-        """Interpreter method: prototype-aware property lookup. Returns `undefined` when not found."""
+        """Prototype-aware property lookup. Returns `undefined` when not found."""
         try:
+            # dict-like JS objects: walk __proto__ chain
             if isinstance(obj, dict):
                 cur = obj
                 while cur is not None:
@@ -779,6 +828,22 @@ class Interpreter:
                         return cur[key]
                     cur = cur.get('__proto__', None)
                 return undefined
+
+            # JSFunction instances: check instance prototype then class-level prototype (if present)
+            if isinstance(obj, JSFunction):
+                try:
+                    proto = getattr(obj, 'prototype', None)
+                    if isinstance(proto, dict) and key in proto:
+                        return proto[key]
+                except Exception:
+                    pass
+                try:
+                    cls_proto = getattr(obj.__class__, 'prototype', None)
+                    if isinstance(cls_proto, dict) and key in cls_proto:
+                        return cls_proto[key]
+                except Exception:
+                    pass
+
             # fallback for host/python objects: use attribute
             return getattr(obj, key, undefined)
         except Exception:
@@ -1051,6 +1116,53 @@ class Interpreter:
         if t == 'bool': return node[1]
         if t == 'null': return None
         if t == 'undef': return undefined
+
+        # delete unary operator: best-effort removal of property; returns True/False like JS (non-strict)
+        if t == 'delete':
+            _, target_node = node
+            try:
+                # delete applied to property access: delete obj.prop or delete obj['prop']
+                if target_node[0] == 'get':
+                    base = self._eval_expr(target_node[1], env, this)
+                    prop_node = target_node[2]
+                    if prop_node[0] == 'id':
+                        key = prop_node[1]
+                    else:
+                        key = self._eval_expr(prop_node, env, this)
+                    try:
+                        if isinstance(base, dict):
+                            if key in base:
+                                del base[key]
+                            return True
+                        # try attribute deletion on host objects
+                        try:
+                            delattr(base, key)
+                            return True
+                        except Exception:
+                            # deletion may still be considered successful in non-strict mode
+                            return True
+                    except Exception:
+                        return True
+                # delete applied to an identifier (variable) - cannot delete local bindings; return False
+                if target_node[0] == 'id':
+                    name = target_node[1]
+                    # If it's a property on global_env represented as dict, allow delete
+                    try:
+                        # If variable exists in current local env, JS semantics: delete variable -> false
+                        if name in env.vars:
+                            return False
+                    except Exception:
+                        pass
+                    try:
+                        # attempt to remove from global env dictionary
+                        if name in self.global_env.vars:
+                            del self.global_env.vars[name]
+                            return True
+                    except Exception:
+                        pass
+                    return False
+            except Exception:
+                return True
 
         # typeof unary
         if t == 'typeof':
