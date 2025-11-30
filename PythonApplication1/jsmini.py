@@ -14,6 +14,8 @@ from __future__ import annotations
 import re
 import random
 import math
+import html
+from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 try:
     import js_builtins
@@ -31,7 +33,7 @@ TOKEN_SPEC = [
     ('IDENT',    r'[A-Za-z_$][A-Za-z0-9_$]*'),
     ('COMMENT',  r'//[^\n]*|/\*[\s\S]*?\*/'),            # ensure comments are matched first
     # longer operators first: include full set of shift / unsigned-shift and compound-assign forms
-    ('OP',       r'\+=|-=|\*=|/=|%=|>>>=|<<=|>>=|>>>|<<|>>|===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
+    ('OP',       r'\+=|-=|\*=|/=|%=|&=|\|=|\^=|>>>=|<<=|>>=|>>>|<<|>>|===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
     ('PUNC',     r'[(){},;\[\].:?]'),
     ('SKIP',     r'[ \t\r\n]+'),
 ]
@@ -50,20 +52,46 @@ def tokenize(src: str) -> List[Token]:
     L = len(src)
 
     def _prev_allows_regex():
-        # Heuristic: allow regex at start, or after punctuation that starts an expression,
-        # or after an operator. Disallow after identifiers/numbers/strings except certain keywords.
+        """
+        Improved heuristic for deciding whether a '/' may start a regex literal.
+
+        Rules implemented:
+        - At start of input -> allow.
+        - After punctuation that can start an expression: ( { [ , ; : ? -> allow
+        - After an operator token (binary or unary) -> allow
+        - After certain keywords that expect an expression -> allow (return, case, throw, else,
+          new, typeof, instanceof, delete, void)
+        - Disallow after literal/identifier/regex where a binary operator or property access is expected.
+        """
         if prev_type is None:
             return True
-        if prev_type == 'PUNC' and prev_val in ('(', '{', '[', ',', ';', ':'):
+
+        # Punctuation that opens an expression context
+        if prev_type == 'PUNC' and prev_val in ('(', '{', '[', ',', ';', ':', '?'):
             return True
+
+        # Operators generally allow an expression after them (e.g. `=`, `+`, `-`, `&&`, ...)
         if prev_type == 'OP':
             return True
-        if prev_type == 'IDENT' and prev_val in ('return', 'case', 'throw', 'else', 'new', 'typeof', 'instanceof'):
+
+        # Keywords that can be followed by an expression / value
+        if prev_type == 'IDENT' and prev_val in (
+            'return', 'case', 'throw', 'else', 'new', 'typeof', 'instanceof', 'delete', 'void'
+        ):
             return True
+
+        # If previous token is a literal, identifier, or regex literal, a '/' is more likely division
+        if prev_type in ('NUMBER', 'STRING', 'REGEX', 'IDENT'):
+            return False
+
+        # Conservative default: do not allow (safer than mis-recognizing division as regex)
         return False
 
     # helper regex to recognize a regex literal (no newlines inside; supports escaped slashes/classes)
-    _regex_re = re.compile(r'/((?:\\.|[^/\\\n])*)/([gimuy]*)')
+    _regex_re = re.compile(
+        r'/((?:\\.|(?:\[(?:\\.|[^\]\\])*\])|[^/\\\n])*)/([gimuy]*)'
+    )
+
 
     while pos < L:
         m = TOKEN_RE.match(src, pos)
@@ -92,8 +120,10 @@ def tokenize(src: str) -> List[Token]:
             pos = end
             continue
 
-        # Heuristic: when we see a slash token, decide whether it's a regex literal
-        if typ == 'OP' and val == '/':
+        # Heuristic: when we see a slash-like token, decide whether it's a regex literal.
+        # TOKEN_RE may match compound operators like '/=' before we get a chance to inspect.
+        # If the matched token starts with '/' and context allows a regex, try to consume a regex literal.
+        if typ == 'OP' and val.startswith('/'):
             if _prev_allows_regex():
                 # try to match a regex literal starting at current pos
                 rm = _regex_re.match(src, pos)
@@ -104,7 +134,9 @@ def tokenize(src: str) -> List[Token]:
                     prev_val = lit
                     pos += len(lit)
                     continue
-            # else fall through and treat as OP ('/')
+            # else fall through and treat as OP ('/' or '/=' etc.)
+
+        # fallback: normal append of token
         out.append((typ, val, start, end))
         prev_type = typ
         prev_val = val
@@ -183,6 +215,21 @@ class Parser:
             # empty statement (just a semicolon) — consume and return explicit empty node
             self.eat('PUNC',';')
             return ('empty',)
+
+        # support label: statement (e.g. `label: { ... }`), avoiding reserved keywords
+        if self.match('IDENT'):
+            # lookahead for colon token
+            if self.i + 1 < len(self.tokens):
+                nt, nv = self.tokens[self.i + 1]
+                if nt == 'PUNC' and nv == ':':
+                    # avoid treating language keywords as labels
+                    cur_ident = self.peek()[1]
+                    if cur_ident not in ('var','function','return','if','while','do','for','switch','try','throw','break','continue'):
+                        name = self.eat('IDENT')[1]
+                        self.eat('PUNC', ':')
+                        stmt = self.parse_statement()
+                        return ('label', name, stmt)
+
         if self.match('IDENT','var'):
             return self.parse_var_decl()
         if self.match('IDENT','function'):
@@ -235,12 +282,19 @@ class Parser:
             return self.parse_throw()
         if self.match('IDENT','break'):
             self.eat('IDENT','break')
+            # optional label after break (e.g. `break myLabel;`)
+            label = None
+            if self.match('IDENT'):
+                label = self.eat('IDENT')[1]
             if self.match('PUNC',';'): self.eat('PUNC',';')
-            return ('break',)
+            return ('break', label)
         if self.match('IDENT','continue'):
             self.eat('IDENT','continue')
+            label = None
+            if self.match('IDENT'):
+                label = self.eat('IDENT')[1]
             if self.match('PUNC',';'): self.eat('PUNC',';')
-            return ('continue',)
+            return ('continue', label)
         # expression statement
         expr = self.parse_expression()
         if self.match('PUNC',';'):
@@ -367,7 +421,11 @@ class Parser:
                         t, v = self.peek()
                     except Exception:
                         t, v = None, None
-                    if t == 'OP' or (t == 'IDENT' and v in self.BINOPS):
+                    # Accept tokens that indicate the expression continues:
+                    # - operator tokens (OP)
+                    # - identifiers that are binary operators (e.g. 'in', 'instanceof' stored in BINOPS)
+                    # - comma (',' PUNC) which is the comma operator and valid inside `for` init clause
+                    if t == 'OP' or (t == 'IDENT' and v in self.BINOPS) or (t == 'PUNC' and v == ','):
                         # restore position and parse the complete expression
                         self.i = saved_i
                         init = self.parse_expression()
@@ -555,6 +613,11 @@ class Parser:
             self.eat('IDENT','typeof')
             node = self.parse_unary()
             return ('typeof', node)
+        # support void as a unary operator (e.g. `void 0`)
+        if self.match('IDENT','void'):
+            self.eat('IDENT','void')
+            node = self.parse_unary()
+            return ('void', node)
         if self.match('IDENT','new'):
             self.eat('IDENT','new')
             # parse a call/member expression after new (may include args)
@@ -658,9 +721,11 @@ class Parser:
             props = []
             if not self.match('PUNC','}'):
                 while True:
-                    key = None
+                    # allow STRING, NUMBER or IDENT as object literal key (numbers treated as keys)
                     if self.match('STRING'):
                         key = self.eat('STRING')[1][1:-1]
+                    elif self.match('NUMBER'):
+                        key = self.eat('NUMBER')[1]
                     else:
                         key = self.eat('IDENT')[1]
                     self.eat('PUNC',':')
@@ -746,10 +811,12 @@ class JSError(Exception):
         self.value = value
 
 class BreakExc(Exception):
-    pass
+    def __init__(self, label: Optional[str] = None):
+        self.label = label
 
 class ContinueExc(Exception):
-    pass
+    def __init__(self, label: Optional[str] = None):
+        self.label = label
 
 class Env:
     def __init__(self, parent: Optional['Env']=None):
@@ -834,7 +901,6 @@ class JSFunction:
             pass
 
         # Last-resort: use module-level last-interpreter if available.
-        # This covers rare host-calls that pass the JSFunction class or other stray value.
         global _LAST_INTERPRETER
         if not hasattr(interp, '_eval_stmt'):
             if _LAST_INTERPRETER is not None and hasattr(_LAST_INTERPRETER, '_eval_stmt'):
@@ -863,10 +929,29 @@ class JSFunction:
             local.set_local(p, args[i] if i < len(args) else undefined)
         if self.name:
             local.set_local(self.name, self)
+
+        # push function name onto interpreter call-stack (for diagnostics)
+        fn_label = self.name or '<anon>'
         try:
-            return interp._eval_stmt(self.body, local, this)
-        except ReturnExc as r:
-            return r.value
+            # ensure interpreter has call-stack attributes
+            if not hasattr(interp, '_call_stack'):
+                interp._call_stack = []
+            interp._call_stack.append(fn_label)
+        except Exception:
+            pass
+
+        try:
+            try:
+                return interp._eval_stmt(self.body, local, this)
+            except ReturnExc as r:
+                return r.value
+        finally:
+            # pop call-stack safely
+            try:
+                if hasattr(interp, '_call_stack') and interp._call_stack:
+                    interp._call_stack.pop()
+            except Exception:
+                pass
 
     def __repr__(self):
         return f"<JSFunction {self.name or '<anon>'}>"
@@ -876,13 +961,18 @@ class ReturnExc(Exception):
         self.value = value
 
 class Interpreter:
-    def __init__(self, globals_map: Optional[Dict[str, Any]]=None):
+    def __init__(self, globals_map: Optional[Dict[str, Any]] = None):
         self.global_env = Env()
         if globals_map:
-            for k,v in globals_map.items():
+            for k, v in globals_map.items():
                 self.global_env.set_local(k, v)
+        # runtime instrumentation: counters and call stack to diagnose hangs
+        # sensible default; increase if your script legitimately runs many statements
+        self._exec_count = 0
+        self._exec_limit = 200_000
+        self._call_stack: List[str] = []
+        self._trace = False  # set True for periodic progress prints
         # record last-created interpreter so JSFunction.call can recover it as a best-effort fallback
-        # when host code fails to thread the interpreter instance through correctly.
         global _LAST_INTERPRETER
         try:
             _LAST_INTERPRETER = self
@@ -965,11 +1055,53 @@ class Interpreter:
     def _eval_prog(self, node, env):
         assert node[0] == 'prog'
         res = undefined
-        for st in node[1]:
-            res = self._eval_stmt(st, env, None)
-        return res
+        try:
+            for st in node[1]:
+                res = self._eval_stmt(st, env, None)
+            return res
+        except BreakExc:
+            # Uncaught `break` bubbled out of any loop context -> provide a clear runtime error.
+            raise RuntimeError("Uncaught 'break' (break statement not inside loop or switch)")
+        except ContinueExc:
+            # Uncaught `continue` bubbled out of any loop context -> provide a clear runtime error.
+            raise RuntimeError("Uncaught 'continue' (continue statement not inside loop)")
 
     def _eval_stmt(self, node, env: Env, this):
+        # lightweight execution watchdog to diagnose runaway execution/hangs.
+        # Increment the interpreter-wide counter and emit a helpful error when the
+        # configured execution limit is exceeded.
+        try:
+            self._exec_count += 1
+        except Exception:
+            # if attribute missing for some reason, initialize defensively
+            try:
+                self._exec_count = 1
+            except Exception:
+                pass
+
+        # optional periodic trace output
+        try:
+            if getattr(self, '_trace', False) and (self._exec_count % 50000) == 0:
+                cs = getattr(self, '_call_stack', None)
+                print(f"[jsmini.trace] executed={self._exec_count} call_stack={cs}")
+        except Exception:
+            pass
+
+        # abort with diagnostic when execution count passes configured limit
+        try:
+            if getattr(self, '_exec_limit', 0) and self._exec_count > self._exec_limit:
+                call_stack = getattr(self, '_call_stack', None)
+                raise RuntimeError(
+                    f"Execution limit exceeded ({self._exec_count} statements). "
+                    f"Call stack (top->bottom): {call_stack}. Current node: {node!r}"
+                )
+        except RuntimeError:
+            raise
+        except Exception:
+            # ignore instrumentation failures (do not alter semantics)
+            pass
+
+        typ = node[0]
         typ = node[0]
         if typ == 'empty':
             return undefined
@@ -992,6 +1124,25 @@ class Interpreter:
             if name:
                 env.set_local(name, fn)
             return fn
+        if typ == 'label':
+            # Labels don't introduce scope in this toy interpreter;
+            # evaluate the inner statement and intercept labelled breaks/continues.
+            _, label_name, stmt = node
+            try:
+                return self._eval_stmt(stmt, env, this)
+            except BreakExc as be:
+                # If break targets this label, it's handled here (drop out of labelled statement).
+                if getattr(be, 'label', None) == label_name:
+                    return undefined
+                # otherwise re-raise to be handled by an outer label/loop
+                raise
+            except ContinueExc as ce:
+                # `continue label` should target an enclosing loop labelled with label_name.
+                # If we catch one here and it targets this label but the labelled statement
+                # is not a loop, surface a clearer runtime error.
+                if getattr(ce, 'label', None) == label_name:
+                    raise RuntimeError(f"Invalid 'continue {label_name}' target (not a loop)")
+                raise
         if typ == 'block':
             _, stmts = node
             local = Env(env)
@@ -1017,24 +1168,36 @@ class Interpreter:
             while self._is_truthy(self._eval_expr(cond, env, this)):
                 try:
                     res = self._eval_stmt(body, env, this)
-                except BreakExc:
-                    break
-                except ContinueExc:
-                    continue
+                except BreakExc as be:
+                    # handle unlabeled break; labeled breaks bubble up to enclosing labels
+                    if getattr(be, 'label', None) is None:
+                        break
+                    raise
+                except ContinueExc as ce:
+                    # handle unlabeled continue; labeled continues bubble up
+                    if getattr(ce, 'label', None) is None:
+                        continue
+                    raise
             return res
 
-        # do-while loop support
+        # do-while loop support (handles labeled break/continue robustly)
         if typ == 'do':
             _, body, cond = node
             res = undefined
             while True:
                 try:
                     res = self._eval_stmt(body, env, this)
-                except BreakExc:
-                    break
-                except ContinueExc:
-                    # on continue, still evaluate condition afterwards
-                    pass
+                except BreakExc as be:
+                    # only consume unlabeled breaks here
+                    if getattr(be, 'label', None) is None:
+                        break
+                    raise
+                except ContinueExc as ce:
+                    # only consume unlabeled continues here (still evaluate condition)
+                    if getattr(ce, 'label', None) is None:
+                        pass
+                    else:
+                        raise
                 # evaluate condition after body; break when falsy
                 try:
                     if not self._is_truthy(self._eval_expr(cond, env, this)):
@@ -1043,21 +1206,18 @@ class Interpreter:
                     break
             return res
 
-        # new: for-in evaluator
+        # for-in evaluator (handles labeled break/continue)
         if typ == 'for_in':
             _, lhs, rhs, body = node
-            # create a per-loop lexical env (keeps behavior consistent with other `for` handling)
             local = Env(env)
             # If lhs is a var-declaration, create the binding(s) first so RHS can see hoisted names
             if isinstance(lhs, tuple) and lhs[0] == 'var':
                 try:
-                    # this will call the same var-decl path and set locals with initializers (if any)
                     self._eval_stmt(lhs, local, this)
                 except Exception:
                     pass
 
             res = undefined
-            # Evaluate the RHS (object to enumerate) in the loop env so declared vars are visible
             try:
                 target = self._eval_expr(rhs, local, this)
             except Exception:
@@ -1067,7 +1227,6 @@ class Interpreter:
             keys: List[str] = []
             try:
                 if isinstance(target, dict):
-                    # own keys only, skip internal '__proto__'
                     keys = [k for k in target.keys() if k != '__proto__']
                 elif isinstance(target, JSList):
                     keys = [str(i) for i in range(len(target))]
@@ -1076,7 +1235,6 @@ class Interpreter:
                 elif hasattr(target, '__dict__'):
                     keys = list(vars(target).keys())
                 else:
-                    # fallback: if iterable, iterate and expose numeric indices
                     try:
                         seq = list(target)
                         keys = [str(i) for i in range(len(seq))]
@@ -1085,26 +1243,19 @@ class Interpreter:
             except Exception:
                 keys = []
 
-            # Iterate keys and execute body. Per-iteration assignment behavior mirrors assignment semantics:
-            # - var-declared lhs -> assign into `local`
-            # - id lhs -> assign into `local` (nearest scope used when executing loop body)
-            # - get(lhs) -> assign property on evaluated target object
             for k in keys:
                 try:
+                    # assign iteration variable according to lhs shape
                     if isinstance(lhs, tuple) and lhs[0] == 'var':
-                        # ('var', [(name, init), ...]) -- use first declarator as LHS target
                         try:
                             name = lhs[1][0][0]
                             local.set(name, k)
                         except Exception:
-                            # defensive: ignore malformed var structure
                             pass
                     elif isinstance(lhs, tuple) and lhs[0] == 'id':
-                        # simple identifier target
                         name = lhs[1]
                         local.set(name, k)
                     elif isinstance(lhs, tuple) and lhs[0] == 'get':
-                        # property assignment target: evaluate base object then set property
                         try:
                             tgt_obj = self._eval_expr(lhs[1], local, this)
                             prop_node = lhs[2]
@@ -1112,32 +1263,29 @@ class Interpreter:
                                 prop_name = prop_node[1]
                             else:
                                 prop_name = self._eval_expr(prop_node, local, this)
-                            try:
-                                if isinstance(tgt_obj, dict):
-                                    tgt_obj[prop_name] = k
-                                else:
-                                    setattr(tgt_obj, prop_name, k)
-                            except Exception:
-                                pass
+                            if isinstance(tgt_obj, dict):
+                                tgt_obj[prop_name] = k
+                            else:
+                                setattr(tgt_obj, prop_name, k)
                         except Exception:
                             pass
-                    else:
-                        # unknown lhs form: best-effort evaluate as expression (no-op)
-                        pass
-
-                    # execute loop body with local env
+                    # execute loop body with local env and handle labeled control flow
                     try:
                         res = self._eval_stmt(body, local, this)
-                    except BreakExc:
-                        break
-                    except ContinueExc:
-                        # go to next key
-                        continue
+                    except BreakExc as be:
+                        if getattr(be, 'label', None) is None:
+                            break
+                        raise
+                    except ContinueExc as ce:
+                        if getattr(ce, 'label', None) is None:
+                            continue
+                        raise
                 except Exception:
                     # per-iteration errors should not abort entire loop
                     continue
             return res
 
+        # classic C-style for(init; cond; post)
         if typ == 'for':
             _, init, cond, post, body = node
             local = Env(env)
@@ -1152,14 +1300,26 @@ class Interpreter:
                     break
                 try:
                     res = self._eval_stmt(body, local, this)
-                except BreakExc:
-                    break
-                except ContinueExc:
-                    # continue to post/next iter
-                    pass
+                except BreakExc as be:
+                    # unlabeled break stops loop; labeled break bubbles up
+                    if getattr(be, 'label', None) is None:
+                        break
+                    raise
+                except ContinueExc as ce:
+                    # unlabeled continue proceeds to post; labeled continue bubbles up
+                    if getattr(ce, 'label', None) is None:
+                        # continue to post/next iteration
+                        pass
+                    else:
+                        raise
                 if post is not None:
-                    self._eval_expr(post, local, this)
+                    try:
+                        self._eval_expr(post, local, this)
+                    except Exception:
+                        # post-expression errors ignored (best-effort)
+                        pass
             return res
+
         if typ == 'switch':
             _, expr, cases, default_block = node
             val = self._eval_expr(expr, env, this)
@@ -1174,8 +1334,12 @@ class Interpreter:
                 if not executed and default_block:
                     for s in default_block:
                         self._eval_stmt(s, env, this)
-            except BreakExc:
-                pass
+            except BreakExc as be:
+                # swallow unlabeled break inside switch; re-raise labeled break to be handled by an outer label
+                if getattr(be, 'label', None) is None:
+                    pass
+                else:
+                    raise
             return undefined
         if typ == 'try':
             _, try_block, catch_name, catch_block = node
@@ -1192,9 +1356,13 @@ class Interpreter:
             val = self._eval_expr(expr, env, this)
             raise JSError(val)
         if typ == 'break':
-            raise BreakExc()
+            # node format ('break', label_or_None)
+            _, label = node
+            raise BreakExc(label)
         if typ == 'continue':
-            raise ContinueExc()
+            # node format ('continue', label_or_None)
+            _, label = node
+            raise ContinueExc(label)
         if typ == 'expr':
             return self._eval_expr(node[1], env, this)
         raise RuntimeError(f"Unknown stmt {typ}")
@@ -1257,7 +1425,6 @@ class Interpreter:
             except Exception:
                 return True
 
-        # typeof unary
         if t == 'typeof':
             _, expr_node = node
             try:
@@ -1280,6 +1447,17 @@ class Interpreter:
                 return 'function'
             # arrays / dicts / objects / Element -> object
             return 'object'
+
+        # void unary: evaluate operand for side-effects, always return undefined
+        if t == 'void':
+            _, expr_node = node
+            try:
+                # evaluate operand but ignore the result
+                self._eval_expr(expr_node, env, this)
+            except Exception:
+                # swallow errors (best-effort like other unary handlers)
+                pass
+            return undefined
 
         # Helpers for ++/-- handling (unchanged) ...
         def _to_number(v):
@@ -1712,25 +1890,466 @@ class Element:
         # children is a JSList so JS code can read `.length`
         self.children: JSList = JSList()
         self.id: Optional[str] = None
+        self.parent = None  # parentNode reference for DOM manipulations
+        # simple classList representation (exposes add/remove/contains/toggle)
+        self._class_set = set()
 
     def setAttribute(self, k: str, v: Any) -> None:
         self.attrs[k] = v
         if k == 'id':
             self.id = v
+        if k == 'class':
+            try:
+                # keep classSet in sync with attribute
+                self._class_set = set(str(v).split())
+            except Exception:
+                self._class_set = set()
 
     def appendChild(self, child: Any) -> None:
         # keep underlying storage and expose JS-like API
-        self.children.append(child)
+        # set parent pointer for element children
+        try:
+            if isinstance(child, Element):
+                child.parent = self
+            self.children.append(child)
+        except Exception:
+            # fallback append
+            try:
+                self.children.append(child)
+            except Exception:
+                pass
+
+    def removeChild(self, child: Any) -> None:
+        """Remove a child (no exception thrown on failure)."""
+        try:
+            # support JSList and Python lists
+            if isinstance(self.children, JSList):
+                lst = list(self.children._list)
+                if child in lst:
+                    lst.remove(child)
+                    self.children = JSList(lst)
+                    try:
+                        if isinstance(child, Element):
+                            child.parent = None
+                    except Exception:
+                        pass
+            else:
+                if child in self.children:
+                    self.children.remove(child)
+                    try:
+                        if isinstance(child, Element):
+                            child.parent = None
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def insertBefore(self, newNode: Any, referenceNode: Any) -> None:
+        """Insert newNode before referenceNode; append if referenceNode not found."""
+        try:
+            lst = self.children._list
+            try:
+                idx = lst.index(referenceNode)
+            except ValueError:
+                idx = len(lst)
+            if isinstance(newNode, Element):
+                newNode.parent = self
+            lst.insert(idx, newNode)
+        except Exception:
+            try:
+                self.appendChild(newNode)
+            except Exception:
+                pass
+
+    def replaceChild(self, newNode: Any, oldNode: Any) -> None:
+        """Replace oldNode with newNode."""
+        try:
+            lst = self.children._list
+            try:
+                idx = lst.index(oldNode)
+                if isinstance(newNode, Element):
+                    newNode.parent = self
+                lst[idx] = newNode
+                try:
+                    if isinstance(oldNode, Element):
+                        oldNode.parent = None
+                except Exception:
+                    pass
+            except ValueError:
+                # fallback: append
+                if isinstance(newNode, Element):
+                    newNode.parent = self
+                lst.append(newNode)
+        except Exception:
+            pass
+
+    @property
+    def parentNode(self):
+        return self.parent
+
+    @property
+    def firstChild(self):
+        try:
+            return self.children.get(0)
+        except Exception:
+            return None
+
+    @property
+    def lastChild(self):
+        try:
+            if len(self.children) == 0:
+                return None
+            return self.children.get(len(self.children) - 1)
+        except Exception:
+            return None
+
+    @property
+    def nextSibling(self):
+        try:
+            if not self.parent:
+                return None
+            siblings = self.parent.children._list
+            try:
+                idx = siblings.index(self)
+            except ValueError:
+                return None
+            if idx + 1 < len(siblings):
+                return siblings[idx + 1]
+            return None
+        except Exception:
+            return None
+
+    @property
+    def previousSibling(self):
+        try:
+            if not self.parent:
+                return None
+            siblings = self.parent.children._list
+            try:
+                idx = siblings.index(self)
+            except ValueError:
+                return None
+            if idx - 1 >= 0:
+                return siblings[idx - 1]
+            return None
+        except Exception:
+            return None
+
+    @property
+    def textContent(self) -> str:
+        """Return concatenated text of this element's subtree (recursive)."""
+        try:
+            out = []
+            for c in self.children:
+                if isinstance(c, Element):
+                    out.append(c.textContent)
+                else:
+                    out.append(str(c))
+            return ''.join(out)
+        except Exception:
+            return ''
+
+    @textContent.setter
+    def textContent(self, val: Any) -> None:
+        """Replace children with a single text node."""
+        try:
+            self.children = JSList([str(val)])
+        except Exception:
+            pass
+
+    @property
+    def innerHTML(self) -> str:
+        """Simple serializer of children to an HTML-ish string (minimal)."""
+        try:
+            parts = []
+            for c in self.children:
+                if isinstance(c, Element):
+                    # Minimal tag + text serialization (does not preserve attributes beyond id/class)
+                    attrs = []
+                    if c.id:
+                        attrs.append(f'id="{c.id}"')
+                    if c.attrs.get('class'):
+                        attrs.append(f'class="{html.escape(str(c.attrs.get("class")))}"')
+                    attr_str = (' ' + ' '.join(attrs)) if attrs else ''
+                    parts.append(f"<{c.tagName}{attr_str}>{html.escape(c.textContent)}</{c.tagName}>")
+                else:
+                    parts.append(html.escape(str(c)))
+            return ''.join(parts)
+        except Exception:
+            return ''
+
+    @innerHTML.setter
+    def innerHTML(self, html_str: Any) -> None:
+        """
+        innerHTML setter: parse a small, safe subset of HTML into Element/text children.
+        - No script/style execution.
+        - Supports simple tags and text nodes.
+        """
+        try:
+            raw = str(html_str or '')
+            nodes = _parse_inner_html_fragment(raw)
+            # attach parent links for parsed Element nodes
+            for n in nodes:
+                if isinstance(n, Element):
+                    n.parent = self
+            self.children = JSList(nodes)
+        except Exception:
+            # fallback: replace with raw text (safe)
+            try:
+                self.children = JSList([str(html_str)])
+            except Exception:
+                pass
+
+    @property
+    def classList(self):
+        """Expose a simple classList object with add/remove/contains/toggle methods."""
+        el = self
+
+        def _add(this, *cls_names):
+            try:
+                for nm in cls_names:
+                    el._class_set.add(str(nm))
+                el.attrs['class'] = ' '.join(el._class_set)
+            except Exception:
+                pass
+
+        def _remove(this, *cls_names):
+            try:
+                for nm in cls_names:
+                    el._class_set.discard(str(nm))
+                el.attrs['class'] = ' '.join(el._class_set)
+            except Exception:
+                pass
+
+        def _contains(this, name):
+            try:
+                return str(name) in el._class_set
+            except Exception:
+                return False
+
+        def _toggle(this, name, force=None):
+            try:
+                n = str(name)
+                if force is None:
+                    if n in el._class_set:
+                        el._class_set.remove(n)
+                        present = False
+                    else:
+                        el._class_set.add(n)
+                        present = True
+                else:
+                    if bool(force):
+                        el._class_set.add(n); present = True
+                    else:
+                        el._class_set.discard(n); present = False
+                el.attrs['class'] = ' '.join(el._class_set)
+                return present
+            except Exception:
+                return False
+
+        # Return a plain dict-like object with callables; JS code will call these via the interpreter.
+        return {
+            'add': lambda *a: _add(None, *a),
+            'remove': lambda *a: _remove(None, *a),
+            'contains': lambda a: _contains(None, a),
+            'toggle': lambda a, f=None: _toggle(None, a, f)
+        }
+
+    def getElementsByTagName(self, tag: str):
+        """Return JSList of descendant elements matching tag (case-insensitive)."""
+        try:
+            out = []
+
+            def walk(node):
+                try:
+                    if isinstance(node, Element):
+                        if not tag or node.tagName.lower() == tag.lower():
+                            out.append(node)
+                        for ch in node.children:
+                            walk(ch)
+                except Exception:
+                    pass
+
+            for ch in self.children:
+                walk(ch)
+            return JSList(out)
+        except Exception:
+            return JSList([])
 
     def __repr__(self) -> str:
         return f"<Element {self.tagName} id={self.id}>"
 
+class _InnerHTMLParser(HTMLParser):
+    """
+    Build Element/text node list from an HTML fragment.
+    - Only builds Elements and text nodes (strings).
+    - Does not execute or include <script> or <style> contents (they are ignored).
+    - Preserves id and class attributes; other attributes stored in attrs mapping.
+    """
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.root = Element('fragment')
+        self.stack = [self.root]
+        self._suppress_depth = 0  # suppress script/style content
+
+    def handle_starttag(self, tag, attrs):
+        lt = tag.lower()
+        if lt in ('script', 'style'):
+            # suppress inner data and do not create node
+            self._suppress_depth += 1
+            return
+        try:
+            el = Element(lt)
+            # set attributes (id/class + others into attrs dict)
+            for k, v in attrs:
+                el.attrs[k] = v
+                if k == 'id':
+                    el.id = v
+                if k == 'class':
+                    try:
+                        el._class_set = set(str(v).split())
+                    except Exception:
+                        el._class_set = set()
+            # append to current top
+            parent = self.stack[-1]
+            parent.appendChild(el)
+            # push element on stack
+            self.stack.append(el)
+        except Exception:
+            pass
+
+    def handle_endtag(self, tag):
+        lt = tag.lower()
+        if lt in ('script', 'style'):
+            if self._suppress_depth > 0:
+                self._suppress_depth -= 1
+            return
+        # pop stack until matching tag found (best-effort)
+        try:
+            for i in range(len(self.stack) - 1, -1, -1):
+                node = self.stack[i]
+                if isinstance(node, Element) and node.tagName == lt:
+                    # pop including node
+                    del self.stack[i:]
+                    break
+            # ensure there's at least root
+            if not self.stack:
+                self.stack = [self.root]
+        except Exception:
+            self.stack = [self.root]
+
+    def handle_data(self, data):
+        if self._suppress_depth > 0:
+            return
+        if not data:
+            return
+        # append text node to current parent (keep as plain string)
+        parent = self.stack[-1]
+        parent.appendChild(data)
+
+def _parse_inner_html_fragment(src: str) -> List[Any]:
+    """Return list of nodes (Element or str) parsed from the fragment `src` (safe subset)."""
+    try:
+        p = _InnerHTMLParser()
+        p.feed(src)
+        # children of fragment root are the parsed nodes
+        nodes = list(p.root.children._list)
+        # detach the artificial root parent
+        for n in nodes:
+            if isinstance(n, Element):
+                n.parent = None  # parent will be set by caller when inserted
+        return nodes
+    except Exception:
+        # fallback: single text node
+        return [src]
 
 def make_dom_shim():
     registry: Dict[str, Element] = {}
     root = Element('document')
     body = Element('body')
     root.body = body
+
+    # helper: simple CSS selector matcher (supports "#id", ".class", "tag", "[attr=value]")
+    def _matches(el: Element, selector: str) -> bool:
+        try:
+            selector = selector.strip()
+            if not selector:
+                return False
+            if selector.startswith('#'):
+                return (el.id == selector[1:])
+            if selector.startswith('.'):
+                cls = selector[1:]
+                classes = (el.attrs.get('class') or '').split()
+                return cls in classes
+            # attribute selector [attr=value] or [attr]
+            m = re.match(r'^\[([\w:-]+)(?:=(["\']?)(.*?)\2)?\]$', selector)
+            if m:
+                attr = m.group(1)
+                val = m.group(3)
+                if attr not in el.attrs:
+                    return False if val is not None else False
+                if val is None:
+                    return True
+                return str(el.attrs.get(attr)) == val
+            # tag name
+            return el.tagName.lower() == selector.lower()
+        except Exception:
+            return False
+
+    def _query_within_single(root_el: Element, selector: str, many: bool):
+        # Support simple selectors; if selector contains spaces, treat as descendant by splitting and narrowing
+        try:
+            parts = [p.strip() for p in selector.split() if p.strip()]
+            candidates = [root_el]
+            for part in parts:
+                new_candidates = []
+                for c in candidates:
+                    # traverse subtree (breadth-first)
+                    stack = [c]
+                    while stack:
+                        node = stack.pop(0)
+                        for ch in (node.children if isinstance(node.children, JSList) else []):
+                            if isinstance(ch, Element):
+                                if _matches(ch, part):
+                                    new_candidates.append(ch)
+                                stack.append(ch)
+                candidates = new_candidates
+            if many:
+                return JSList(candidates)
+            return candidates[0] if candidates else None
+        except Exception:
+            return JSList([]) if many else None
+
+    def querySelector(sel: str) -> Optional[Element]:
+        # support comma-separated selectors: return first match in selector-list order
+        try:
+            for part in (s.strip() for s in (sel or '').split(',') if s.strip()):
+                found = _query_within_single(body, part, many=False)
+                if found:
+                    return found
+            return None
+        except Exception:
+            return None
+
+    def querySelectorAll(sel: str):
+        # support comma-separated selectors: union of results, preserve order, avoid duplicates
+        try:
+            seen = set()
+            out: List[Any] = []
+            for part in (s.strip() for s in (sel or '').split(',') if s.strip()):
+                res = _query_within_single(body, part, many=True)
+                if not res:
+                    continue
+                for e in list(res._list if isinstance(res, JSList) else []):
+                    # identify elements by id() to avoid Python unhashable Elements - use id()
+                    uid = ('el', id(e))
+                    if uid in seen:
+                        continue
+                    seen.add(uid)
+                    out.append(e)
+            return JSList(out)
+        except Exception:
+            return JSList([])
 
     def createElement(tag: str) -> Element:
         return Element(tag)
@@ -1742,6 +2361,15 @@ def make_dom_shim():
         for c in body.children:
             if isinstance(c, Element) and c.id == idv:
                 return c
+            # deep search
+            stack = [c] if isinstance(c, Element) else []
+            while stack:
+                n = stack.pop(0)
+                if n.id == idv:
+                    return n
+                for ch in n.children:
+                    if isinstance(ch, Element):
+                        stack.append(ch)
         return None
 
     def append_to_body(el: Any) -> None:
@@ -1751,6 +2379,8 @@ def make_dom_shim():
     document = {
         'createElement': createElement,
         'getElementById': getElementById,
+        'querySelector': querySelector,
+        'querySelectorAll': querySelectorAll,
         'body': body,
         'appendChild': append_to_body
     }

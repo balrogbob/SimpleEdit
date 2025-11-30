@@ -34,6 +34,7 @@
     <Compile Include="run_jsmini_demo.py" />
     <Compile Include="test\test_js_builtins.py" />
     <Compile Include="test_run_scripts_update.py" />
+    <Compile Include="tokendiag_run_test.py" />
   </ItemGroup>
   <ItemGroup>
     <Interpreter Include="env\">
@@ -84,6 +85,7 @@
     <Content Include="syntax\yaml.ini" />
     <Content Include="syntax\yaml_header.ini" />
     <Content Include="templates\quest_db.yml" />
+    <Content Include="test.txt" />
     <Content Include="worker_logs\syntax_worker_19916.stderr.log" />
     <Content Include="worker_logs\syntax_worker_19916.worker.log" />
     <Content Include="worker_logs\syntax_worker_24880.stderr.log" />
