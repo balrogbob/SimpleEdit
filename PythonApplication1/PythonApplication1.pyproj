@@ -33,9 +33,10 @@
     <Compile Include="PythonApplication1.py" />
     <Compile Include="recent_files.py" />
     <Compile Include="run_jsmini_demo.py" />
+    <Compile Include="tests\test_json_reviver.py" />
     <Compile Include="test\test_js_builtins.py" />
-    <Compile Include="test_run_scripts_update.py" />
-    <Compile Include="tokendiag_run_test.py" />
+    <Compile Include="tests\test_run_scripts_update.py" />
+    <Compile Include="tests\tokendiag_run_test.py" />
   </ItemGroup>
   <ItemGroup>
     <Interpreter Include="env\">
@@ -57,6 +58,7 @@
     <Folder Include="out\" />
     <Folder Include="syntax\" />
     <Folder Include="templates\" />
+    <Folder Include="tests\" />
     <Folder Include="test\" />
     <Folder Include="worker_logs\" />
   </ItemGroup>

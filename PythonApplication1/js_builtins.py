@@ -462,7 +462,16 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         return None
 
     def _json_parse_native(interp, this, args):
-        """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver (to implement next)."""
+        """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver.
+    
+        Reviver (if a JSFunction) is applied in post-order traversal:
+          - Traverse object/array children first
+          - Call reviver(holder, key, value) for each property/element
+          - If reviver returns interpreter `undefined` sentinel -> delete the property
+          - Otherwise assign the returned value
+    
+        Returns a JS-shaped structure (dicts for objects, array-like dicts with 'length').
+        """
         s = args[0] if args else None
         reviver = args[1] if len(args) > 1 else None
         if not isinstance(s, str):
@@ -470,11 +479,13 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 s = str(s)
             except Exception:
                 raise JSError("Invalid JSON input")
+    
         try:
             py_val = json.loads(s)
         except Exception as e:
             raise JSError(str(e))
-
+    
+        # Convert Python-native json result into JS-shaped value our interpreter expects.
         def _to_js(v):
             if v is None:
                 return None
@@ -495,67 +506,95 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 return str(v)
             except Exception:
                 return None
-
+    
         top = _to_js(py_val)
-
-        # If reviver not callable, return converted structure
+    
+        # If no reviver or reviver not callable JSFunction -> return converted structure
         if not isinstance(reviver, JSFunction):
             return top
-
-        # small safe logger (reuse same logic as in _call_js_fn)
-        def _dbg(msg):
+    
+        # Helper to locate interpreter undefined sentinel
+        def _get_interp_undefined_local(interp_local):
             try:
-                c = context.get('console') if isinstance(context, dict) else None
-                if isinstance(c, dict) and callable(c.get('log')):
-                    try:
-                        c.get('log')(msg)
-                        return
-                    except Exception:
-                        pass
-                print(msg)
+                if 'undefined' in context:
+                    return context['undefined']
             except Exception:
-                try:
-                    print(msg)
-                except Exception:
-                    pass
-
-        # Implement reviver: depth-first post-order traversal per spec
+                pass
+            try:
+                mod_name = getattr(interp_local.__class__, '__module__', None)
+                if mod_name:
+                    mod = importlib.import_module(mod_name)
+                    return getattr(mod, 'undefined', None)
+            except Exception:
+                pass
+            return None
+    
+        # Post-order traversal per spec. `holder` is a dict-like parent; `key` is string key (or index string).
         def _walk(holder, key):
-            val = holder.get(key)
-            if isinstance(val, dict):
-                # arrays are dicts with 'length'
-                if "length" in val:
+            try:
+                # Obtain current value
+                try:
+                    val = holder.get(key)
+                except Exception:
+                    # If holder is not dict-like, cannot traverse further.
+                    val = None
+    
+                # If value is an object/array-like, traverse its children first
+                if isinstance(val, dict) and 'length' in val:
+                    # array-like
                     try:
-                        length = int(val.get("length", 0) or 0)
+                        length = int(val.get('length', 0) or 0)
                     except Exception:
                         length = 0
                     for i in range(length):
                         k = str(i)
                         if k in val:
                             _walk(val, k)
-                else:
+                        else:
+                            # holes are represented by absence; still call reviver with undefined
+                            # Represent as interpreter undefined sentinel for the call
+                            # create a temporary holder-like access so reviver sees undefined
+                            _walk(val, k)
+                elif isinstance(val, dict):
+                    # object: traverse all own enumerable properties except "__proto__"
                     for k in list(val.keys()):
                         if k == "__proto__":
                             continue
                         _walk(val, k)
-            # call reviver with holder and key
-            try:
-                res = _call_js_fn(reviver, holder, [key, val], interp)
-            except Exception as e:
-                # Log reviver exception and re-raise so caller may handle (consistent with prior behavior)
-                _dbg(f"[js_builtins] reviver threw for key={key!r}: {e}")
-                raise
-            # If returned interpreter undefined sentinel, delete property; else assign
-            if res is _get_interp_undefined(interp):
+    
+                # After children processed, call reviver for this property
+                # Compose the current value (may have been modified by children)
                 try:
-                    _dbg(f"[js_builtins] reviver deleted key={key!r}")
-                    if key in holder:
-                        del holder[key]
+                    cur_val = holder.get(key)
                 except Exception:
-                    pass
-            else:
-                holder[key] = res
-
+                    cur_val = None
+    
+                # Call reviver with holder as `this`
+                try:
+                    res = _call_js_fn(reviver, holder, [key, cur_val], interp)
+                except Exception:
+                    # Propagate reviver exceptions as JSError to match prior behavior
+                    raise
+                # If reviver returned interpreter undefined sentinel -> delete property
+                if res is _get_interp_undefined_local(interp):
+                    try:
+                        if key in holder:
+                            del holder[key]
+                    except Exception:
+                        pass
+                else:
+                    try:
+                        holder[key] = res
+                    except Exception:
+                        pass
+            except JSError:
+                # bubble up JSError
+                raise
+            except Exception:
+                # best-effort: do not abort traversal on incidental errors
+                pass
+    
+        # Wrapper per spec: start with a holder {"": top}
         wrapper = {"": top}
         _walk(wrapper, "")
         return wrapper[""]
