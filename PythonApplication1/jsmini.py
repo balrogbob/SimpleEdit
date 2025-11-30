@@ -13,6 +13,7 @@ Usage:
 from __future__ import annotations
 import re
 import random
+import math
 from typing import Any, Dict, List, Optional, Tuple
 try:
     import js_builtins
@@ -21,14 +22,17 @@ except Exception:
 # --- Tokenizer --------------------------------------------------------------
 Token = Tuple[str, str]  # (type, value)
 
+_LAST_INTERPRETER = None
+
+# -- Token definitions (fixed to accept leading-dot decimals and exponents) --
 TOKEN_SPEC = [
-    ('NUMBER',   r'\d+(\.\d+)?'),
-    ('STRING',   r'"([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\''),
+    ('NUMBER',   r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'),   # accepts 1, 1.0, .1, 1., 1e3, .1e-2
+    ('STRING',   r'"([^"\\]|\\.)*"|\'([^\'\\]|\\.)*\''), 
     ('IDENT',    r'[A-Za-z_$][A-Za-z0-9_$]*'),
-    ('COMMENT',  r'//[^\n]*|/\*[\s\S]*?\*/'),            # <--- ensure comments are matched first
-    # include compound-assignment and shift ops + logical operators (longer ops first)
-    ('OP',       r'\+=|-=|\*=|/=|%=|<<=|>>=|>>>=|<<|>>|===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
-    ('PUNC',     r'[(){},;\[\].:?]'),  # '?' token for ternary
+    ('COMMENT',  r'//[^\n]*|/\*[\s\S]*?\*/'),            # ensure comments are matched first
+    # longer operators first: include full set of shift / unsigned-shift and compound-assign forms
+    ('OP',       r'\+=|-=|\*=|/=|%=|>>>=|<<=|>>=|>>>|<<|>>|===|!==|==|!=|<=|>=|&&|\|\||\+\+|--|!|&|\^|\||~|\+|-|\*|/|%|<|>|='),
+    ('PUNC',     r'[(){},;\[\].:?]'),
     ('SKIP',     r'[ \t\r\n]+'),
 ]
 TOKEN_RE = re.compile('|'.join('(?P<%s>%s)' % pair for pair in TOKEN_SPEC), re.M)
@@ -205,6 +209,22 @@ class Parser:
             return self.parse_if()
         if self.match('IDENT','while'):
             return self.parse_while()
+        if self.match('IDENT','do'):
+            # do-while: `do <statement> while (<expr>);`
+            self.eat('IDENT', 'do')
+            body = self.parse_statement()
+            # consume optional semicolon after body (common in minified code there's none)
+            # require the `while` keyword and parenthesized condition
+            if self.match('IDENT', 'while'):
+                self.eat('IDENT', 'while')
+                self.eat('PUNC', '(')
+                cond = self.parse_expression()
+                self.eat('PUNC', ')')
+                if self.match('PUNC', ';'):
+                    self.eat('PUNC', ';')
+                return ('do', body, cond)
+            # best-effort: if `while` missing, treat as a plain block
+            return ('block', [body])
         if self.match('IDENT','for'):
             return self.parse_for()
         if self.match('IDENT','switch'):
@@ -473,6 +493,7 @@ class Parser:
         '==': 0, '!=': 0, '===': 0, '!==': 0,
         '&': 0, '^': 0, '|': 0,            # bitwise ops (conservative precedence)
         'in': 1, 'instanceof': 1,         # relational-like operators
+        '<<': 1, '>>': 1, '>>>': 1,       # shift operators (added)
         '<': 1, '>': 1, '<=': 1, '>=': 1,
         '+': 2, '-': 2,
         '*': 3, '/': 3, '%': 3,
@@ -654,13 +675,22 @@ class Parser:
         if t == 'PUNC' and v == '[':
             self.eat('PUNC','[')
             elems = []
-            if not self.match('PUNC',']'):
-                while True:
-                    # element expressions should use parse_assignment to preserve separators
-                    elems.append(self.parse_assignment())
-                    if self.match('PUNC',']'):
+            # Allow trailing commas and sparse arrays (e.g. [a, b,] and [a,,b])
+            while not self.match('PUNC', ']'):
+                # If comma appears immediately, record a hole (undefined) and continue
+                if self.match('PUNC', ','):
+                    elems.append(('undef', None))
+                    self.eat('PUNC', ',')
+                    continue
+                # Normal element
+                elems.append(self.parse_assignment())
+                # If comma follows the element, consume it; allow a trailing comma before closing bracket
+                if self.match('PUNC', ','):
+                    self.eat('PUNC', ',')
+                    if self.match('PUNC', ']'):
                         break
-                    self.eat('PUNC',',')
+                    continue
+                break
             self.eat('PUNC',']')
             return ('arr', elems)
         raise SyntaxError(f"Unexpected token {t} {v}")
@@ -780,10 +810,46 @@ class JSFunction:
                 self.prototype = {}
 
     def call(self, interpreter, this, args):
+        """
+        Invoke this JSFunction.
+
+        interpreter may be:
+          - an Interpreter instance (normal)
+          - a context dict containing an Interpreter under '_interp' (host helpers)
+          - (fallback) missing/incorrectly passed: try module-level _LAST_INTERPRETER
+
+        This function is defensive because native built-ins and host code sometimes
+        call JSFunction.call with different shapes during interop.
+        """
+        interp = interpreter
+        try:
+            # Common: caller passed a context dict instead of Interpreter
+            if not hasattr(interp, '_eval_stmt'):
+                if isinstance(interp, dict):
+                    interp = interp.get('_interp', interp)
+                # Some callers stash interpreter on `this` (rare)
+                if not hasattr(interp, '_eval_stmt') and isinstance(this, dict):
+                    interp = this.get('_interp', interp)
+        except Exception:
+            pass
+
+        # Last-resort: use module-level last-interpreter if available.
+        # This covers rare host-calls that pass the JSFunction class or other stray value.
+        global _LAST_INTERPRETER
+        if not hasattr(interp, '_eval_stmt'):
+            if _LAST_INTERPRETER is not None and hasattr(_LAST_INTERPRETER, '_eval_stmt'):
+                interp = _LAST_INTERPRETER
+
+        if not hasattr(interp, '_eval_stmt'):
+            raise RuntimeError(
+                f"JSFunction.call expected Interpreter instance as first arg (or context with '_interp'); "
+                f"got {type(interpreter)!r}"
+            )
+
         # Native implementation takes precedence
         if self.native_impl is not None:
             try:
-                return self.native_impl(interpreter, this, list(args or ()))
+                return self.native_impl(interp, this, list(args or ()))
             except ReturnExc as r:
                 return r.value
             except Exception:
@@ -798,7 +864,7 @@ class JSFunction:
         if self.name:
             local.set_local(self.name, self)
         try:
-            return interpreter._eval_stmt(self.body, local, this)
+            return interp._eval_stmt(self.body, local, this)
         except ReturnExc as r:
             return r.value
 
@@ -815,6 +881,13 @@ class Interpreter:
         if globals_map:
             for k,v in globals_map.items():
                 self.global_env.set_local(k, v)
+        # record last-created interpreter so JSFunction.call can recover it as a best-effort fallback
+        # when host code fails to thread the interpreter instance through correctly.
+        global _LAST_INTERPRETER
+        try:
+            _LAST_INTERPRETER = self
+        except Exception:
+            _LAST_INTERPRETER = None
 
 
     def _prop_get(self, obj, key):
@@ -948,6 +1021,26 @@ class Interpreter:
                     break
                 except ContinueExc:
                     continue
+            return res
+
+        # do-while loop support
+        if typ == 'do':
+            _, body, cond = node
+            res = undefined
+            while True:
+                try:
+                    res = self._eval_stmt(body, env, this)
+                except BreakExc:
+                    break
+                except ContinueExc:
+                    # on continue, still evaluate condition afterwards
+                    pass
+                # evaluate condition after body; break when falsy
+                try:
+                    if not self._is_truthy(self._eval_expr(cond, env, this)):
+                        break
+                except Exception:
+                    break
             return res
 
         # new: for-in evaluator
@@ -1466,16 +1559,20 @@ class Interpreter:
 
     def _apply_bin(self, op, a, b):
         # existing arithmetic / comparison handlers...
-        if op == '+':
-            return a + b
-        if op == '-':
-            return a - b
-        if op == '*':
-            return a * b
-        if op == '/':
-            return a / b
-        if op == '%':
-            return a % b
+        try:
+            if op == '+':
+                return a + b
+            if op == '-':
+                return a - b
+            if op == '*':
+                return a * b
+            if op == '/':
+                return a / b
+            if op == '%':
+                return a % b
+        except TypeError:
+            # fall through to guarded handling below when operands aren't directly comparable
+            pass
 
         # 'in' operator: property in object
         if op == 'in':
@@ -1490,28 +1587,21 @@ class Interpreter:
         # 'instanceof' semantics: walk prototype chain
         if op == 'instanceof':
             try:
-                # If RHS is a JSFunction, its `.prototype` is the target object on the chain.
                 if isinstance(b, JSFunction):
                     target_proto = getattr(b, 'prototype', None)
-                    # Only objects created by `new` (we set '__proto__') or objects that have
-                    # a __proto__ key will participate in chain walking.
                     cur = None
                     if isinstance(a, dict):
                         cur = a.get('__proto__', None)
                     else:
-                        # for non-dict objects attempt attribute lookup
                         cur = getattr(a, '__proto__', None)
-                    # Walk prototype chain
                     while cur is not None:
                         if cur is target_proto:
                             return True
-                        # move up
                         if isinstance(cur, dict):
                             cur = cur.get('__proto__', None)
                         else:
                             cur = getattr(cur, '__proto__', None)
                     return False
-                # fallback: if RHS is a Python callable/class, try isinstance
                 if callable(b):
                     try:
                         return isinstance(a, b)
@@ -1525,10 +1615,48 @@ class Interpreter:
             return a == b
         if op in ('!=','!=='):
             return a != b
+
+        # Relational comparisons: guard against incompatible Python comparisons (e.g. Undefined)
+        if op in ('<', '>', '<=', '>='):
+            # If both are strings, perform lexicographic compare (JS does this when both ToPrimitive yield strings)
+            if isinstance(a, str) and isinstance(b, str):
+                if op == '<': return a < b
+                if op == '>': return a > b
+                if op == '<=': return a <= b
+                if op == '>=': return a >= b
+
+            # JS-like numeric coercion for relation: undefined -> NaN, null -> 0, booleans -> 1/0
+            def _relnum(x):
+                if x is undefined:
+                    return float('nan')
+                if x is None:
+                    return 0.0
+                if isinstance(x, bool):
+                    return 1.0 if x else 0.0
+                if isinstance(x, (int, float)):
+                    return float(x)
+                try:
+                    return float(x)
+                except Exception:
+                    # non-numeric string / object -> NaN for relation
+                    return float('nan')
+
+            na = _relnum(a)
+            nb = _relnum(b)
+            # Any NaN in relational comparison -> false (matches JS behavior where ToNumber(undefined) is NaN)
+            if math.isnan(na) or math.isnan(nb):
+                return False
+            if op == '<': return na < nb
+            if op == '>': return na > nb
+            if op == '<=': return na <= nb
+            if op == '>=': return na >= nb
+
+        # fallback comparisons and operators preserved
         if op == '<': return a < b
         if op == '>': return a > b
         if op == '<=': return a <= b
         if op == '>=': return a >= b
+
         return None
 
     def _is_truthy(self, v):

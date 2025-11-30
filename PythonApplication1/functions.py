@@ -2141,10 +2141,10 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
 
                     run_src = _strip_leading_license_comment(script_src if 'script_src' in locals() else (s.get('inline') or ''))
                     if run_src != (script_src if 'script_src' in locals() else (s.get('inline') or '')):
-                        try:
+                        """try:
                             _console_append("[jsconsole] Stripped leading /*!...*/ license header before execution (common in minified libs).")
                         except Exception:
-                            pass
+                            pass"""
                     
                     try:
                         jsmini.run_with_interpreter(run_src, ctx)
