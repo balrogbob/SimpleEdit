@@ -3,10 +3,10 @@ from pathlib import Path
 import unittest
 
 # Ensure this test can import the local `functions` module kept in the same directory.
-_test_dir = Path(__file__).resolve().parent
-_test_dir_str = str(_test_dir)
-if _test_dir_str not in sys.path:
-    sys.path.insert(0, _test_dir_str)
+_project_root = Path(__file__).resolve().parent.parent
+_project_root_str = str(_project_root)
+if _project_root_str not in sys.path:
+    sys.path.insert(0, _project_root_str)
 
 import functions as funcs
 

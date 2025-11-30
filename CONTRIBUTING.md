@@ -109,7 +109,7 @@ For best practices keep the interpreter core (`jsmini.py`) focused on parsing an
 
 - Add unit or manual tests validating all open flows (File -> Open modal, native Open, Open URL dialog/toolbar, hyperlink clicks, history/back/refresh) do not apply syntax tags on tabs that end up in Rendered mode.
 - Validate that when a preset has been detected for a rendered page it is only applied after switching the tab to Raw/Source view (and not before).
-
+- create Unittest compliant testing scripts in tests, this simplifies testing of changes on multiple vectors. Use python -m unittest discover PythonApplication1/tests to execute
 ## Rationale
 
 Applying syntax highlighting while the editor is showing a Rendered representation produces confusing UI: highlighting may change the visual appearance of parsed HTML, and persistent config changes can surprise users when following hyperlinks or toggling views. This rule preserves a clear separation between presentational rendering and source-mode editing.

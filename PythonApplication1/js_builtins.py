@@ -144,24 +144,118 @@ def register_builtins(context: Dict[str, Any], JSFunction):
 
     # Array prototype methods
     def _array_push(interp, this, args):
-        length = int(this.get("length", 0) or 0)
-        for v in args:
-            this[str(length)] = v
-            length += 1
-        this["length"] = length
-        return length
+        # Defensive push: accept both dict-like JS objects and host objects.
+        # Prefer dict semantics (the interpreter expects string-indexed dicts),
+        # but tolerate other shapes to avoid silent failures when 'this' isn't a dict.
+        try:
+            if isinstance(this, dict):
+                length = int(this.get("length", 0) or 0)
+            else:
+                # host object fallback: try attribute or mapping-like access
+                try:
+                    length = int(getattr(this, "length", 0) or 0)
+                except Exception:
+                    length = 0
+            for v in args:
+                if isinstance(this, dict):
+                    this[str(length)] = v
+                else:
+                    # try attribute assignment; best-effort (not ideal for JS semantics,
+                    # but prevents native_impl from raising and leaving ops half-done)
+                    try:
+                        setattr(this, str(length), v)
+                    except Exception:
+                        try:
+                            # try mapping-like setitem
+                            this[str(length)] = v
+                        except Exception:
+                            pass
+                length += 1
+            if isinstance(this, dict):
+                this["length"] = length
+            else:
+                try:
+                    setattr(this, "length", length)
+                except Exception:
+                    try:
+                        this["length"] = length
+                    except Exception:
+                        pass
+            return length
+        except Exception:
+            # On any error, fail-safe: return interpreter undefined sentinel if available
+            try:
+                return context.get("undefined")
+            except Exception:
+                return None
 
     def _array_pop(interp, this, args):
-        length = int(this.get("length", 0) or 0)
-        if length == 0:
-            return context.get("undefined")  # prefer interpreter's undefined if present
-        idx = length - 1
-        key = str(idx)
-        val = this.get(key, context.get("undefined"))
-        if key in this:
-            del this[key]
-        this["length"] = idx
-        return val
+        # Defensive pop: mirror _array_push fallback behavior.
+        try:
+            if isinstance(this, dict):
+                length = int(this.get("length", 0) or 0)
+            else:
+                try:
+                    length = int(getattr(this, "length", 0) or 0)
+                except Exception:
+                    length = 0
+            if length == 0:
+                return context.get("undefined")
+            idx = length - 1
+            key = str(idx)
+            if isinstance(this, dict):
+                val = this.get(key, context.get("undefined"))
+                if key in this:
+                    try:
+                        del this[key]
+                    except Exception:
+                        # best-effort
+                        pass
+                this["length"] = idx
+                return val
+            else:
+                # host object fallback
+                try:
+                    # try mapping-like access first
+                    val = this.get(key, context.get("undefined")) if hasattr(this, "get") else getattr(this, key, context.get("undefined"))
+                except Exception:
+                    try:
+                        val = getattr(this, key)
+                    except Exception:
+                        try:
+                            val = this[str(idx)]
+                        except Exception:
+                            val = context.get("undefined")
+                try:
+                    # attempt removal by attribute or mapping deletion
+                    if hasattr(this, "__delitem__"):
+                        try:
+                            del this[key]
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            delattr(this, key)
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    if hasattr(this, "__setattr__"):
+                        try:
+                            setattr(this, "length", idx)
+                        except Exception:
+                            pass
+                    else:
+                        try:
+                            this["length"] = idx
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                return val
+        except Exception:
+            return context.get("undefined")
 
     def _array_for_each(interp, this, args):
         cb = args[0] if args else None
@@ -463,13 +557,13 @@ def register_builtins(context: Dict[str, Any], JSFunction):
 
     def _json_parse_native(interp, this, args):
         """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver.
-    
+
         Reviver (if a JSFunction) is applied in post-order traversal:
           - Traverse object/array children first
           - Call reviver(holder, key, value) for each property/element
           - If reviver returns interpreter `undefined` sentinel -> delete the property
           - Otherwise assign the returned value
-    
+
         Returns a JS-shaped structure (dicts for objects, array-like dicts with 'length').
         """
         s = args[0] if args else None
@@ -479,12 +573,12 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 s = str(s)
             except Exception:
                 raise JSError("Invalid JSON input")
-    
+
         try:
             py_val = json.loads(s)
         except Exception as e:
             raise JSError(str(e))
-    
+
         # Convert Python-native json result into JS-shaped value our interpreter expects.
         def _to_js(v):
             if v is None:
@@ -506,13 +600,13 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 return str(v)
             except Exception:
                 return None
-    
+
         top = _to_js(py_val)
-    
+
         # If no reviver or reviver not callable JSFunction -> return converted structure
         if not isinstance(reviver, JSFunction):
             return top
-    
+
         # Helper to locate interpreter undefined sentinel
         def _get_interp_undefined_local(interp_local):
             try:
@@ -528,7 +622,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except Exception:
                 pass
             return None
-    
+
         # Post-order traversal per spec. `holder` is a dict-like parent; `key` is string key (or index string).
         def _walk(holder, key):
             try:
@@ -538,7 +632,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 except Exception:
                     # If holder is not dict-like, cannot traverse further.
                     val = None
-    
+
                 # If value is an object/array-like, traverse its children first
                 if isinstance(val, dict) and 'length' in val:
                     # array-like
@@ -561,14 +655,14 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                         if k == "__proto__":
                             continue
                         _walk(val, k)
-    
+
                 # After children processed, call reviver for this property
                 # Compose the current value (may have been modified by children)
                 try:
                     cur_val = holder.get(key)
                 except Exception:
                     cur_val = None
-    
+
                 # Call reviver with holder as `this`
                 try:
                     res = _call_js_fn(reviver, holder, [key, cur_val], interp)
@@ -593,7 +687,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except Exception:
                 # best-effort: do not abort traversal on incidental errors
                 pass
-    
+
         # Wrapper per spec: start with a holder {"": top}
         wrapper = {"": top}
         _walk(wrapper, "")
@@ -861,14 +955,129 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         return {"__proto__": proto}
 
     def _object_keys(interp, this, args):
+        """
+        Return own enumerable property names as a JS-shaped array:
+        - result is a dict with '__proto__' set to Arr.prototype and numeric string keys plus 'length'.
+        - skips '__proto__' to avoid prototype-pollution mixing.
+        """
         target = args[0] if args else None
-        if isinstance(target, dict):
-            return [k for k in target.keys() if k != "__proto__"]
-        return []
+        names: List[str] = []
+        try:
+            if isinstance(target, dict):
+                names = [k for k in target.keys() if k != "__proto__"]
+            elif hasattr(target, "__dict__"):
+                names = [k for k in vars(target).keys()]
+            else:
+                # best-effort: try to iterate keys() or fallback to empty
+                try:
+                    names = [str(k) for k in getattr(target, "keys", lambda: [])()]
+                except Exception:
+                    names = []
+        except Exception:
+            names = []
+
+        res: Dict[str, Any] = {"__proto__": Arr.prototype, "length": 0}
+        idx = 0
+        for n in names:
+            try:
+                res[str(idx)] = n
+            except Exception:
+                # skip problematic names
+                continue
+            idx += 1
+        res["length"] = idx
+        return res
+
+    def _object_assign(interp, this, args):
+        """
+        Object.assign(target, ...sources)
+        Minimal, defensive implementation:
+         - If target is not provided, return undefined sentinel.
+         - Copies own enumerable properties from each source (dict-like) to target.
+         - Skips "__proto__" to reduce prototype-pollution risk.
+         - Returns the target (original object).
+        """
+        if not args:
+            return context.get("undefined")
+        target = args[0]
+        # If target is interpreter undefined / None -> behave defensively and return undefined
+        if target is None or target is context.get("undefined"):
+            return context.get("undefined")
+        # ensure we attempt to update the provided target directly
+        try:
+            for src in args[1:]:
+                if src is None or src is context.get("undefined"):
+                    continue
+                if isinstance(src, dict):
+                    for k, v in list(src.items()):
+                        if k == "__proto__":
+                            # avoid obvious prototype pollution
+                            continue
+                        try:
+                            if isinstance(target, dict):
+                                target[k] = v
+                            else:
+                                setattr(target, k, v)
+                        except Exception:
+                            try:
+                                target[k] = v
+                            except Exception:
+                                pass
+                else:
+                    # best-effort: if source is host object, attempt to copy attributes
+                    try:
+                        for k in getattr(src, "__dict__", {}).keys():
+                            if k == "__proto__":
+                                continue
+                            try:
+                                val = getattr(src, k)
+                                if isinstance(target, dict):
+                                    target[str(k)] = val
+                                else:
+                                    setattr(target, str(k), val)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+        except Exception:
+            # best-effort: do not raise; return target as-is or undefined sentinel if inaccessible
+            try:
+                return target
+            except Exception:
+                return context.get("undefined")
+        return target
+
+    def _has_own_property(interp, this, args):
+        """
+        Object.prototype.hasOwnProperty.call(obj, prop)
+        Implemented as a native method attached to Object.prototype.
+        Returns True if `this` has own property `prop` (does not walk __proto__).
+        """
+        prop = args[0] if args else None
+        key = str(prop) if prop is not None else ''
+        try:
+            if isinstance(this, dict):
+                return (key in this) and (key != "__proto__")
+            # host object fallback: check __dict__ and attributes
+            if hasattr(this, "__dict__"):
+                return key in vars(this)
+            return hasattr(this, key)
+        except Exception:
+            return False
 
     Obj = JSFunction(params=[], body=None, env=None, name="Object", native_impl=lambda i, t, a: t or {})
     setattr(Obj, "create", JSFunction(params=[], body=None, env=None, name="create", native_impl=_object_create))
     setattr(Obj, "keys", JSFunction(params=[], body=None, env=None, name="keys", native_impl=_object_keys))
+    setattr(Obj, "assign", JSFunction(params=[], body=None, env=None, name="assign", native_impl=_object_assign))
+    # Attach hasOwnProperty on Object.prototype so instances can call it (obj.hasOwnProperty('x'))
+    try:
+        Obj.prototype.setdefault("hasOwnProperty", JSFunction(params=[], body=None, env=None, name="hasOwnProperty", native_impl=_has_own_property))
+    except Exception:
+        # best-effort: assign directly if prototype not mapping-like
+        try:
+            Obj.prototype["hasOwnProperty"] = JSFunction(params=[], body=None, env=None, name="hasOwnProperty", native_impl=_has_own_property)
+        except Exception:
+            pass
     context["Object"] = Obj
 
     # --- Function.prototype.call / apply / bind ------------------------------

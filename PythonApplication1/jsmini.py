@@ -993,7 +993,8 @@ class Interpreter:
                 return undefined
 
             # JSFunction instances: prefer prototype lookup (JS semantics).
-            # Do not return Python methods on the JSFunction instance object.
+            # Expose JS-level properties that were attached to the function instance
+            # (e.g. static methods like Object.create). Do not expose Python methods.
             if isinstance(obj, JSFunction):
                 try:
                     # instance prototype (per-instance) then class-level prototype
@@ -1008,8 +1009,19 @@ class Interpreter:
                         return cls_proto[key]
                 except Exception:
                     pass
-                # fallthrough: if not found on prototypes, do not expose Python methods as properties;
-                # return undefined to preserve JS semantics.
+                # If a JSFunction instance has an attribute that is itself a JSFunction
+                # (or a non-callable JS-value assigned on the instance), return it.
+                # This preserves the ability to attach static helpers via setattr(obj, name, JSFunction(...))
+                try:
+                    attr = getattr(obj, key, undefined)
+                    if isinstance(attr, JSFunction):
+                        return attr
+                    # return non-callable instance attributes (primitives, dicts, lists)
+                    if attr is not undefined and not callable(attr):
+                        return attr
+                except Exception:
+                    pass
+                # fallthrough: do not expose Python methods or other callables
                 return undefined
 
             # fallback for host/python objects: use attribute
@@ -1745,6 +1757,55 @@ class Interpreter:
                     return fn_val(*args)
 
             return undefined
+
+        if t == 'new':
+            # node shape: ('new', callee_node)
+            # callee_node may itself be a ('call', target, args) when parentheses present.
+            _, callee_node = node
+            # Normalize to (target_node, args_nodes)
+            if isinstance(callee_node, tuple) and callee_node and callee_node[0] == 'call':
+                target_node = callee_node[1]
+                args_nodes = callee_node[2]
+            else:
+                target_node = callee_node
+                args_nodes = []
+
+            # Evaluate constructor and arguments
+            ctor = self._eval_expr(target_node, env, this)
+            args_vals = [self._eval_expr(a, env, this) for a in args_nodes]
+
+            # If constructor is a JSFunction, perform JS 'new' semantics:
+            # - create a fresh object with its __proto__ set to ctor.prototype
+            # - call ctor with that object as `this`
+            # - if ctor returns an object, return it; otherwise return the newly created object
+            try:
+                if isinstance(ctor, JSFunction):
+                    proto = getattr(ctor, 'prototype', None)
+                    new_obj: Dict[str, Any] = {'__proto__': proto} if isinstance(proto, dict) or proto is not None else {}
+                    # Ensure 'length' absent unless ctor sets it
+                    try:
+                        res = ctor.call(self, new_obj, args_vals)
+                    except Exception:
+                        return undefined
+                    # If ctor returned an object (dict or JSFunction), return it; otherwise return the constructed object
+                    if isinstance(res, dict) or isinstance(res, JSFunction):
+                        return res
+                    return new_obj
+
+                # If ctor is a host-callable (unlikely for JS constructors), try calling it.
+                if callable(ctor) and not isinstance(ctor, JSFunction):
+                    try:
+                        res = ctor(*args_vals)
+                        if isinstance(res, dict) or isinstance(res, JSFunction):
+                            return res
+                    except Exception:
+                        pass
+                    # best-effort fallback: return a plain object
+                    return {}
+
+            except Exception:
+                # On error, return undefined sentinel (best-effort)
+                return undefined
 
     def _apply_bin(self, op, a, b):
         # existing arithmetic / comparison handlers...
@@ -2532,296 +2593,43 @@ def make_context(log_fn=None):
     context_ref['google_tags_first_party'] = []           # empty list of first-party container ids
     # google_tag_data.tidr is used by Pj() to store container state; give a minimal holder
     context_ref['google_tag_data'] = {'tidr': {}}
-    # --- Register minimal built-ins: Array and Object -----------------------
-    # Array constructor (native): ensures `this` is an object with length and optional initial items
-    def _array_ctor(interp, this, args):
-        # this is provided by `new` as a dict and already has '__proto__' set by interpreter
-        this.setdefault('length', 0)
-        # if called with arguments, push them
-        if args:
-            # single numeric arg sets length (simplified)
-            if len(args) == 1 and isinstance(args[0], (int, float)):
-                this['length'] = int(args[0])
-            else:
-                # push provided values
-                push_fn = Arr.prototype.get('push')
-                if isinstance(push_fn, JSFunction):
-                    push_fn.call(interp, this, args)
-        return this
 
-    def _array_push(interp, this, args):
-        length = int(this.get('length', 0) or 0)
-        for v in args:
-            this[str(length)] = v
-            length += 1
-        this['length'] = length
-        return length
-
-    def _array_pop(interp, this, args):
-        length = int(this.get('length', 0) or 0)
-        if length == 0:
-            return undefined
-        idx = length - 1
-        key = str(idx)
-        val = this.get(key, undefined)
-        if key in this:
-            del this[key]
-        this['length'] = idx
-        return val
-
-    # Object constructor (native) - returns plain object; when used with `new` interpreter sets __proto__
-    def _object_ctor(interp, this, args):
-        # ensure object exists and return it
-        return this
-
-    # Object.create static: Object.create(proto) -> new object whose __proto__ is proto
-    def _object_create(interp, this, args):
-        proto = args[0] if args else None
-        obj = {'__proto__': proto}
-        return obj
-
-    def _object_keys(interp, this, args):
-        target = args[0] if args else None
-        if isinstance(target, dict):
-            return [k for k in target.keys() if k != '__proto__']
-        return []
-
-    # Create JSFunction constructors and attach prototype methods
-    Arr = JSFunction(params=[], body=None, env=None, name='Array', native_impl=_array_ctor)
-    # --- Array prototype: add common methods (forEach, map, filter, slice, splice, indexOf, concat)
-    def _array_for_each(interp, this, args):
-        cb = args[0] if args else None
-        this_arg = args[1] if len(args) > 1 else None
-        if not cb:
-            return undefined
-        # iterate over numeric keys 0..length-1, skipping holes
-        length = int(this.get('length', 0) or 0)
-        for i in range(length):
-            key = str(i)
-            if key not in this:
-                continue
-            val = this.get(key)
-            # call callback: callback.call(interp, thisArg, [val, i, this])
-            if isinstance(cb, JSFunction):
-                cb.call(interp, this_arg, [val, i, this])
-            elif callable(cb):
-                try:
-                    if this_arg is not None:
-                        cb(this_arg, val, i, this)
-                    else:
-                        cb(val, i, this)
-                except Exception:
-                    pass
-        return undefined
-
-    def _array_map(interp, this, args):
-        cb = args[0] if args else None
-        this_arg = args[1] if len(args) > 1 else None
-        length = int(this.get('length', 0) or 0)
-        res = {'__proto__': Arr.prototype, 'length': 0}
-        out_index = 0
-        if not cb:
-            return res
-        for i in range(length):
-            key = str(i)
-            if key not in this:
-                # preserve holes in a minimal way: skip in result (JS normally creates hole)
-                continue
-            val = this.get(key)
-            if isinstance(cb, JSFunction):
-                rv = cb.call(interp, this_arg, [val, i, this])
-            elif callable(cb):
-                try:
-                    rv = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
-                except Exception:
-                    rv = undefined
-            else:
-                rv = undefined
-            res[str(out_index)] = rv
-            out_index += 1
-        res['length'] = out_index
-        return res
-
-    def _array_filter(interp, this, args):
-        cb = args[0] if args else None
-        this_arg = args[1] if len(args) > 1 else None
-        length = int(this.get('length', 0) or 0)
-        res = {'__proto__': Arr.prototype, 'length': 0}
-        out_index = 0
-        if not cb:
-            return res
-        for i in range(length):
-            key = str(i)
-            if key not in this:
-                continue
-            val = this.get(key)
-            if isinstance(cb, JSFunction):
-                test = cb.call(interp, this_arg, [val, i, this])
-            elif callable(cb):
-                try:
-                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
-                except Exception:
-                    test = False
-            else:
-                test = False
-            if interp._is_truthy(test):
-                res[str(out_index)] = val
-                out_index += 1
-        res['length'] = out_index
-        return res
-
-    def _array_slice(interp, this, args):
-        length = int(this.get('length', 0) or 0)
-        start = int(args[0]) if args else 0
-        end = int(args[1]) if len(args) > 1 else length
-        # normalize negatives
-        if start < 0:
-            start = max(length + start, 0)
-        else:
-            start = min(start, length)
-        if end < 0:
-            end = max(length + end, 0)
-        else:
-            end = min(end, length)
-        res = {'__proto__': Arr.prototype, 'length': 0}
-        out_index = 0
-        for i in range(start, max(start, end)):
-            key = str(i)
-            if key in this:
-                res[str(out_index)] = this.get(key)
-            out_index += 1
-        res['length'] = out_index
-        return res
-
-    def _array_splice(interp, this, args):
-        length = int(this.get('length', 0) or 0)
-        if not args:
-            # nothing to delete or insert
-            return {'__proto__': Arr.prototype, 'length': 0}
-        start = int(args[0])
-        if start < 0:
-            start = max(length + start, 0)
-        else:
-            start = min(start, length)
-        if len(args) == 1:
-            delete_count = length - start
-        else:
-            delete_count = int(args[1])
-            delete_count = max(0, min(delete_count, length - start))
-        inserts = list(args[2:]) if len(args) > 2 else []
-        # collect removed
-        removed = {'__proto__': Arr.prototype, 'length': 0}
-        rem_idx = 0
-        for i in range(start, start + delete_count):
-            k = str(i)
-            if k in this:
-                removed[str(rem_idx)] = this.get(k)
-            rem_idx += 1
-        removed['length'] = rem_idx
-        # build new backing mapping
-        new_obj = {}
-        # copy items before start
-        idx = 0
-        for i in range(0, start):
-            k = str(i)
-            if k in this:
-                new_obj[str(idx)] = this.get(k)
-            idx += 1
-        # insert new items
-        for item in inserts:
-            new_obj[str(idx)] = item
-            idx += 1
-        # copy tail after deleted segment
-        for i in range(start + delete_count, length):
-            k = str(i)
-            if k in this:
-                new_obj[str(idx)] = this.get(k)
-            idx += 1
-        new_obj['__proto__'] = this.get('__proto__', Arr.prototype)
-        new_obj['length'] = idx
-        # replace contents of this dict in-place to preserve identity
-        # clear existing keys except __proto__
-        proto = this.get('__proto__', None)
-        keys = [k for k in list(this.keys()) if k != '__proto__']
-        for k in keys:
-            del this[k]
-        # copy new keys into this
-        for k, v in new_obj.items():
-            this[k] = v
-        # restore proto explicitly (already set by copy above)
-        if proto is not None:
-            this['__proto__'] = proto
-        return removed
-
-    def _array_index_of(interp, this, args):
-        search = args[0] if args else None
-        from_index = int(args[1]) if len(args) > 1 else 0
-        length = int(this.get('length', 0) or 0)
-        if from_index < 0:
-            from_index = max(length + from_index, 0)
-        for i in range(from_index, length):
-            k = str(i)
-            if k not in this:
-                continue
-            if this.get(k) == search:
-                return i
-        return -1
-
-    def _array_concat(interp, this, args):
-        res = {'__proto__': Arr.prototype, 'length': 0}
-        out_idx = 0
-        # helper to append an element
-        def _append(val):
-            nonlocal out_idx
-            res[str(out_idx)] = val
-            out_idx += 1
-        # append this array elements
-        length = int(this.get('length', 0) or 0)
-        for i in range(length):
-            k = str(i)
-            if k in this:
-                _append(this.get(k))
-        # append arguments: if arg is array-like (dict with length) flatten, else push value
-        for a in args:
-            if isinstance(a, dict) and 'length' in a:
-                alen = int(a.get('length', 0) or 0)
-                for j in range(alen):
-                    kk = str(j)
-                    if kk in a:
-                        _append(a.get(kk))
-            else:
-                _append(a)
-        res['length'] = out_idx
-        return res
-
-    # Register JS built-ins if available (idempotent)
+    # Prefer centralized builtins module; register early so consumers of the context get canonical builtins.
+    # Fall back to very small safe stubs when js_builtins is missing or registration fails.
     try:
-        if js_builtins is not None and not context_ref.get("_builtins_registered"):
-            # register_builtins(context, JSFunction) is expected by js_builtins
+        if js_builtins is not None:
             js_builtins.register_builtins(context_ref, JSFunction)
             context_ref["_builtins_registered"] = True
     except Exception:
-        # non-fatal: keep context creation robust even if built-ins fail to register
-        pass
-    # attach to Arr.prototype
-    Arr.prototype['push'] = JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda interp, this, a: _array_push(interp, this, a))
-    Arr.prototype['pop'] = JSFunction(params=[], body=None, env=None, name='pop', native_impl=lambda interp, this, a: _array_pop(interp, this, a))
-    Arr.prototype['forEach'] = JSFunction(params=[], body=None, env=None, name='forEach', native_impl=_array_for_each)
-    Arr.prototype['map'] = JSFunction(params=[], body=None, env=None, name='map', native_impl=_array_map)
-    Arr.prototype['filter'] = JSFunction(params=[], body=None, env=None, name='filter', native_impl=_array_filter)
-    Arr.prototype['slice'] = JSFunction(params=[], body=None, env=None, name='slice', native_impl=_array_slice)
-    Arr.prototype['splice'] = JSFunction(params=[], body=None, env=None, name='splice', native_impl=_array_splice)
-    Arr.prototype['indexOf'] = JSFunction(params=[], body=None, env=None, name='indexOf', native_impl=_array_index_of)
-    Arr.prototype['concat'] = JSFunction(params=[], body=None, env=None, name='concat', native_impl=_array_concat)
-    # Object constructor
-    Obj = JSFunction(params=[], body=None, env=None, name='Object', native_impl=_object_ctor)
-    # Attach static methods as attributes on the function object (Object.create, Object.keys)
-    setattr(Obj, 'create', JSFunction(params=[], body=None, env=None, name='create', native_impl=lambda interp, this, a: _object_create(interp, this, a)))
-    setattr(Obj, 'keys', JSFunction(params=[], body=None, env=None, name='keys', native_impl=lambda interp, this, a: _object_keys(interp, this, a)))
+        # Non-fatal fallback: provide minimal Object/Array/JSON so host code that probes these names doesn't crash.
+        try:
+            Obj = JSFunction(params=[], body=None, env=None, name='Object', native_impl=lambda i, t, a: t or {})
+            setattr(Obj, 'create', JSFunction(params=[], body=None, env=None, name='create', native_impl=lambda i, t, a: {'__proto__': a[0] if a else None}))
+            setattr(Obj, 'keys', JSFunction(params=[], body=None, env=None, name='keys', native_impl=lambda i, t, a: {'__proto__': None, 'length': 0}))
+            context_ref.setdefault('Object', Obj)
+        except Exception:
+            pass
+        try:
+            Arr = JSFunction(params=[], body=None, env=None, name='Array', native_impl=lambda i, t, a: t or {})
+            # minimal prototype so `.length` access on arrays created by host code will not raise
+            try:
+                Arr.prototype.setdefault('push', JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda i, t, a: None))
+            except Exception:
+                Arr.prototype['push'] = JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda i, t, a: None)
+            context_ref.setdefault('Array', Arr)
+        except Exception:
+            pass
+        try:
+            context_ref.setdefault('JSON', {
+                'parse': JSFunction(params=[], body=None, env=None, name='JSON.parse', native_impl=lambda i, t, a: None),
+                'stringify': JSFunction(params=[], body=None, env=None, name='JSON.stringify', native_impl=lambda i, t, a: None),
+            })
+        except Exception:
+            pass
+        context_ref["_builtins_registered"] = False
 
-    # Expose constructors on global context
-    context_ref['Array'] = Arr
-    context_ref['Object'] = Obj
+    # expose constructors on global context should already be handled by js_builtins.register_builtins
+    # (or by the tiny fallback above). Return the context.
     return context_ref
 def run(src: str, context: Optional[Dict[str,Any]]=None):
     """Backward-compatible: Parse and execute JS source string in a fresh interpreter with given context dict."""
