@@ -824,10 +824,19 @@ class Env:
         self.parent = parent
 
     def get(self, name: str):
-        if name in self.vars:
-            return self.vars[name]
-        if self.parent:
-            return self.parent.get(name)
+        # Iterative lookup with cycle detection to avoid infinite recursion when
+        # parent chains contain cycles (defensive).
+        cur = self
+        seen = set()
+        while cur is not None:
+            cid = id(cur)
+            if cid in seen:
+                # Defensive: stop and surface a clearer error instead of RecursionError.
+                raise RuntimeError("Environment parent chain contains a cycle")
+            seen.add(cid)
+            if name in cur.vars:
+                return cur.vars[name]
+            cur = cur.parent
         raise NameError(name)
 
     def set_local(self, name: str, value: Any):
@@ -936,22 +945,23 @@ class JSFunction:
             # ensure interpreter has call-stack attributes
             if not hasattr(interp, '_call_stack'):
                 interp._call_stack = []
+            # If the JS call stack grows very large, fail fast with a clear diagnostic
+            # rather than rely on Python RecursionError. Threshold chosen conservatively.
+            try:
+                current_depth = len(interp._call_stack)
+            except Exception:
+                current_depth = 0
+            if current_depth > 400:
+                try:
+                    cs = list(interp._call_stack)
+                    import traceback, sys
+                    print(f"[jsmini.recursion] Deep JS call stack detected (len={len(cs)}): {cs}", file=sys.stderr)
+                except Exception:
+                    pass
+                raise RuntimeError(f"Deep JS recursion detected; call_stack (top->bottom): {getattr(interp, '_call_stack', None)}")
             interp._call_stack.append(fn_label)
         except Exception:
             pass
-
-        try:
-            try:
-                return interp._eval_stmt(self.body, local, this)
-            except ReturnExc as r:
-                return r.value
-        finally:
-            # pop call-stack safely
-            try:
-                if hasattr(interp, '_call_stack') and interp._call_stack:
-                    interp._call_stack.pop()
-            except Exception:
-                pass
 
     def __repr__(self):
         return f"<JSFunction {self.name or '<anon>'}>"
