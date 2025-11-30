@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 import json
 import importlib
 import math
+import logging
 
 def register_builtins(context: Dict[str, Any], JSFunction):
     # --- Host environment shims (conservative, inert defaults) ---
@@ -463,80 +464,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     # expose constructor
     context["Array"] = Arr
 
-    def _call_js_fn(fn, this_obj, call_args, interp):
-        """Call a JSFunction defensively and return value; uses interp for lookup.
-        Verbose diagnostics to track `undefined` sentinel identity and call shapes.
-        """
-        # small safe logger: prefer context.console.log -> fallback to print
-        def _dbg(msg: str):
-            try:
-                c = context.get('console') if isinstance(context, dict) else None
-                if isinstance(c, dict) and callable(c.get('log')):
-                    try:
-                        c.get('log')(msg)
-                        return
-                    except Exception:
-                        pass
-                print(msg)
-            except Exception:
-                try:
-                    print(msg)
-                except Exception:
-                    pass
-
-        try:
-            # ensure context knows the interpreter (helps nested calls that expect context['_interp'])
-            try:
-                if isinstance(interp, dict) and interp.get('_interp') is None:
-                    interp['_interp'] = interp
-            except Exception:
-                pass
-
-            # Log call-site shape for diagnostics
-            try:
-                _dbg(f"[js_builtins] CALL: fn={getattr(fn,'name',str(fn))} this_obj={type(this_obj).__name__} id={id(this_obj)} call_args_preview={call_args[:2]}")
-                # show context undefined vs module undefined
-                try:
-                    mod_name = getattr(interp.__class__, '__module__', None) if not isinstance(interp, dict) else None
-                    module_undef = None
-                    if mod_name:
-                        mod = importlib.import_module(mod_name)
-                        module_undef = getattr(mod, 'undefined', None)
-                    ctx_undef = context.get('undefined', None)
-                    _dbg(f"[js_builtins] SENTINELS: context.undefined={ctx_undef!r} id={id(ctx_undef)} module.undefined={module_undef!r} id={id(module_undef) if module_undef is not None else None}")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            rv = fn.call(interp, this_obj, call_args)
-
-            # Detailed post-call diagnostics
-            try:
-                # resolve interpreter sentinel for comparison
-                interp_undef = _get_interp_undefined(interp)
-                is_interp_undef = (rv is interp_undef)
-                is_context_undef = (rv is context.get('undefined'))
-                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} type={type(rv).__name__} is_interp_undef={is_interp_undef} is_context_undef={is_context_undef}")
-            except Exception:
-                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} (failed sentinel checks)")
-
-            # Log surprising returns that commonly cause JSON.stringify to omit values:
-            try:
-                if rv is None or rv is _get_interp_undefined(interp):
-                    _dbg(f"[js_builtins] _call_js_fn: fn={getattr(fn,'name',str(fn))} returned {rv!r} for args={call_args[:1]}")
-            except Exception:
-                pass
-
-            return rv
-        except Exception as e:
-            # Log exception details then return interpreter undefined sentinel.
-            try:
-                _dbg(f"[js_builtins] _call_js_fn EXCEPTION: fn={getattr(fn,'name',str(fn))} args={call_args[:1]} error={e}")
-            except Exception:
-                pass
-            return _get_interp_undefined(interp)
-
+    # ---- INTERNAL: safe caller that captures `context` closure ----
     def _get_interp_undefined(interp):
         # Prefer the sentinel stored on the shared context (set by make_context / run).
         try:
@@ -555,6 +483,87 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         # Last-resort: None
         return None
 
+    def _call_js_fn(fn, this_obj, call_args, interp):
+        """Call a JSFunction defensively and return value; uses interp for lookup.
+        Verbose diagnostics to track `undefined` sentinel identity and call shapes.
+        This function CLOSES OVER the `context` parameter so it uses the correct shared context.
+        """
+        # safe Python-side logger (no JS callbacks)
+        def _dbg(msg: str):
+            try:
+                logger = logging.getLogger("js_builtins")
+                if logger.handlers:
+                    logger.debug(msg)
+                else:
+                    print(msg)
+            except Exception:
+                try:
+                    print(msg)
+                except Exception:
+                    pass
+
+        try:
+            # ensure context knows the interpreter (helps nested calls that expect context['_interp'])
+            try:
+                if isinstance(interp, dict) and interp.get('_interp') is None:
+                    interp['_interp'] = interp
+            except Exception:
+                pass
+
+            # Call-site diagnostics (Python-side only)
+            try:
+                _dbg(f"[js_builtins] CALL: fn={getattr(fn,'name',str(fn))} ({type(fn).__name__}) this_obj={type(this_obj).__name__} id={id(this_obj)} call_args_preview={call_args[:2]}")
+                try:
+                    mod_name = getattr(interp.__class__, '__module__', None) if not isinstance(interp, dict) else None
+                    module_undef = None
+                    if mod_name:
+                        mod = importlib.import_module(mod_name)
+                        module_undef = getattr(mod, 'undefined', None)
+                    ctx_undef = context.get('undefined', None)
+                    _dbg(f"[js_builtins] SENTINELS: context.undefined={ctx_undef!r} id={id(ctx_undef)} module.undefined={module_undef!r} id={id(module_undef) if module_undef is not None else None}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            # Invoke target
+            rv = None
+            try:
+                rv = fn.call(interp, this_obj, call_args)
+            except RecursionError:
+                # On recursion, print Python traceback (no JS callbacks) and re-raise
+                import traceback as _tb
+                _dbg("[js_builtins] RecursionError raised while calling JS function. Dumping Python traceback:")
+                try:
+                    print(_tb.format_exc())
+                except Exception:
+                    pass
+                raise
+
+            # Detailed post-call diagnostics
+            try:
+                interp_undef = _get_interp_undefined(interp)
+                is_interp_undef = (rv is interp_undef)
+                is_context_undef = (rv is context.get('undefined'))
+                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} type={type(rv).__name__} is_interp_undef={is_interp_undef} is_context_undef={is_context_undef}")
+            except Exception:
+                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} (failed sentinel checks)")
+
+            try:
+                if rv is None or rv is _get_interp_undefined(interp):
+                    _dbg(f"[js_builtins] _call_js_fn: fn={getattr(fn,'name',str(fn))} returned {rv!r} for args={call_args[:1]}")
+            except Exception:
+                pass
+
+            return rv
+        except Exception as e:
+            try:
+                _dbg(f"[js_builtins] _call_js_fn EXCEPTION: fn={getattr(fn,'name',str(fn))} args={call_args[:1]} error={e}")
+            except Exception:
+                pass
+            return _get_interp_undefined(interp)
+
+    # --- JSON.parse / stringify implementations (use _call_js_fn above) ----
     def _json_parse_native(interp, this, args):
         """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver.
 
@@ -607,7 +616,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         if not isinstance(reviver, JSFunction):
             return top
 
-        # Helper to locate interpreter undefined sentinel
+        # Post-order traversal per spec. `holder` is a dict-like parent; `key` is string key (or index string).
         def _get_interp_undefined_local(interp_local):
             try:
                 if 'undefined' in context:
@@ -623,53 +632,37 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 pass
             return None
 
-        # Post-order traversal per spec. `holder` is a dict-like parent; `key` is string key (or index string).
         def _walk(holder, key):
             try:
-                # Obtain current value
                 try:
                     val = holder.get(key)
                 except Exception:
-                    # If holder is not dict-like, cannot traverse further.
                     val = None
 
-                # If value is an object/array-like, traverse its children first
                 if isinstance(val, dict) and 'length' in val:
-                    # array-like
                     try:
                         length = int(val.get('length', 0) or 0)
                     except Exception:
                         length = 0
                     for i in range(length):
                         k = str(i)
-                        if k in val:
-                            _walk(val, k)
-                        else:
-                            # holes are represented by absence; still call reviver with undefined
-                            # Represent as interpreter undefined sentinel for the call
-                            # create a temporary holder-like access so reviver sees undefined
-                            _walk(val, k)
+                        # call for elements (holes included)
+                        _walk(val, k)
                 elif isinstance(val, dict):
-                    # object: traverse all own enumerable properties except "__proto__"
                     for k in list(val.keys()):
                         if k == "__proto__":
                             continue
                         _walk(val, k)
 
-                # After children processed, call reviver for this property
-                # Compose the current value (may have been modified by children)
                 try:
                     cur_val = holder.get(key)
                 except Exception:
                     cur_val = None
 
-                # Call reviver with holder as `this`
                 try:
                     res = _call_js_fn(reviver, holder, [key, cur_val], interp)
                 except Exception:
-                    # Propagate reviver exceptions as JSError to match prior behavior
                     raise
-                # If reviver returned interpreter undefined sentinel -> delete property
                 if res is _get_interp_undefined_local(interp):
                     try:
                         if key in holder:
@@ -682,13 +675,10 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     except Exception:
                         pass
             except JSError:
-                # bubble up JSError
                 raise
             except Exception:
-                # best-effort: do not abort traversal on incidental errors
                 pass
 
-        # Wrapper per spec: start with a holder {"": top}
         wrapper = {"": top}
         _walk(wrapper, "")
         return wrapper[""]
@@ -749,17 +739,14 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except Exception:
                 indent_arg = None
 
-        # small safe logger: prefer context.console.log -> fallback to print
+        # small safe logger: prefer Python logging / stdout only
         def _dbg(msg: str):
             try:
-                c = context.get('console') if isinstance(context, dict) else None
-                if isinstance(c, dict) and callable(c.get('log')):
-                    try:
-                        c.get('log')(msg)
-                        return
-                    except Exception:
-                        pass
-                print(msg)
+                logger = logging.getLogger("js_builtins")
+                if logger.handlers:
+                    logger.debug(msg)
+                else:
+                    print(msg)
             except Exception:
                 try:
                     print(msg)
@@ -776,9 +763,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             path: tuple of path components for logging (root is ('',))
             returns: Python primitive / list / dict, or UNSET to indicate omitted property
             """
-            # toJSON / replacer application
             try:
-                # Debug: log presence/type of toJSON and incoming value for root diagnostics
                 try:
                     p = '.'.join(map(str, path)) or '(root)'
                     if isinstance(value, dict):
@@ -790,7 +775,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 if isinstance(value, dict):
                     tojson = value.get("toJSON", None)
                     if isinstance(tojson, JSFunction):
-                        # call toJSON and log the raw returned value for diagnosis
                         ret = _call_js_fn(tojson, value, [key], interp)
                         try:
                             _dbg(f"[js_builtins] toJSON called at path='{p}' returned: {ret!r} (type={type(ret).__name__})")
@@ -802,10 +786,8 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except JSError:
                 raise
             except Exception:
-                # replacer/toJSON unexpected error -> treat as interpreter undefined
                 value = _get_interp_undefined(interp)
 
-            # If interpreter undefined sentinel -> omitted in object, null in array
             if value is _get_interp_undefined(interp):
                 p = '.'.join(map(str, path)) or '(root)'
                 if in_array:
@@ -815,44 +797,34 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (replacer/toJSON returned undefined or threw)")
                     return UNSET
 
-            # JS null -> Python None -> JSON null
             if value is None:
                 p = '.'.join(map(str, path)) or '(root)'
                 _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (JS null)")
                 return None
 
-            # Boolean
             if isinstance(value, bool):
                 return value
 
             if isinstance(value, (int, float)):
                 try:
-                    # normalize to float for consistent behavior
                     fv = float(value)
-                    # Debug: show numeric value/type observed
                     try:
                         _dbg(f"[js_builtins] numeric value at path '{p}': {fv!r} (type={type(value).__name__})")
                     except Exception:
                         pass
-                    # NaN/Infinity become JSON null
                     if math.isnan(fv) or math.isinf(fv):
                         p = '.'.join(map(str, path)) or '(root)'
                         _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (NaN or Infinity coerced to null)")
                         return None
-                    # normalize -0.0 -> 0
                     if fv == 0.0:
                         return 0
-                    # return numeric value (use float to avoid unexpected host-object wrappers)
                     return fv
                 except Exception:
-                    # If converting to float fails, treat as JSON null (best-effort)
                     return None
 
-            # String
             if isinstance(value, str):
                 return value
 
-            # Functions -> undefined (omitted in object, null in array)
             if isinstance(value, JSFunction) or callable(value):
                 p = '.'.join(map(str, path)) or '(root)'
                 if in_array:
@@ -862,7 +834,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (function -> undefined)")
                     return UNSET
 
-            # Array-like detection (dict with 'length')
             if isinstance(value, dict) and "length" in value:
                 try:
                     length = int(value.get("length", 0) or 0)
@@ -880,13 +851,11 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                         pv = _serialize(value, k, value.get(k), stack, in_array=True, path=child_path)
                         out_list.append(None if pv is UNSET else pv)
                     else:
-                        # hole -> null
                         _dbg(f"[js_builtins] JSON.stringify: null at path '{'.'.join(map(str, child_path))}' (array hole -> null)")
                         out_list.append(None)
                 stack.remove(vid)
                 return out_list
 
-            # Plain object
             if isinstance(value, dict):
                 vid = id(value)
                 if vid in stack:
@@ -902,18 +871,16 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     vv = value.get(k)
                     child_path = tuple(list(path) + [k])
                     pv = _serialize(value, k, vv, stack, in_array=False, path=child_path)
-                    # Debug: show what serialization returned for this property
                     try:
                         _dbg(f"[js_builtins] pv for path '{'.'.join(map(str, child_path))}': {pv!r} (type={type(pv).__name__})")
                     except Exception:
-                        pass                    
+                        pass
                     if pv is UNSET:
                         continue
                     obj_out[str(k)] = pv
                 stack.remove(vid)
                 return obj_out
 
-            # Host objects -> fallback to string
             try:
                 s = str(value)
                 p = '.'.join(map(str, path)) or '(root)'
@@ -922,7 +889,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except Exception:
                 return None
 
-        # perform serialization
         try:
             pure = _serialize({"": val}, "", val, set(), in_array=False, path=("",))
         except JSError:
@@ -930,12 +896,10 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         except Exception as e:
             raise JSError(str(e))
 
-        # top-level omitted -> return JS undefined sentinel (and log)
         if pure is UNSET:
             _dbg("[js_builtins] JSON.stringify: top-level value was omitted (replacer/toJSON returned undefined) -> returning undefined")
             return _get_interp_undefined(interp)
 
-        # produce JSON string
         try:
             if indent_arg is None or indent_arg == 0:
                 return json.dumps(pure, separators=(",", ":"), ensure_ascii=False)
@@ -964,9 +928,10 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         names: List[str] = []
         try:
             if isinstance(target, dict):
-                names = [k for k in target.keys() if k != "__proto__"]
+                # freeze keys to stable list and coerce to strings
+                names = [str(k) for k in list(target.keys()) if str(k) != "__proto__"]
             elif hasattr(target, "__dict__"):
-                names = [k for k in vars(target).keys()]
+                names = [str(k) for k in vars(target).keys()]
             else:
                 # best-effort: try to iterate keys() or fallback to empty
                 try:
@@ -980,7 +945,8 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         idx = 0
         for n in names:
             try:
-                res[str(idx)] = n
+                # always store property names as strings in the JS-shaped result
+                res[str(idx)] = str(n)
             except Exception:
                 # skip problematic names
                 continue
@@ -1000,10 +966,8 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         if not args:
             return context.get("undefined")
         target = args[0]
-        # If target is interpreter undefined / None -> behave defensively and return undefined
         if target is None or target is context.get("undefined"):
             return context.get("undefined")
-        # ensure we attempt to update the provided target directly
         try:
             for src in args[1:]:
                 if src is None or src is context.get("undefined"):
@@ -1011,7 +975,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 if isinstance(src, dict):
                     for k, v in list(src.items()):
                         if k == "__proto__":
-                            # avoid obvious prototype pollution
                             continue
                         try:
                             if isinstance(target, dict):
@@ -1024,7 +987,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                             except Exception:
                                 pass
                 else:
-                    # best-effort: if source is host object, attempt to copy attributes
                     try:
                         for k in getattr(src, "__dict__", {}).keys():
                             if k == "__proto__":
@@ -1040,7 +1002,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     except Exception:
                         pass
         except Exception:
-            # best-effort: do not raise; return target as-is or undefined sentinel if inaccessible
             try:
                 return target
             except Exception:
@@ -1082,7 +1043,6 @@ def register_builtins(context: Dict[str, Any], JSFunction):
 
     # --- Function.prototype.call / apply / bind ------------------------------
     def _fn_call(interp, this, args):
-        # this is the target function when called as target.call(...)
         target = this
         if not isinstance(target, JSFunction):
             return context.get("undefined")
@@ -1129,5 +1089,4 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     JSFunction.prototype['call'] = JSFunction(params=[], body=None, env=None, name='call', native_impl=_fn_call)
     JSFunction.prototype['apply'] = JSFunction(params=[], body=None, env=None, name='apply', native_impl=_fn_apply)
     JSFunction.prototype['bind'] = JSFunction(params=[], body=None, env=None, name='bind', native_impl=_fn_bind)
-    # expose helper functions if host expects them
     return None

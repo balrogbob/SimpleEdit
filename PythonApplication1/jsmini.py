@@ -979,16 +979,17 @@ class Interpreter:
         except Exception:
             _LAST_INTERPRETER = None
 
-
     def _prop_get(self, obj, key):
         """Prototype-aware property lookup. Returns `undefined` when not found."""
         try:
             # dict-like JS objects: walk __proto__ chain
             if isinstance(obj, dict):
+                # normalize key to string for dict-like JS objects (JS property keys are strings)
+                lookup_key = self._norm_prop_key(key)
                 cur = obj
                 while cur is not None:
-                    if key in cur:
-                        return cur[key]
+                    if lookup_key in cur:
+                        return cur[lookup_key]
                     cur = cur.get('__proto__', None)
                 return undefined
 
@@ -1033,12 +1034,45 @@ class Interpreter:
         """Interpreter method: set own property on object (no prototype walk)."""
         try:
             if isinstance(obj, dict):
-                obj[key] = value
+                obj[self._norm_prop_key(key)] = value
                 return True
             setattr(obj, key, value)
             return True
         except Exception:
             return False
+
+    def _norm_prop_key(self, key):
+        """Normalize a property key to the string form used for dict-backed JS objects.
+
+        JS semantics: property keys are strings. Numeric indices like 0 or 0.0 should map to "0".
+        This helper:
+         - converts integral floats to integer string (0.0 -> "0")
+         - converts ints to string
+         - converts booleans to "true"/"false"
+         - returns str(key) as fallback
+        """
+        try:
+            # interpreter's undefined sentinel -> "undefined"
+            if key is undefined:
+                return "undefined"
+            if isinstance(key, bool):
+                return "true" if key else "false"
+            if isinstance(key, int):
+                return str(key)
+            if isinstance(key, float):
+                # treat integral floats as ints (0.0 -> "0")
+                try:
+                    if math.isfinite(key) and float(key).is_integer():
+                        return str(int(key))
+                except Exception:
+                    pass
+                return str(key)
+            return str(key)
+        except Exception:
+            try:
+                return str(key)
+            except Exception:
+                return ""
 
     def run_ast(self, ast):
         return self._eval_prog(ast, self.global_env)
@@ -1246,7 +1280,7 @@ class Interpreter:
                     elif isinstance(lhs, tuple) and lhs[0] == 'id':
                         name = lhs[1]
                         local.set(name, k)
-                    elif isinstance(lhs, tuple) and lhs[0] == 'get':
+                    if isinstance(lhs, tuple) and lhs[0] == 'get':
                         try:
                             tgt_obj = self._eval_expr(lhs[1], local, this)
                             prop_node = lhs[2]
@@ -1255,7 +1289,7 @@ class Interpreter:
                             else:
                                 prop_name = self._eval_expr(prop_node, local, this)
                             if isinstance(tgt_obj, dict):
-                                tgt_obj[prop_name] = k
+                                tgt_obj[self._norm_prop_key(prop_name)] = k
                             else:
                                 setattr(tgt_obj, prop_name, k)
                         except Exception:
@@ -1487,7 +1521,8 @@ class Interpreter:
                     key = self._eval_expr(prop_node, env, this)
                 try:
                     if isinstance(tgt_obj, dict):
-                        return tgt_obj.get(key, undefined)
+                        # dictionary-backed JS objects use string keys
+                        return tgt_obj.get(self._norm_prop_key(key), undefined)
                     return getattr(tgt_obj, key, undefined)
                 except Exception:
                     return undefined
@@ -1508,7 +1543,8 @@ class Interpreter:
                     key = self._eval_expr(prop_node, env, this)
                 try:
                     if isinstance(tgt_obj, dict):
-                        tgt_obj[key] = value
+                        # always coerce property keys to string for dict-like JS objects
+                        tgt_obj[self._norm_prop_key(key)] = value
                     else:
                         setattr(tgt_obj, key, value)
                     return True
