@@ -12,18 +12,14 @@ Copyright (c) 2024 Joshua Richards
 
 # Built-in imports
 import os
-from subprocess import CREATE_NEW_CONSOLE
 import sys
 import threading
 import re
 import configparser
 import random
 import time
-import html
-from html.parser import HTMLParser
 import json
 import base64
-from io import StringIO
 from threading import Thread
 from tkinter import *
 from tkinter import filedialog, messagebox, colorchooser, simpledialog
@@ -78,6 +74,9 @@ __version__ = '0.0.3'
 
 try:
     import functions as funcs
+    import js_builtins
+    import jsmini
+    from js_builtins import register_builtins
 except Exception:
     import functions as funcs  # fallback if running as script
 # --- Render / view helpers (config-driven) ------------------------------

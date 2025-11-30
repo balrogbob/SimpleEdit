@@ -14,7 +14,10 @@ from __future__ import annotations
 import re
 import random
 from typing import Any, Dict, List, Optional, Tuple
-
+try:
+    from PythonApplication1 import js_builtins
+except Exception:
+    js_builtins = None
 # --- Tokenizer --------------------------------------------------------------
 Token = Tuple[str, str]  # (type, value)
 
@@ -285,16 +288,60 @@ class Parser:
     def parse_for(self):
         self.eat('IDENT','for')
         self.eat('PUNC','(')
+
+        # Handle `for (var x in obj)` and `for (x in obj)` (for-in) as a special case.
+        # Otherwise fall back to classic `for (init; cond; post)` parsing.
         init = None
+        # If the header is not an immediate semicolon, parse an initial clause
         if not self.match('PUNC',';'):
+            # var-declaration may be the LHS of a for-in
             if self.match('IDENT','var'):
+                # parse the var-decl (may consume a trailing semicolon)
                 init = self.parse_var_decl()
+                # if the next token is `in`, treat this as `for (var ... in right)`
+                if self.match('IDENT', 'in'):
+                    self.eat('IDENT', 'in')
+                    right = self.parse_expression()
+                    self.eat('PUNC', ')')
+                    body = self.parse_statement()
+                    return ('for_in', init, right, body)
             else:
-                init = self.parse_expression()
-                if self.match('PUNC',';'):
-                    self.eat('PUNC',';')
+                # Parse a left-hand-side candidate using parse_call_member so we don't
+                # accidentally consume an `in` token as a binary operator.
+                saved_i = self.i
+                lhs_candidate = None
+                try:
+                    lhs_candidate = self.parse_call_member()
+                except SyntaxError:
+                    # restore on failure
+                    self.i = saved_i
+                    lhs_candidate = None
+
+                # If we see `in` after a valid LHS candidate, it's a for-in form.
+                if lhs_candidate is not None and self.match('IDENT', 'in'):
+                    self.eat('IDENT', 'in')
+                    right = self.parse_expression()
+                    self.eat('PUNC', ')')
+                    body = self.parse_statement()
+                    return ('for_in', lhs_candidate, right, body)
+
+                # Otherwise treat parsed content as the init expression of a normal C-style for.
+                # If we restored earlier, parse a full expression now.
+                if lhs_candidate is None:
+                    init = self.parse_expression()
+                else:
+                    init = lhs_candidate
+
+                # consume required semicolon (best-effort recovery if missing)
+                if self.match('PUNC', ';'):
+                    self.eat('PUNC', ';')
+                else:
+                    self.eat('PUNC', ';')
         else:
+            # empty init; consume semicolon
             self.eat('PUNC',';')
+
+        # classic for(init; cond; post)
         cond = None
         if not self.match('PUNC',';'):
             cond = self.parse_expression()
@@ -391,10 +438,12 @@ class Parser:
     # Pratt-like binary precedence (very small table)
     # Higher number => higher precedence.
     # Added bitwise &, ^, | with precedence near equality (conservative).
+    # Also support `in` and `instanceof` (as IDENT tokens with relational precedence).
     BINOPS = {
         '||': -2, '&&': -1,               # logical OR / AND (short-circuit)
         '==': 0, '!=': 0, '===': 0, '!==': 0,
         '&': 0, '^': 0, '|': 0,            # bitwise ops (conservative precedence)
+        'in': 1, 'instanceof': 1,         # relational-like operators
         '<': 1, '>': 1, '<=': 1, '>=': 1,
         '+': 2, '-': 2,
         '*': 3, '/': 3, '%': 3,
@@ -403,12 +452,17 @@ class Parser:
     def parse_binary(self, min_prec):
         left = self.parse_unary()
         while True:
-            t,v = self.peek()
-            if t == 'OP' and v in self.BINOPS and self.BINOPS[v] >= min_prec:
+            t, v = self.peek()
+            # accept operator coming as OP or as IDENT (instanceof, in)
+            if (t == 'OP' or (t == 'IDENT' and v in self.BINOPS)) and v in self.BINOPS and self.BINOPS[v] >= min_prec:
                 prec = self.BINOPS[v]
                 op = v
-                self.eat('OP',v)
-                right = self.parse_binary(prec+1)
+                # consume operator token with correct type
+                if t == 'OP':
+                    self.eat('OP', v)
+                else:
+                    self.eat('IDENT', v)
+                right = self.parse_binary(prec + 1)
                 left = ('bin', op, left, right)
             else:
                 break
@@ -420,6 +474,11 @@ class Parser:
             self.eat('OP','-')
             node = self.parse_unary()
             return ('unary','-', node)
+        # unary plus (e.g. +x)
+        if self.match('OP','+'):
+            self.eat('OP','+')
+            node = self.parse_unary()
+            return ('unary','+', node)
         if self.match('OP','!'):
             self.eat('OP','!')
             node = self.parse_unary()
@@ -658,27 +717,47 @@ class Env:
         self.vars[name] = value
 
 class JSFunction:
-    def __init__(self, params, body, env: Env, name: Optional[str]=None):
-        self.params = params
+    def __init__(self, params=None, body=None, env: Optional[Env]=None, name: Optional[str]=None, native_impl: Optional[callable]=None):
+        # Scripted function fields
+        self.params = params or []
         self.body = body
         self.env = env
         self.name = name
+        # Optional native implementation: native_impl(interpreter, this, args) -> value
+        self.native_impl = native_impl
+        # simple prototype object (plain dict). `constructor` links back for instanceof semantics.
+        self.prototype: Dict[str, Any] = {}
+        try:
+            self.prototype['constructor'] = self
+        except Exception:
+            pass
 
     def call(self, interpreter, this, args):
+        # Native implementation takes precedence
+        if self.native_impl is not None:
+            try:
+                return self.native_impl(interpreter, this, list(args or ()))
+            except ReturnExc as r:
+                return r.value
+            except Exception:
+                return undefined
+
+        # Scripted function execution
         local = Env(self.env)
-        # params
+        # bind `this` into the function local scope
+        local.set_local('this', this)
         for i, p in enumerate(self.params):
             local.set_local(p, args[i] if i < len(args) else undefined)
-        # function name binding (for recursion)
         if self.name:
             local.set_local(self.name, self)
         try:
             return interpreter._eval_stmt(self.body, local, this)
         except ReturnExc as r:
             return r.value
+
     def __repr__(self):
         return f"<JSFunction {self.name or '<anon>'}>"
-
+    
 class ReturnExc(Exception):
     def __init__(self, value):
         self.value = value
@@ -690,8 +769,60 @@ class Interpreter:
             for k,v in globals_map.items():
                 self.global_env.set_local(k, v)
 
+    def _prop_get(self, obj, key):
+        """Interpreter method: prototype-aware property lookup. Returns `undefined` when not found."""
+        try:
+            if isinstance(obj, dict):
+                cur = obj
+                while cur is not None:
+                    if key in cur:
+                        return cur[key]
+                    cur = cur.get('__proto__', None)
+                return undefined
+            # fallback for host/python objects: use attribute
+            return getattr(obj, key, undefined)
+        except Exception:
+            return undefined
+
+    def _prop_set(self, obj, key, value):
+        """Interpreter method: set own property on object (no prototype walk)."""
+        try:
+            if isinstance(obj, dict):
+                obj[key] = value
+                return True
+            setattr(obj, key, value)
+            return True
+        except Exception:
+            return False
+
     def run_ast(self, ast):
         return self._eval_prog(ast, self.global_env)
+
+    def _prop_get(self, obj, key):
+        """Prototype-aware property lookup. Returns `undefined` when not found."""
+        try:
+            if isinstance(obj, dict):
+                cur = obj
+                while cur is not None:
+                    if key in cur:
+                        return cur[key]
+                    cur = cur.get('__proto__', None)
+                return undefined
+            # fallback for host objects
+            return getattr(obj, key, undefined)
+        except Exception:
+            return undefined
+
+    def _prop_set(self, obj, key, value):
+        """Set own property on object (no prototype walk)."""
+        try:
+            if isinstance(obj, dict):
+                obj[key] = value
+                return True
+            setattr(obj, key, value)
+            return True
+        except Exception:
+            return False
 
     def _eval_prog(self, node, env):
         assert node[0] == 'prog'
@@ -753,6 +884,102 @@ class Interpreter:
                 except ContinueExc:
                     continue
             return res
+
+        # new: for-in evaluator
+        if typ == 'for_in':
+            _, lhs, rhs, body = node
+            # create a per-loop lexical env (keeps behavior consistent with other `for` handling)
+            local = Env(env)
+            # If lhs is a var-declaration, create the binding(s) first so RHS can see hoisted names
+            if isinstance(lhs, tuple) and lhs[0] == 'var':
+                try:
+                    # this will call the same var-decl path and set locals with initializers (if any)
+                    self._eval_stmt(lhs, local, this)
+                except Exception:
+                    pass
+
+            res = undefined
+            # Evaluate the RHS (object to enumerate) in the loop env so declared vars are visible
+            try:
+                target = self._eval_expr(rhs, local, this)
+            except Exception:
+                target = None
+
+            # Collect enumerable keys (best-effort)
+            keys: List[str] = []
+            try:
+                if isinstance(target, dict):
+                    # own keys only, skip internal '__proto__'
+                    keys = [k for k in target.keys() if k != '__proto__']
+                elif isinstance(target, JSList):
+                    keys = [str(i) for i in range(len(target))]
+                elif isinstance(target, list):
+                    keys = [str(i) for i in range(len(target))]
+                elif hasattr(target, '__dict__'):
+                    keys = list(vars(target).keys())
+                else:
+                    # fallback: if iterable, iterate and expose numeric indices
+                    try:
+                        seq = list(target)
+                        keys = [str(i) for i in range(len(seq))]
+                    except Exception:
+                        keys = []
+            except Exception:
+                keys = []
+
+            # Iterate keys and execute body. Per-iteration assignment behavior mirrors assignment semantics:
+            # - var-declared lhs -> assign into `local`
+            # - id lhs -> assign into `local` (nearest scope used when executing loop body)
+            # - get(lhs) -> assign property on evaluated target object
+            for k in keys:
+                try:
+                    if isinstance(lhs, tuple) and lhs[0] == 'var':
+                        # ('var', [(name, init), ...]) -- use first declarator as LHS target
+                        try:
+                            name = lhs[1][0][0]
+                            local.set(name, k)
+                        except Exception:
+                            # defensive: ignore malformed var structure
+                            pass
+                    elif isinstance(lhs, tuple) and lhs[0] == 'id':
+                        # simple identifier target
+                        name = lhs[1]
+                        local.set(name, k)
+                    elif isinstance(lhs, tuple) and lhs[0] == 'get':
+                        # property assignment target: evaluate base object then set property
+                        try:
+                            tgt_obj = self._eval_expr(lhs[1], local, this)
+                            prop_node = lhs[2]
+                            if prop_node[0] == 'id':
+                                prop_name = prop_node[1]
+                            else:
+                                prop_name = self._eval_expr(prop_node, local, this)
+                            try:
+                                if isinstance(tgt_obj, dict):
+                                    tgt_obj[prop_name] = k
+                                else:
+                                    setattr(tgt_obj, prop_name, k)
+                            except Exception:
+                                pass
+                        except Exception:
+                            pass
+                    else:
+                        # unknown lhs form: best-effort evaluate as expression (no-op)
+                        pass
+
+                    # execute loop body with local env
+                    try:
+                        res = self._eval_stmt(body, local, this)
+                    except BreakExc:
+                        break
+                    except ContinueExc:
+                        # go to next key
+                        continue
+                except Exception:
+                    # per-iteration errors should not abort entire loop
+                    continue
+            return res
+
         if typ == 'for':
             _, init, cond, post, body = node
             local = Env(env)
@@ -1077,6 +1304,7 @@ class Interpreter:
                     pass
                 return r
             raise RuntimeError("Invalid assignment target")
+
         if t == 'get':
             _, target_node, prop_node = node
             obj = self._eval_expr(target_node, env, this)
@@ -1085,53 +1313,47 @@ class Interpreter:
             else:
                 key = self._eval_expr(prop_node, env, this)
             try:
-                if isinstance(obj, dict):
-                    return obj.get(key, undefined)
-                return getattr(obj, key, undefined)
+                # prototype-aware lookup (includes own properties)
+                return self._prop_get(obj, key)
             except Exception:
                 return undefined
+
         if t == 'call':
             _, callee_node, args_nodes = node
-            callee_val = self._eval_expr(callee_node, env, this)
-            args = [self._eval_expr(a, env, this) for a in args_nodes]
-            # builtin python-callable
-            if callable(callee_val) and not isinstance(callee_val, JSFunction):
-                return callee_val(*args)
-            if isinstance(callee_val, JSFunction):
-                return callee_val.call(self, None, args)
-            return undefined
-        if t == 'new':
-            # node contains either ('call', callee, args) or an identifier / get node
-            inner = node[1]
-            args = []
-            if inner[0] == 'call':
-                callee_node = inner[1]
-                args_nodes = inner[2]
-                args = [self._eval_expr(a, env, this) for a in args_nodes]
+
+            # member call: callee_node can be ('get', target, prop)
+            receiver = None
+            fn_val = None
+            if isinstance(callee_node, tuple) and callee_node[0] == 'get':
+                # evaluate receiver object
+                receiver = self._eval_expr(callee_node[1], env, this)
+                prop_node = callee_node[2]
+                if prop_node[0] == 'id':
+                    fn_val = self._prop_get(receiver, prop_node[1])
+                else:
+                    fn_val = self._eval_expr(prop_node, env, this)
             else:
-                callee_node = inner
-            ctor = self._eval_expr(callee_node, env, this)
-            if isinstance(ctor, JSFunction):
-                # create a naive object and call function with that as `this`
-                obj = {}
-                # call constructor: if returns object, use it; else use obj
-                res = ctor.call(self, obj, args)
-                if isinstance(res, dict) or res is not None:
-                    return res
-                return obj
+                fn_val = self._eval_expr(callee_node, env, this)
+
+            args = [self._eval_expr(a, env, this) for a in args_nodes]
+
+            # JSFunction (scripted/native)
+            if isinstance(fn_val, JSFunction):
+                return fn_val.call(self, receiver, args)
+
+            # Host python-callable (native helpers)
+            if callable(fn_val) and not isinstance(fn_val, JSFunction):
+                try:
+                    if receiver is not None:
+                        return fn_val(receiver, *args)
+                    return fn_val(*args)
+                except TypeError:
+                    return fn_val(*args)
+
             return undefined
-        if t == 'obj':
-            _, props = node
-            out = {}
-            for k, v in props:
-                out[k] = self._eval_expr(v, env, this)
-            return out
-        if t == 'arr':
-            _, elems = node
-            return [ self._eval_expr(e, env, this) for e in elems ]
-        raise RuntimeError(f"Unhandled expr {t}")
 
     def _apply_bin(self, op, a, b):
+        # existing arithmetic / comparison handlers...
         if op == '+':
             return a + b
         if op == '-':
@@ -1142,6 +1364,51 @@ class Interpreter:
             return a / b
         if op == '%':
             return a % b
+
+        # 'in' operator: property in object
+        if op == 'in':
+            try:
+                key = a if isinstance(a, str) else str(a)
+                if isinstance(b, dict):
+                    return key in b
+                return hasattr(b, key)
+            except Exception:
+                return False
+
+        # 'instanceof' semantics: walk prototype chain
+        if op == 'instanceof':
+            try:
+                # If RHS is a JSFunction, its `.prototype` is the target object on the chain.
+                if isinstance(b, JSFunction):
+                    target_proto = getattr(b, 'prototype', None)
+                    # Only objects created by `new` (we set '__proto__') or objects that have
+                    # a __proto__ key will participate in chain walking.
+                    cur = None
+                    if isinstance(a, dict):
+                        cur = a.get('__proto__', None)
+                    else:
+                        # for non-dict objects attempt attribute lookup
+                        cur = getattr(a, '__proto__', None)
+                    # Walk prototype chain
+                    while cur is not None:
+                        if cur is target_proto:
+                            return True
+                        # move up
+                        if isinstance(cur, dict):
+                            cur = cur.get('__proto__', None)
+                        else:
+                            cur = getattr(cur, '__proto__', None)
+                    return False
+                # fallback: if RHS is a Python callable/class, try isinstance
+                if callable(b):
+                    try:
+                        return isinstance(a, b)
+                    except Exception:
+                        return False
+                return False
+            except Exception:
+                return False
+
         if op in ('==','==='):
             return a == b
         if op in ('!=','!=='):
@@ -1291,11 +1558,13 @@ def make_context(log_fn=None):
         ctx_t = context_ref
         ctx_t['_timers'].append((fn, args))
         return len(ctx_t['_timers'])
+
     # small Math object
     Math = {
         'random': lambda: random.random(),
         'floor': lambda x: int(x)//1
     }
+
     # context - created mutable to allow setTimeout closure reference
     context_ref: Dict[str,Any] = {
         'console': {'log': _log},
@@ -1304,8 +1573,301 @@ def make_context(log_fn=None):
         '_timers': [],
         'setTimeout': setTimeout
     }
-    return context_ref
 
+    # --- Register minimal built-ins: Array and Object -----------------------
+    # Array constructor (native): ensures `this` is an object with length and optional initial items
+    def _array_ctor(interp, this, args):
+        # this is provided by `new` as a dict and already has '__proto__' set by interpreter
+        this.setdefault('length', 0)
+        # if called with arguments, push them
+        if args:
+            # single numeric arg sets length (simplified)
+            if len(args) == 1 and isinstance(args[0], (int, float)):
+                this['length'] = int(args[0])
+            else:
+                # push provided values
+                push_fn = Arr.prototype.get('push')
+                if isinstance(push_fn, JSFunction):
+                    push_fn.call(interp, this, args)
+        return this
+
+    def _array_push(interp, this, args):
+        length = int(this.get('length', 0) or 0)
+        for v in args:
+            this[str(length)] = v
+            length += 1
+        this['length'] = length
+        return length
+
+    def _array_pop(interp, this, args):
+        length = int(this.get('length', 0) or 0)
+        if length == 0:
+            return undefined
+        idx = length - 1
+        key = str(idx)
+        val = this.get(key, undefined)
+        if key in this:
+            del this[key]
+        this['length'] = idx
+        return val
+
+    # Object constructor (native) - returns plain object; when used with `new` interpreter sets __proto__
+    def _object_ctor(interp, this, args):
+        # ensure object exists and return it
+        return this
+
+    # Object.create static: Object.create(proto) -> new object whose __proto__ is proto
+    def _object_create(interp, this, args):
+        proto = args[0] if args else None
+        obj = {'__proto__': proto}
+        return obj
+
+    def _object_keys(interp, this, args):
+        target = args[0] if args else None
+        if isinstance(target, dict):
+            return [k for k in target.keys() if k != '__proto__']
+        return []
+
+    # Create JSFunction constructors and attach prototype methods
+    Arr = JSFunction(params=[], body=None, env=None, name='Array', native_impl=_array_ctor)
+    # --- Array prototype: add common methods (forEach, map, filter, slice, splice, indexOf, concat)
+    def _array_for_each(interp, this, args):
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        if not cb:
+            return undefined
+        # iterate over numeric keys 0..length-1, skipping holes
+        length = int(this.get('length', 0) or 0)
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            # call callback: callback.call(interp, thisArg, [val, i, this])
+            if isinstance(cb, JSFunction):
+                cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    if this_arg is not None:
+                        cb(this_arg, val, i, this)
+                    else:
+                        cb(val, i, this)
+                except Exception:
+                    pass
+        return undefined
+
+    def _array_map(interp, this, args):
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get('length', 0) or 0)
+        res = {'__proto__': Arr.prototype, 'length': 0}
+        out_index = 0
+        if not cb:
+            return res
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                # preserve holes in a minimal way: skip in result (JS normally creates hole)
+                continue
+            val = this.get(key)
+            if isinstance(cb, JSFunction):
+                rv = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    rv = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    rv = undefined
+            else:
+                rv = undefined
+            res[str(out_index)] = rv
+            out_index += 1
+        res['length'] = out_index
+        return res
+
+    def _array_filter(interp, this, args):
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get('length', 0) or 0)
+        res = {'__proto__': Arr.prototype, 'length': 0}
+        out_index = 0
+        if not cb:
+            return res
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            if isinstance(cb, JSFunction):
+                test = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    test = False
+            else:
+                test = False
+            if interp._is_truthy(test):
+                res[str(out_index)] = val
+                out_index += 1
+        res['length'] = out_index
+        return res
+
+    def _array_slice(interp, this, args):
+        length = int(this.get('length', 0) or 0)
+        start = int(args[0]) if args else 0
+        end = int(args[1]) if len(args) > 1 else length
+        # normalize negatives
+        if start < 0:
+            start = max(length + start, 0)
+        else:
+            start = min(start, length)
+        if end < 0:
+            end = max(length + end, 0)
+        else:
+            end = min(end, length)
+        res = {'__proto__': Arr.prototype, 'length': 0}
+        out_index = 0
+        for i in range(start, max(start, end)):
+            key = str(i)
+            if key in this:
+                res[str(out_index)] = this.get(key)
+            out_index += 1
+        res['length'] = out_index
+        return res
+
+    def _array_splice(interp, this, args):
+        length = int(this.get('length', 0) or 0)
+        if not args:
+            # nothing to delete or insert
+            return {'__proto__': Arr.prototype, 'length': 0}
+        start = int(args[0])
+        if start < 0:
+            start = max(length + start, 0)
+        else:
+            start = min(start, length)
+        if len(args) == 1:
+            delete_count = length - start
+        else:
+            delete_count = int(args[1])
+            delete_count = max(0, min(delete_count, length - start))
+        inserts = list(args[2:]) if len(args) > 2 else []
+        # collect removed
+        removed = {'__proto__': Arr.prototype, 'length': 0}
+        rem_idx = 0
+        for i in range(start, start + delete_count):
+            k = str(i)
+            if k in this:
+                removed[str(rem_idx)] = this.get(k)
+            rem_idx += 1
+        removed['length'] = rem_idx
+        # build new backing mapping
+        new_obj = {}
+        # copy items before start
+        idx = 0
+        for i in range(0, start):
+            k = str(i)
+            if k in this:
+                new_obj[str(idx)] = this.get(k)
+            idx += 1
+        # insert new items
+        for item in inserts:
+            new_obj[str(idx)] = item
+            idx += 1
+        # copy tail after deleted segment
+        for i in range(start + delete_count, length):
+            k = str(i)
+            if k in this:
+                new_obj[str(idx)] = this.get(k)
+            idx += 1
+        new_obj['__proto__'] = this.get('__proto__', Arr.prototype)
+        new_obj['length'] = idx
+        # replace contents of this dict in-place to preserve identity
+        # clear existing keys except __proto__
+        proto = this.get('__proto__', None)
+        keys = [k for k in list(this.keys()) if k != '__proto__']
+        for k in keys:
+            del this[k]
+        # copy new keys into this
+        for k, v in new_obj.items():
+            this[k] = v
+        # restore proto explicitly (already set by copy above)
+        if proto is not None:
+            this['__proto__'] = proto
+        return removed
+
+    def _array_index_of(interp, this, args):
+        search = args[0] if args else None
+        from_index = int(args[1]) if len(args) > 1 else 0
+        length = int(this.get('length', 0) or 0)
+        if from_index < 0:
+            from_index = max(length + from_index, 0)
+        for i in range(from_index, length):
+            k = str(i)
+            if k not in this:
+                continue
+            if this.get(k) == search:
+                return i
+        return -1
+
+    def _array_concat(interp, this, args):
+        res = {'__proto__': Arr.prototype, 'length': 0}
+        out_idx = 0
+        # helper to append an element
+        def _append(val):
+            nonlocal out_idx
+            res[str(out_idx)] = val
+            out_idx += 1
+        # append this array elements
+        length = int(this.get('length', 0) or 0)
+        for i in range(length):
+            k = str(i)
+            if k in this:
+                _append(this.get(k))
+        # append arguments: if arg is array-like (dict with length) flatten, else push value
+        for a in args:
+            if isinstance(a, dict) and 'length' in a:
+                alen = int(a.get('length', 0) or 0)
+                for j in range(alen):
+                    kk = str(j)
+                    if kk in a:
+                        _append(a.get(kk))
+            else:
+                _append(a)
+        res['length'] = out_idx
+        return res
+
+    # Register JS built-ins if available (idempotent)
+    try:
+        if js_builtins is not None and not ctx.get("_builtins_registered"):
+            js_builtins.register_builtins(ctx, JSFunction)
+            ctx["_builtins_registered"] = True
+    except Exception:
+        # keep context creation robust even if built-ins fail to register
+        pass
+    # attach to Arr.prototype
+    Arr.prototype['push'] = JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda interp, this, a: _array_push(interp, this, a))
+    Arr.prototype['pop'] = JSFunction(params=[], body=None, env=None, name='pop', native_impl=lambda interp, this, a: _array_pop(interp, this, a))
+    Arr.prototype['forEach'] = JSFunction(params=[], body=None, env=None, name='forEach', native_impl=_array_for_each)
+    Arr.prototype['map'] = JSFunction(params=[], body=None, env=None, name='map', native_impl=_array_map)
+    Arr.prototype['filter'] = JSFunction(params=[], body=None, env=None, name='filter', native_impl=_array_filter)
+    Arr.prototype['slice'] = JSFunction(params=[], body=None, env=None, name='slice', native_impl=_array_slice)
+    Arr.prototype['splice'] = JSFunction(params=[], body=None, env=None, name='splice', native_impl=_array_splice)
+    Arr.prototype['indexOf'] = JSFunction(params=[], body=None, env=None, name='indexOf', native_impl=_array_index_of)
+    Arr.prototype['concat'] = JSFunction(params=[], body=None, env=None, name='concat', native_impl=_array_concat)
+    # Object constructor
+    Obj = JSFunction(params=[], body=None, env=None, name='Object', native_impl=_object_ctor)
+    # Attach static methods as attributes on the function object (Object.create, Object.keys)
+    setattr(Obj, 'create', JSFunction(params=[], body=None, env=None, name='create', native_impl=lambda interp, this, a: _object_create(interp, this, a)))
+    setattr(Obj, 'keys', JSFunction(params=[], body=None, env=None, name='keys', native_impl=lambda interp, this, a: _object_keys(interp, this, a)))
+
+    # Expose constructors on global context
+    context_ref['Array'] = Arr
+    context_ref['Object'] = Obj
+    # -----------------------------------------------------------------------
+    from js_builtins import register_builtins
+    # pass JSFunction class so js_builtins does not import jsmini (avoids circular import)
+    register_builtins(context_ref, JSFunction)
+    return context_ref
 def run(src: str, context: Optional[Dict[str,Any]]=None):
     """Backward-compatible: Parse and execute JS source string in a fresh interpreter with given context dict."""
     ast = parse(src)

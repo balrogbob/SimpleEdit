@@ -31,6 +31,7 @@
     <Compile Include="PythonApplication1.py" />
     <Compile Include="recent_files.py" />
     <Compile Include="run_jsmini_demo.py" />
+    <Compile Include="test\test_js_builtins.py" />
     <Compile Include="test_run_scripts_update.py" />
   </ItemGroup>
   <ItemGroup>
@@ -53,10 +54,12 @@
     <Folder Include="out\" />
     <Folder Include="syntax\" />
     <Folder Include="templates\" />
+    <Folder Include="test\" />
     <Folder Include="worker_logs\" />
   </ItemGroup>
   <ItemGroup>
     <Content Include="atcommands.txt" />
+    <Content Include="CONTRIBUTING.md" />
     <Content Include="effect_list.md" />
     <Content Include="examples\demo.html" />
     <Content Include="mapflags.txt" />

@@ -2,8 +2,8 @@
 # Place this next to your project and run with the project PYTHONPATH so `jsmini` is importable.
 
 import re
-import jsmini
-import functions as funcs  # optional: use existing extractor in your project
+from PythonApplication1 import jsmini
+from PythonApplication1 import functions as funcs  # optional: use existing extractor in your project
 
 # replace the simple utf-8 read with tolerant decoding
 with open("examples/demo.html", "rb") as fh:
@@ -57,3 +57,32 @@ if doc:
         print("document.body children count:", len(getattr(body, 'children', [])))
         for idx, child in enumerate(body.children):
             print(f" child[{idx}] ->", repr(child))
+
+def main():
+    ctx = jsmini.make_context(log_fn=print)
+
+    print("=== Array push/pop demo ===")
+    src = """
+    var a = new Array();
+    a.push(1);
+    a.push(2);
+    console.log("length", a.length);
+    console.log("0", a[0]);
+    console.log("pop", a.pop());
+    console.log("length_after_pop", a.length);
+    """
+    jsmini.run(src, ctx)
+
+    print("\n=== Object.create / keys demo ===")
+    src2 = """
+    var proto = {x: 42};
+    var o = Object.create(proto);
+    console.log("proto x:", o.x);
+    o.y = 7;
+    console.log("own y:", o.y);
+    console.log("keys:", Object.keys(o));
+    """
+    jsmini.run(src2, ctx)
+
+if __name__ == "__main__":
+    main()

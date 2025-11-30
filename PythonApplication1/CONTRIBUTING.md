@@ -78,33 +78,6 @@ When making code changes refer to these concrete rules:
    - only apply transient presets when the new tab is opened in Raw/Source mode; or
    - store the detected preset on the frame (e.g. `fr._detected_syntax_preset = path`) and set a status message indicating the preset is detected but suppressed for Rendered view.
 
-## JavaScript built-ins (interpreter guidance)
-
-When adding built-in JavaScript objects or functions (e.g., `Array`, `Object`, `Date`) to the toy interpreter, follow these project patterns:
-- Implement small, focused native implementations as Python callables or as `JSFunction` instances with a `native_impl` when constructor/`new` semantics are required.
-- Attach a plain-dict `prototype` object to `JSFunction` instances and set instance `__proto__` when `new` is used. Store prototype methods as callables on the prototype dict.
-- Prefer implementing prototype methods as Python callables and ensure the evaluator passes the correct `this` value when invoking methods (member calls should set `this` to the object).
-- Keep behavior conservative and documented: full ECMAScript semantics are not required; implement the subset needed by the libraries you intend to run (e.g., `Array.prototype.push`, `pop`, `length` semantics; `Object.create`, `Object.keys`).
-- Add small unit tests for any non-trivial native implementation and document edge-cases in the PR.
-
-### Recommended location and structure for built-ins
-
-For best practices keep the interpreter core (`jsmini.py`) focused on parsing and evaluation. Place built-in implementations in a separate module and register them from `make_context`:
-
-- Create `PythonApplication1/js_builtins.py` and implement a single `register_builtins(context: Dict[str, Any])` function that attaches constructors, prototypes, and static helpers to the provided `context` dict.
-- Keep `js_builtins.py` small and dependency-free. Implement each built-in as a `JSFunction` with `native_impl` or as Python callables that the interpreter can call.
-- Example layout in `js_builtins.py`:
-  - `def register_builtins(context):`
-    - create `Arr = JSFunction(..., native_impl=_array_ctor)`
-    - attach `Arr.prototype['push'] = JSFunction(..., native_impl=_array_push)`
-    - set `context['Array'] = Arr`
-
-- In `jsmini.py` `make_context()` call `from PythonApplication1.js_builtins import register_builtins` and invoke `register_builtins(context_ref)` near the end. This keeps `make_context` readable while keeping built-in logic modular.
-
-- Tests: put unit tests under `tests/` at repo root (preferred) or under `PythonApplication1/tests/`. Example: `tests/test_js_builtins.py` with small scripts executed via `jsmini.run` and assertions of returned or logged values.
-
-- Documentation: document registered built-ins in `CONTRIBUTING.md` (this file) and add small examples in `PythonApplication1/examples/` or `run_jsmini_demo.py`.
-
 ## Testing requirements
 
 - Add unit or manual tests validating all open flows (File -> Open modal, native Open, Open URL dialog/toolbar, hyperlink clicks, history/back/refresh) do not apply syntax tags on tabs that end up in Rendered mode.
