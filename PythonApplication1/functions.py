@@ -158,7 +158,8 @@ DEFAULT_CONFIG = {
         'saveFormattingInFile': 'False',   # new: persist whether to embed formatting header
         'exportCssMode': 'inline-element', # 'inline-element' | 'inline-block' | 'external'
         'exportCssPath': '',               # used when 'external' chosen; default generated at save time
-        'jsConsoleOnRun': 'False'          # new: when True open JS Console popup by default for run_scripts
+        'jsConsoleOnRun': 'False',         # new: when True open JS Console popup by default for run_scripts
+        'debug': 'False'                   # new: enable verbose debug logging (js_builtins/jsmini)
     }
 }
 exportCssMode = 'inline-element'  # default
@@ -226,6 +227,23 @@ def set_js_console_default(value: bool) -> None:
     """Persist the JS Console default preference into config.ini (Section1/jsConsoleOnRun)."""
     try:
         config.set("Section1", "jsConsoleOnRun", str(bool(value)))
+        with open(INI_PATH, "w", encoding="utf-8") as fh:
+            config.write(fh)
+    except Exception:
+        # best-effort: do not raise to caller
+        pass
+
+def get_debug_default() -> bool:
+    """Return whether debug logging (internal js_builtins/jsmini traces) is enabled by default."""
+    try:
+        return config.getboolean("Section1", "debug", fallback=False)
+    except Exception:
+        return False
+
+def set_debug_default(value: bool) -> None:
+    """Persist the debug preference into config.ini (Section1/debug)."""
+    try:
+        config.set("Section1", "debug", str(bool(value)))
         with open(INI_PATH, "w", encoding="utf-8") as fh:
             config.write(fh)
     except Exception:
@@ -2076,16 +2094,17 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
                 # combined logger: writes to console (if available) and to provided log_fn
                 def _combined_log(s: str):
                     try:
+                        # suppress internal builtins debug output unless debug setting enabled
+                        if not get_debug_default() and "[js_builtins]" in (s or ""):
+                            return
                         if actual_show_console:
                             _console_append(s)
                         elif callable(log_fn):
-                            # still forward to provided log_fn even when no console
                             try:
                                 log_fn(s)
                             except Exception:
                                 pass
                         else:
-                            # fallback: print so there's some visible output
                             try:
                                 print(s)
                             except Exception:
@@ -2220,6 +2239,8 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
     # combined logger for sync path
     def _combined_log_sync(s: str):
         try:
+            if not get_debug_default() and "[js_builtins]" in (s or ""):
+                return
             if actual_show_console:
                 _console_append(s)
             if callable(log_fn):

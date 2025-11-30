@@ -1,0 +1,101 @@
+Take a deep breath — below is a focused list of edge cases and concrete implementation notes for JSON.parse / JSON.stringify, plus how to implement replacer and space correctly and safely in your runtime.
+High-level edge cases to handle
+•	Top-level undefined / functions:
+•	JSON.stringify(undefined) -> undefined (return interpreter undefined), not "undefined".
+•	JSON.stringify(function(){}) -> undefined.
+•	For arrays, undefined / function -> null entries.
+•	Circular references:
+•	Detect cycles (use id-based stack) and throw a JSError("Converting circular structure to JSON") (or similar) as real engines do.
+•	toJSON behavior:
+•	If an object has an own toJSON method (callable), call it before serialization and use its return value.
+•	Call it with the object as this and no additional args (or as spec says: toJSON(key) — prefer toJSON() or toJSON(key) depending on your desired parity).
+•	Numbers:
+•	NaN, Infinity, -Infinity -> null.
+•	-0 should serialize as "0" (treat -0 as 0 for JSON output).
+•	Property enumeration / ordering:
+•	Use own, enumerable string-keyed properties.
+•	Keep property order consistent with ECMAScript: integer indices first (ascending), then insertion order for other string keys — you can reasonably approximate by iterating dict items (but tests may expect numeric-key behavior).
+•	Sparse arrays:
+•	Holes should become null in JSON output (and be preserved as null arrays in parse).
+•	Functions, undefined, symbols:
+•	In objects: omitted.
+•	In arrays: rendered as null.
+•	Host objects / non-serializable values:
+•	Fallback to str() (or null) or throw; safer: convert to string for host objects, but keep consistent defensive behavior.
+•	Reviver (JSON.parse):
+•	Implement reviver argument: walk parsed structure depth-first and call reviver.call(interp, holder, key) for each property; use returned value (delete property if returns undefined).
+•	Call reviver on top-level with '' key and top-level value (per spec).
+•	Parse errors:
+•	Map Python json parse errors into JSError so JS try/catch can catch them.
+•	Large recursion / stack limits:
+•	Protect against deep recursion — consider configurable recursion depth and map to JSError if exceeded.
+•	Whitespace / encoding in parse input:
+•	Coerce non-strings to string using str() per current code, but be mindful of non-string inputs.
+Implementing replacer and space (recommended algorithm)
+•	Signature: JSON.stringify(value, replacer=None, space=None)
+•	replacer can be:
+•	None: default semantics.
+•	Array (list/dict-like): whitelist property names — coerce elements to strings and include only those keys (unique, preserve order of array).
+•	Function: called for every key with (holder, key) and should return the replacement value. When invoked you must:
+•	Ensure an Interpreter is available and exposed to JSFunction.call. Before any JSFunction.call set context['_interp'] = interp if not present (your other timer code already does this pattern).
+•	Call replacer.call(interp, holder, [key, value]) and use the returned v.
+•	space can be:
+•	Number: use up to 10 spaces; space = ' ' * min(10, int(space)).
+•	String: use up to first 10 characters as indent string.
+•	None/0 -> compact representation (no pretty-print).
+•	Indentation algorithm:
+•	Maintain indent string (current indent).
+•	When serializing an object or array and space != None, increase indent for children by gap = indent + space_str and join members with ,\n plus indentation.
+•	When space is None, use compact json.dumps(..., separators=(',',':')).
+•	Replacer + toJSON interplay:
+•	For each value: if it has a toJSON method, call it first and use that result as the subject for replacer.
+•	Then if replacer is a function, call it with the holder/key and the processed value.
+•	If replacer is an array, use it only to filter object property names (after toJSON).
+•	Return values:
+•	If replacer returns undefined for an object property -> omit property.
+•	If replacer returns undefined for top-level value -> return interpreter undefined.
+•	When returning a Python type, convert using your _to_pure conversion (make sure undefined sentinel maps correctly).
+•	Performance & robustness:
+•	Use an id-based stack set for circular detection.
+•	Keep conversions iterative if recursion depth may be high, but recursion is simpler; keep a reasonable recursion limit.
+•	Always catch exceptions from user replacer JSFunction and treat as JSError or fallback to undefined depending on desired parity. Prefer raising JSError so JS try/catch can handle it.
+Pseudocode overview — stringify
+•	Prepare space_str from space argument.
+•	Prepare property_list if replacer is an array (ordered set of strings).
+•	Define function serialize(holder, key, value, stack, indent):
+•	If value has toJSON (callable): value = value.toJSON()
+•	If replacer is a function: call replacer.call(interp, holder, [key, value]) -> value (handle JSError)
+•	Based on type:
+•	primitive -> map numbers/NaN/Inf -> null; strings -> JSON-escape; booleans -> true/false; None->null
+•	array-like dict with 'length' -> iterate indices 0..length-1, serialize elements, holes -> null
+•	dict-like -> build list of keys:
+•	if replacer array: use that order and filter
+•	else: use own property keys (skip __proto__)
+•	For each key: call serialize recursively; if result omitted, skip.
+•	Join with indentation / newlines if space_str else compact.
+•	Return JSON string or sentinel for omitted top-level.
+Pseudocode overview — parse with reviver
+•	Use json.loads -> py_val
+•	Convert to JS-shaped objects (arrays -> dict with numeric keys + length, objects -> dict)
+•	If reviver provided and is callable:
+•	Create a holder object { '': top }
+•	Walk depth-first: for each property in nested structure, post-order call:
+•	new_val = reviver.call(interp, holder, [key, value])
+•	If new_val is undefined: delete property from holder
+•	Else set holder[key] = new_val
+•	Return holder['']
+•	If reviver not provided, return top-level JS-shaped value.
+Testing suggestions (minimal set)
+•	Basic round-trip: object with numbers/strings/bools/null.
+•	NaN, Infinity, -0 and -Infinity.
+•	Sparse arrays and arrays with undefined/functions.
+•	Objects with toJSON methods that return primitives/objects.
+•	replacer as array (filter order) and as function (mutating values).
+•	space values: number (e.g. 2), long string (>10 chars), 0, None.
+•	Circular object -> ensure JSError raised and catchable by JS try/catch.
+•	JSON.parse with reviver that deletes and transforms values.
+Practical notes for your codebase
+•	When calling a JSFunction from a builtin (replacer/reviver), follow your existing pattern: ensure context['_interp'] is set and call fn.call(interp, holder, [key, value]).
+•	Use JSError to signal parse/serialization exceptions so JS try/catch behaves as expected.
+•	Reuse your _to_js / _to_pure conversion helpers you already implemented; expand them to handle replacer/space semantics and toJSON.
+•	Keep implementations defensive: catch and wrap unexpected Python exceptions into JSError rather than letting them escape.

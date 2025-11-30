@@ -13,7 +13,9 @@ where:
  - args is list of evaluated arguments
 """
 from typing import Any, Dict, List, Optional
-
+import json
+import importlib
+import math
 
 def register_builtins(context: Dict[str, Any], JSFunction):
     # --- Host environment shims (conservative, inert defaults) ---
@@ -29,6 +31,14 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     tidr = gtd.setdefault('tidr', {})
     tidr.setdefault('container', {})
     tidr.setdefault('injectedFirstPartyContainers', {})
+
+    # Ensure timer containers used by setTimeout/setInterval exist on context
+    context.setdefault('_timers', [])
+    # Store active intervals and next timer id on context so run_timers_from_context
+    # (in jsmini.py) can access them.
+    context.setdefault('_intervals', {})
+    context.setdefault('_next_timer_id', 1)
+
     # --- Array constructor + prototype methods --------------------------------
     def _array_ctor(interp, this, args):
         # this is created by Interpreter.new as a dict with '__proto__' set
@@ -42,22 +52,33 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     push_fn.call(interp, this, args)
         return this
 
-        # Minimal localStorage (string keys/values)
+    # Minimal localStorage (string keys/values)
     _store: Dict[str, str] = {}
+
     def _ls_get_item(interp, this, args):
         k = str(args[0]) if args else None
         return _store.get(k, None)
+
     def _ls_set_item(interp, this, args):
         if len(args) >= 2:
-            _store[str(args[0])] = str(args[1])
+            try:
+                _store[str(args[0])] = str(args[1])
+            except Exception:
+                pass
         return None
+
     def _ls_remove_item(interp, this, args):
         if args:
-            _store.pop(str(args[0]), None)
+            try:
+                _store.pop(str(args[0]), None)
+            except Exception:
+                pass
         return None
+
     def _ls_clear(interp, this, args):
         _store.clear()
         return None
+
     context.setdefault('localStorage', {
         'getItem': JSFunction([], None, None, name='getItem', native_impl=_ls_get_item),
         'setItem': JSFunction([], None, None, name='setItem', native_impl=_ls_set_item),
@@ -65,26 +86,62 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         'clear': JSFunction([], None, None, name='clear', native_impl=_ls_clear),
     })
 
-    # setInterval/clearInterval using context['_timers'] - store repeating flag
-    context.setdefault('_timers', [])
-    _next_timer_id = 1
-    _intervals: Dict[int, Any] = {}
+    # setInterval/clearInterval using context['_timers'] and context['_intervals']
     def _set_interval(interp, this, args):
-        nonlocal _next_timer_id
-        fn = args[0] if args else None
-        tid = _next_timer_id
-        _next_timer_id += 1
-        # mark as repeating; store (fn, args_tuple)
-        _intervals[tid] = (fn, tuple(args[2:]) if len(args) > 2 else ())
-        context['_timers'].append(('__interval__', tid))  # runner must handle interval semantics
+        """
+        setInterval(fn, delay, ...args) -> id
+        - stores active interval in context['_intervals'] (fn, args_tuple)
+        - enqueues a marker ('__interval__', id) into context['_timers'] so runner will call it
+        """
+        try:
+            fn = args[0] if args else None
+            # additional args to pass to callback when invoked
+            extra_args = tuple(args[2:]) if len(args) > 2 else ()
+        except Exception:
+            fn = None
+            extra_args = ()
+
+        # allocate id on context so run_timers can see it
+        try:
+            tid = int(context.get('_next_timer_id', 1))
+        except Exception:
+            tid = 1
+        try:
+            context['_next_timer_id'] = tid + 1
+        except Exception:
+            # best-effort: ignore if cannot write
+            pass
+
+        try:
+            context['_intervals'][tid] = (fn, extra_args)
+        except Exception:
+            # fall back to no-op if context not writable
+            return None
+
+        try:
+            context['_timers'].append(('__interval__', tid))
+        except Exception:
+            # if timers not writable, still return id
+            pass
         return tid
+
     def _clear_interval(interp, this, args):
-        tid = int(args[0]) if args else None
-        if tid in _intervals:
-            del _intervals[tid]
+        try:
+            tid = int(args[0]) if args else None
+        except Exception:
+            tid = None
+        if tid is None:
+            return None
+        try:
+            context.get('_intervals', {}).pop(tid, None)
+        except Exception:
+            pass
         return None
+
+    # Register interval functions as JSFunction instances
     context.setdefault('setInterval', JSFunction([], None, None, name='setInterval', native_impl=_set_interval))
     context.setdefault('clearInterval', JSFunction([], None, None, name='clearInterval', native_impl=_clear_interval))
+
     # Array prototype methods
     def _array_push(interp, this, args):
         length = int(this.get("length", 0) or 0)
@@ -312,6 +369,453 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     # expose constructor
     context["Array"] = Arr
 
+    def _call_js_fn(fn, this_obj, call_args, interp):
+        """Call a JSFunction defensively and return value; uses interp for lookup.
+        Verbose diagnostics to track `undefined` sentinel identity and call shapes.
+        """
+        # small safe logger: prefer context.console.log -> fallback to print
+        def _dbg(msg: str):
+            try:
+                c = context.get('console') if isinstance(context, dict) else None
+                if isinstance(c, dict) and callable(c.get('log')):
+                    try:
+                        c.get('log')(msg)
+                        return
+                    except Exception:
+                        pass
+                print(msg)
+            except Exception:
+                try:
+                    print(msg)
+                except Exception:
+                    pass
+
+        try:
+            # ensure context knows the interpreter (helps nested calls that expect context['_interp'])
+            try:
+                if isinstance(interp, dict) and interp.get('_interp') is None:
+                    interp['_interp'] = interp
+            except Exception:
+                pass
+
+            # Log call-site shape for diagnostics
+            try:
+                _dbg(f"[js_builtins] CALL: fn={getattr(fn,'name',str(fn))} this_obj={type(this_obj).__name__} id={id(this_obj)} call_args_preview={call_args[:2]}")
+                # show context undefined vs module undefined
+                try:
+                    mod_name = getattr(interp.__class__, '__module__', None) if not isinstance(interp, dict) else None
+                    module_undef = None
+                    if mod_name:
+                        mod = importlib.import_module(mod_name)
+                        module_undef = getattr(mod, 'undefined', None)
+                    ctx_undef = context.get('undefined', None)
+                    _dbg(f"[js_builtins] SENTINELS: context.undefined={ctx_undef!r} id={id(ctx_undef)} module.undefined={module_undef!r} id={id(module_undef) if module_undef is not None else None}")
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            rv = fn.call(interp, this_obj, call_args)
+
+            # Detailed post-call diagnostics
+            try:
+                # resolve interpreter sentinel for comparison
+                interp_undef = _get_interp_undefined(interp)
+                is_interp_undef = (rv is interp_undef)
+                is_context_undef = (rv is context.get('undefined'))
+                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} type={type(rv).__name__} is_interp_undef={is_interp_undef} is_context_undef={is_context_undef}")
+            except Exception:
+                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} (failed sentinel checks)")
+
+            # Log surprising returns that commonly cause JSON.stringify to omit values:
+            try:
+                if rv is None or rv is _get_interp_undefined(interp):
+                    _dbg(f"[js_builtins] _call_js_fn: fn={getattr(fn,'name',str(fn))} returned {rv!r} for args={call_args[:1]}")
+            except Exception:
+                pass
+
+            return rv
+        except Exception as e:
+            # Log exception details then return interpreter undefined sentinel.
+            try:
+                _dbg(f"[js_builtins] _call_js_fn EXCEPTION: fn={getattr(fn,'name',str(fn))} args={call_args[:1]} error={e}")
+            except Exception:
+                pass
+            return _get_interp_undefined(interp)
+
+    def _get_interp_undefined(interp):
+        # Prefer the sentinel stored on the shared context (set by make_context / run).
+        try:
+            if 'undefined' in context:
+                return context['undefined']
+        except Exception:
+            pass
+        # Fallback: attempt to locate module-level sentinel (best-effort)
+        try:
+            mod_name = getattr(interp.__class__, '__module__', None)
+            if mod_name:
+                mod = importlib.import_module(mod_name)
+                return getattr(mod, 'undefined', None)
+        except Exception:
+            pass
+        # Last-resort: None
+        return None
+
+    def _json_parse_native(interp, this, args):
+        """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver (to implement next)."""
+        s = args[0] if args else None
+        reviver = args[1] if len(args) > 1 else None
+        if not isinstance(s, str):
+            try:
+                s = str(s)
+            except Exception:
+                raise JSError("Invalid JSON input")
+        try:
+            py_val = json.loads(s)
+        except Exception as e:
+            raise JSError(str(e))
+
+        def _to_js(v):
+            if v is None:
+                return None
+            if isinstance(v, (str, bool, int, float)):
+                return v
+            if isinstance(v, list):
+                out = {'__proto__': Arr.prototype, 'length': 0}
+                for i, el in enumerate(v):
+                    out[str(i)] = _to_js(el)
+                out['length'] = len(v)
+                return out
+            if isinstance(v, dict):
+                o = {}
+                for k, vv in v.items():
+                    o[str(k)] = _to_js(vv)
+                return o
+            try:
+                return str(v)
+            except Exception:
+                return None
+
+        top = _to_js(py_val)
+
+        # If reviver not callable, return converted structure
+        if not isinstance(reviver, JSFunction):
+            return top
+
+        # small safe logger (reuse same logic as in _call_js_fn)
+        def _dbg(msg):
+            try:
+                c = context.get('console') if isinstance(context, dict) else None
+                if isinstance(c, dict) and callable(c.get('log')):
+                    try:
+                        c.get('log')(msg)
+                        return
+                    except Exception:
+                        pass
+                print(msg)
+            except Exception:
+                try:
+                    print(msg)
+                except Exception:
+                    pass
+
+        # Implement reviver: depth-first post-order traversal per spec
+        def _walk(holder, key):
+            val = holder.get(key)
+            if isinstance(val, dict):
+                # arrays are dicts with 'length'
+                if "length" in val:
+                    try:
+                        length = int(val.get("length", 0) or 0)
+                    except Exception:
+                        length = 0
+                    for i in range(length):
+                        k = str(i)
+                        if k in val:
+                            _walk(val, k)
+                else:
+                    for k in list(val.keys()):
+                        if k == "__proto__":
+                            continue
+                        _walk(val, k)
+            # call reviver with holder and key
+            try:
+                res = _call_js_fn(reviver, holder, [key, val], interp)
+            except Exception as e:
+                # Log reviver exception and re-raise so caller may handle (consistent with prior behavior)
+                _dbg(f"[js_builtins] reviver threw for key={key!r}: {e}")
+                raise
+            # If returned interpreter undefined sentinel, delete property; else assign
+            if res is _get_interp_undefined(interp):
+                try:
+                    _dbg(f"[js_builtins] reviver deleted key={key!r}")
+                    if key in holder:
+                        del holder[key]
+                except Exception:
+                    pass
+            else:
+                holder[key] = res
+
+        wrapper = {"": top}
+        _walk(wrapper, "")
+        return wrapper[""]
+
+    def _json_stringify_native(interp, this, args):
+        """
+        JSON.stringify(value, replacer=None, space=None)
+        Returns JS string or JS undefined sentinel (from interpreter) when top-level omitted.
+        Emits warnings when values become JSON `null` (and why) and when top-level becomes `undefined`.
+        """
+        val = args[0] if args else None
+        replacer = args[1] if len(args) > 1 else None
+        space = args[2] if len(args) > 2 else None
+
+        UNSET = object()
+
+        replacer_fn = replacer if isinstance(replacer, JSFunction) else None
+
+        property_list: Optional[List[str]] = None
+        try:
+            if isinstance(replacer, dict) and "length" in replacer:
+                prop_set = []
+                try:
+                    alen = int(replacer.get("length", 0) or 0)
+                except Exception:
+                    alen = 0
+                seen = set()
+                for i in range(alen):
+                    k = replacer.get(str(i), None)
+                    if k is None:
+                        continue
+                    ks = str(k)
+                    if ks not in seen:
+                        seen.add(ks)
+                        prop_set.append(ks)
+                property_list = prop_set
+            elif isinstance(replacer, list):
+                prop_set = []
+                seen = set()
+                for e in replacer:
+                    ks = str(e)
+                    if ks not in seen:
+                        seen.add(ks)
+                        prop_set.append(ks)
+                property_list = prop_set
+        except Exception:
+            property_list = None
+
+        indent_arg = None
+        if space is not None:
+            try:
+                if isinstance(space, (int, float)):
+                    indent_arg = max(0, min(10, int(space)))
+                elif isinstance(space, str):
+                    indent_arg = max(0, min(10, len(space)))
+                else:
+                    indent_arg = max(0, min(10, int(space)))
+            except Exception:
+                indent_arg = None
+
+        # small safe logger: prefer context.console.log -> fallback to print
+        def _dbg(msg: str):
+            try:
+                c = context.get('console') if isinstance(context, dict) else None
+                if isinstance(c, dict) and callable(c.get('log')):
+                    try:
+                        c.get('log')(msg)
+                        return
+                    except Exception:
+                        pass
+                print(msg)
+            except Exception:
+                try:
+                    print(msg)
+                except Exception:
+                    pass
+
+        def _serialize(holder, key, value, stack, in_array=False, path=()):
+            """
+            holder: containing object (dict)
+            key: property key string
+            value: JS-shaped value (dict/list-like/primitive)
+            stack: set of ids for circular detection
+            in_array: whether this value is inside an array (affects undefined -> null behavior)
+            path: tuple of path components for logging (root is ('',))
+            returns: Python primitive / list / dict, or UNSET to indicate omitted property
+            """
+            # toJSON / replacer application
+            try:
+                # Debug: log presence/type of toJSON and incoming value for root diagnostics
+                try:
+                    p = '.'.join(map(str, path)) or '(root)'
+                    if isinstance(value, dict):
+                        _dbg(f"[js_builtins] _serialize BEFORE toJSON: path='{p}' key={key!r} value_keys={list(value.keys())}")
+                    else:
+                        _dbg(f"[js_builtins] _serialize BEFORE toJSON: path='{p}' key={key!r} value_type={type(value).__name__} value={value!r}")
+                except Exception:
+                    pass
+                if isinstance(value, dict):
+                    tojson = value.get("toJSON", None)
+                    if isinstance(tojson, JSFunction):
+                        # call toJSON and log the raw returned value for diagnosis
+                        ret = _call_js_fn(tojson, value, [key], interp)
+                        try:
+                            _dbg(f"[js_builtins] toJSON called at path='{p}' returned: {ret!r} (type={type(ret).__name__})")
+                        except Exception:
+                            pass
+                        value = ret
+                if replacer_fn:
+                    value = _call_js_fn(replacer_fn, holder, [key, value], interp)
+            except JSError:
+                raise
+            except Exception:
+                # replacer/toJSON unexpected error -> treat as interpreter undefined
+                value = _get_interp_undefined(interp)
+
+            # If interpreter undefined sentinel -> omitted in object, null in array
+            if value is _get_interp_undefined(interp):
+                p = '.'.join(map(str, path)) or '(root)'
+                if in_array:
+                    _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (replacer/toJSON returned undefined or threw)")
+                    return None
+                else:
+                    _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (replacer/toJSON returned undefined or threw)")
+                    return UNSET
+
+            # JS null -> Python None -> JSON null
+            if value is None:
+                p = '.'.join(map(str, path)) or '(root)'
+                _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (JS null)")
+                return None
+
+            # Boolean
+            if isinstance(value, bool):
+                return value
+
+            if isinstance(value, (int, float)):
+                try:
+                    # normalize to float for consistent behavior
+                    fv = float(value)
+                    # Debug: show numeric value/type observed
+                    try:
+                        _dbg(f"[js_builtins] numeric value at path '{p}': {fv!r} (type={type(value).__name__})")
+                    except Exception:
+                        pass
+                    # NaN/Infinity become JSON null
+                    if math.isnan(fv) or math.isinf(fv):
+                        p = '.'.join(map(str, path)) or '(root)'
+                        _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (NaN or Infinity coerced to null)")
+                        return None
+                    # normalize -0.0 -> 0
+                    if fv == 0.0:
+                        return 0
+                    # return numeric value (use float to avoid unexpected host-object wrappers)
+                    return fv
+                except Exception:
+                    # If converting to float fails, treat as JSON null (best-effort)
+                    return None
+
+            # String
+            if isinstance(value, str):
+                return value
+
+            # Functions -> undefined (omitted in object, null in array)
+            if isinstance(value, JSFunction) or callable(value):
+                p = '.'.join(map(str, path)) or '(root)'
+                if in_array:
+                    _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (function in array -> null)")
+                    return None
+                else:
+                    _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (function -> undefined)")
+                    return UNSET
+
+            # Array-like detection (dict with 'length')
+            if isinstance(value, dict) and "length" in value:
+                try:
+                    length = int(value.get("length", 0) or 0)
+                except Exception:
+                    length = 0
+                vid = id(value)
+                if vid in stack:
+                    raise JSError("Converting circular structure to JSON")
+                stack.add(vid)
+                out_list = []
+                for i in range(length):
+                    k = str(i)
+                    child_path = tuple(list(path) + [i])
+                    if k in value:
+                        pv = _serialize(value, k, value.get(k), stack, in_array=True, path=child_path)
+                        out_list.append(None if pv is UNSET else pv)
+                    else:
+                        # hole -> null
+                        _dbg(f"[js_builtins] JSON.stringify: null at path '{'.'.join(map(str, child_path))}' (array hole -> null)")
+                        out_list.append(None)
+                stack.remove(vid)
+                return out_list
+
+            # Plain object
+            if isinstance(value, dict):
+                vid = id(value)
+                if vid in stack:
+                    raise JSError("Converting circular structure to JSON")
+                stack.add(vid)
+                obj_out = {}
+                keys = property_list if property_list is not None else [k for k in value.keys() if k != "__proto__"]
+                for k in keys:
+                    if k == "__proto__":
+                        continue
+                    if k not in value:
+                        continue
+                    vv = value.get(k)
+                    child_path = tuple(list(path) + [k])
+                    pv = _serialize(value, k, vv, stack, in_array=False, path=child_path)
+                    # Debug: show what serialization returned for this property
+                    try:
+                        _dbg(f"[js_builtins] pv for path '{'.'.join(map(str, child_path))}': {pv!r} (type={type(pv).__name__})")
+                    except Exception:
+                        pass                    
+                    if pv is UNSET:
+                        continue
+                    obj_out[str(k)] = pv
+                stack.remove(vid)
+                return obj_out
+
+            # Host objects -> fallback to string
+            try:
+                s = str(value)
+                p = '.'.join(map(str, path)) or '(root)'
+                _dbg(f"[js_builtins] JSON.stringify: coercing host object at path '{p}' to string")
+                return s
+            except Exception:
+                return None
+
+        # perform serialization
+        try:
+            pure = _serialize({"": val}, "", val, set(), in_array=False, path=("",))
+        except JSError:
+            raise
+        except Exception as e:
+            raise JSError(str(e))
+
+        # top-level omitted -> return JS undefined sentinel (and log)
+        if pure is UNSET:
+            _dbg("[js_builtins] JSON.stringify: top-level value was omitted (replacer/toJSON returned undefined) -> returning undefined")
+            return _get_interp_undefined(interp)
+
+        # produce JSON string
+        try:
+            if indent_arg is None or indent_arg == 0:
+                return json.dumps(pure, separators=(",", ":"), ensure_ascii=False)
+            else:
+                return json.dumps(pure, indent=indent_arg, ensure_ascii=False)
+        except Exception as e:
+            raise JSError(str(e))
+
+    # Register under context['JSON'] as JS-callable functions (overwrite any earlier registration)
+    context['JSON'] = {
+        'parse': JSFunction(params=[], body=None, env=None, name='JSON.parse', native_impl=_json_parse_native),
+        'stringify': JSFunction(params=[], body=None, env=None, name='JSON.stringify', native_impl=_json_stringify_native),
+    }
     # --- Object helpers ------------------------------------------------------
     def _object_create(interp, this, args):
         proto = args[0] if args else None
@@ -378,5 +882,4 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     JSFunction.prototype['apply'] = JSFunction(params=[], body=None, env=None, name='apply', native_impl=_fn_apply)
     JSFunction.prototype['bind'] = JSFunction(params=[], body=None, env=None, name='bind', native_impl=_fn_bind)
     # expose helper functions if host expects them
-    context.setdefault("undefined", context.get("undefined", None))
     return None

@@ -992,9 +992,11 @@ class Interpreter:
                     cur = cur.get('__proto__', None)
                 return undefined
 
-            # JSFunction instances: check instance prototype then class-level prototype (if present)
+            # JSFunction instances: prefer prototype lookup (JS semantics).
+            # Do not return Python methods on the JSFunction instance object.
             if isinstance(obj, JSFunction):
                 try:
+                    # instance prototype (per-instance) then class-level prototype
                     proto = getattr(obj, 'prototype', None)
                     if isinstance(proto, dict) and key in proto:
                         return proto[key]
@@ -1006,6 +1008,9 @@ class Interpreter:
                         return cls_proto[key]
                 except Exception:
                     pass
+                # fallthrough: if not found on prototypes, do not expose Python methods as properties;
+                # return undefined to preserve JS semantics.
+                return undefined
 
             # fallback for host/python objects: use attribute
             return getattr(obj, key, undefined)
@@ -1025,32 +1030,6 @@ class Interpreter:
 
     def run_ast(self, ast):
         return self._eval_prog(ast, self.global_env)
-
-    def _prop_get(self, obj, key):
-        """Prototype-aware property lookup. Returns `undefined` when not found."""
-        try:
-            if isinstance(obj, dict):
-                cur = obj
-                while cur is not None:
-                    if key in cur:
-                        return cur[key]
-                    cur = cur.get('__proto__', None)
-                return undefined
-            # fallback for host objects
-            return getattr(obj, key, undefined)
-        except Exception:
-            return undefined
-
-    def _prop_set(self, obj, key, value):
-        """Set own property on object (no prototype walk)."""
-        try:
-            if isinstance(obj, dict):
-                obj[key] = value
-                return True
-            setattr(obj, key, value)
-            return True
-        except Exception:
-            return False
 
     def _eval_prog(self, node, env):
         assert node[0] == 'prog'
@@ -1551,6 +1530,38 @@ class Interpreter:
             _, name, params, body = node
             fn = JSFunction(params, body, env, name)
             return fn
+
+        # Object literal: ('obj', [(key, val_node), ...])
+        if t == 'obj':
+            _, props = node
+            out = {}
+            for k, v_node in props:
+                try:
+                    # evaluate property value (best-effort)
+                    val = undefined if v_node is None else self._eval_expr(v_node, env, this)
+                except Exception:
+                    val = undefined
+                out[str(k)] = val
+            return out
+
+        # Array literal: ('arr', [elem_node, ...]) - supports holes represented as ('undef', None)
+        if t == 'arr':
+            _, elems = node
+            out: Dict[str, Any] = {}
+            idx = 0
+            for el in elems:
+                # sparse array hole
+                if isinstance(el, tuple) and el and el[0] == 'undef':
+                    idx += 1
+                    continue
+                try:
+                    v = self._eval_expr(el, env, this)
+                except Exception:
+                    v = undefined
+                out[str(idx)] = v
+                idx += 1
+            out['length'] = idx
+            return out
 
         if t == 'id':
             name = node[1]
@@ -2392,23 +2403,94 @@ def make_timers_container():
 
 def run_timers_from_context(context: Dict[str,Any]):
     """Run queued timers stored in context['_timers'].
-    Each timer may be a Python callable or a JSFunction instance (JSFunction.call requires Interpreter).
-    If the interpreter instance was stored in context['_interp'], JS functions will be invoked through it.
+
+    Behavior:
+    - Processes a snapshot of the current timers queue so newly re-queued intervals
+      are not executed in the same run.
+    - Supports plain timers stored as (fn, args).
+    - Supports interval markers stored as ('__interval__', id) where a mapping of
+      active intervals may live in `context['_intervals']`. If an interval id is
+      still active after execution it will be re-queued for the next cycle.
+    - When calling JSFunction instances, prefer the interpreter stored at
+      context['_interp'] or fall back to module-level _LAST_INTERPRETER. If an
+      interpreter is found, ensure it is also stored into context['_interp'] so
+      JSFunction.call can discover it.
     """
-    timers = context.get('_timers') or []
-    interp = context.get('_interp')
-    while timers:
-        fn, args = timers.pop(0)
+    # Ensure timers list exists and operate on the actual list in context.
+    timers = context.setdefault('_timers', [])
+    # Prefer interpreter from context; fall back to last-created interpreter.
+    interp = context.get('_interp') or _LAST_INTERPRETER
+    if interp is not None and context.get('_interp') is None:
         try:
-            if isinstance(fn, JSFunction):
-                if interp:
-                    fn.call(interp, None, list(args or ()))
-                else:
-                    # no interpreter to call JSFunction - skip
-                    pass
-            elif callable(fn):
-                fn(*list(args or ()))
+            context['_interp'] = interp
         except Exception:
+            pass
+
+    # Intervals mapping (optional). js_builtins should store active intervals here
+    # if it wants run_timers to be able to look them up.
+    intervals = context.get('_intervals', None)
+
+    # Process a snapshot (initial length) so re-queued intervals are not processed
+    # in this same invocation.
+    initial_len = len(timers)
+    for _ in range(initial_len):
+        item = timers.pop(0)
+        try:
+            # Special interval marker: ('__interval__', tid)
+            if isinstance(item, tuple) and len(item) == 2 and item[0] == '__interval__':
+                tid = item[1]
+                if not intervals:
+                    # No interval registry available; ignore marker.
+                    continue
+                entry = intervals.get(tid)
+                if not entry:
+                    # interval was cleared
+                    continue
+                fn, it_args = entry  # it_args expected to be a sequence/tuple
+                # Ensure interpreter available for JSFunction.call
+                call_interp = interp or _LAST_INTERPRETER
+                if isinstance(fn, JSFunction):
+                    if call_interp:
+                        # make sure context has interp for nested JSFunction.call lookup
+                        try:
+                            if context.get('_interp') is None:
+                                context['_interp'] = call_interp
+                        except Exception:
+                            pass
+                        fn.call(call_interp, None, list(it_args or ()))
+                elif callable(fn):
+                    try:
+                        fn(*list(it_args or ()))
+                    except Exception:
+                        pass
+                # If interval still active, re-queue marker for next cycle
+                if tid in intervals:
+                    timers.append(('__interval__', tid))
+                continue
+
+            # Normal timer entry: (fn, args)
+            fn, args = item
+            # JSFunction: call with interpreter as required
+            if isinstance(fn, JSFunction):
+                call_interp = interp or _LAST_INTERPRETER
+                if call_interp:
+                    try:
+                        if context.get('_interp') is None:
+                            context['_interp'] = call_interp
+                    except Exception:
+                        pass
+                    fn.call(call_interp, None, list(args or ()))
+                else:
+                    # no interpreter available - skip JSFunction invocation
+                    pass
+            # Python callable
+            elif callable(fn):
+                try:
+                    fn(*list(args or ()))
+                except Exception:
+                    pass
+        except Exception:
+            # swallow errors from timer callbacks (best-effort)
             pass
 
 # --- Public helpers ---------------------------------------------------------
@@ -2443,8 +2525,8 @@ def make_context(log_fn=None):
         '_timers': [],
         'setTimeout': setTimeout
     }
-
-        # --- Host shims to satisfy common tag runtime checks (avoid tight re-check loops) ---
+    context_ref['undefined'] = undefined
+    # --- Host shims to satisfy common tag runtime checks (avoid tight re-check loops) ---
     # Real environments expose `window.google_tags_first_party` and `google_tag_data`.
     # Provide minimal sane defaults so minified code paths that probe these don't loop.
     context_ref['google_tags_first_party'] = []           # empty list of first-party container ids
@@ -2748,6 +2830,8 @@ def run(src: str, context: Optional[Dict[str,Any]]=None):
     # expose interpreter on context for timers/constructors
     if context is not None:
         context['_interp'] = interp
+        # ensure context['undefined'] refers to interpreter sentinel so builtins see correct undefined
+        context['undefined'] = undefined
     return interp.run_ast(ast)
 
 def run_with_interpreter(src: str, context: Optional[Dict[str,Any]]=None):
@@ -2756,6 +2840,8 @@ def run_with_interpreter(src: str, context: Optional[Dict[str,Any]]=None):
     ctx = context or {}
     interp = Interpreter(ctx)
     ctx['_interp'] = interp
+    # ensure context['undefined'] refers to the interpreter sentinel
+    ctx['undefined'] = undefined
     res = interp.run_ast(ast)
     return res, interp
 

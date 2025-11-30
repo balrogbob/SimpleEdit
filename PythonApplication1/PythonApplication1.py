@@ -1250,6 +1250,23 @@ try:
     funcs.install_js_console_menu_item(settingsMenu)
 except Exception:
     pass
+# Debug logging toggle (persisted via functions.set_debug_default)
+try:
+    debugVar = BooleanVar(value=funcs.get_debug_default())
+
+    def _on_toggle_debug():
+        try:
+            funcs.set_debug_default(bool(debugVar.get()))
+            try:
+                statusBar['text'] = f"Debug logging {'enabled' if debugVar.get() else 'disabled'}"
+            except Exception:
+                pass
+        except Exception:
+            pass
+
+    settingsMenu.add_checkbutton(label="Enable debug logging", variable=debugVar, command=_on_toggle_debug)
+except Exception:
+    pass
 # Helper to return a nicely formatted parameter count string for the loaded model
 def _get_model_param_text():
     try:
