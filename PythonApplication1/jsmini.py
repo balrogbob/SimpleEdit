@@ -2714,11 +2714,12 @@ def make_context(log_fn=None):
 
     # Register JS built-ins if available (idempotent)
     try:
-        if js_builtins is not None and not ctx.get("_builtins_registered"):
-            js_builtins.register_builtins(ctx, JSFunction)
-            ctx["_builtins_registered"] = True
+        if js_builtins is not None and not context_ref.get("_builtins_registered"):
+            # register_builtins(context, JSFunction) is expected by js_builtins
+            js_builtins.register_builtins(context_ref, JSFunction)
+            context_ref["_builtins_registered"] = True
     except Exception:
-        # keep context creation robust even if built-ins fail to register
+        # non-fatal: keep context creation robust even if built-ins fail to register
         pass
     # attach to Arr.prototype
     Arr.prototype['push'] = JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda interp, this, a: _array_push(interp, this, a))
@@ -2739,10 +2740,6 @@ def make_context(log_fn=None):
     # Expose constructors on global context
     context_ref['Array'] = Arr
     context_ref['Object'] = Obj
-    # -----------------------------------------------------------------------
-    from js_builtins import register_builtins
-    # pass JSFunction class so js_builtins does not import jsmini (avoids circular import)
-    register_builtins(context_ref, JSFunction)
     return context_ref
 def run(src: str, context: Optional[Dict[str,Any]]=None):
     """Backward-compatible: Parse and execute JS source string in a fresh interpreter with given context dict."""

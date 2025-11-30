@@ -42,6 +42,50 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     push_fn.call(interp, this, args)
         return this
 
+        # Minimal localStorage (string keys/values)
+    _store: Dict[str, str] = {}
+    def _ls_get_item(interp, this, args):
+        k = str(args[0]) if args else None
+        return _store.get(k, None)
+    def _ls_set_item(interp, this, args):
+        if len(args) >= 2:
+            _store[str(args[0])] = str(args[1])
+        return None
+    def _ls_remove_item(interp, this, args):
+        if args:
+            _store.pop(str(args[0]), None)
+        return None
+    def _ls_clear(interp, this, args):
+        _store.clear()
+        return None
+    context.setdefault('localStorage', {
+        'getItem': JSFunction([], None, None, name='getItem', native_impl=_ls_get_item),
+        'setItem': JSFunction([], None, None, name='setItem', native_impl=_ls_set_item),
+        'removeItem': JSFunction([], None, None, name='removeItem', native_impl=_ls_remove_item),
+        'clear': JSFunction([], None, None, name='clear', native_impl=_ls_clear),
+    })
+
+    # setInterval/clearInterval using context['_timers'] - store repeating flag
+    context.setdefault('_timers', [])
+    _next_timer_id = 1
+    _intervals: Dict[int, Any] = {}
+    def _set_interval(interp, this, args):
+        nonlocal _next_timer_id
+        fn = args[0] if args else None
+        tid = _next_timer_id
+        _next_timer_id += 1
+        # mark as repeating; store (fn, args_tuple)
+        _intervals[tid] = (fn, tuple(args[2:]) if len(args) > 2 else ())
+        context['_timers'].append(('__interval__', tid))  # runner must handle interval semantics
+        return tid
+    def _clear_interval(interp, this, args):
+        tid = int(args[0]) if args else None
+        if tid in _intervals:
+            del _intervals[tid]
+        return None
+    context.setdefault('setInterval', JSFunction([], None, None, name='setInterval', native_impl=_set_interval))
+    context.setdefault('clearInterval', JSFunction([], None, None, name='clearInterval', native_impl=_clear_interval))
+    # Array prototype methods
     def _array_push(interp, this, args):
         length = int(this.get("length", 0) or 0)
         for v in args:
