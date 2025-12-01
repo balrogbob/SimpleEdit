@@ -1,26 +1,48 @@
-# ?? SimpleEdit
+# ✨ SimpleEdit
 
-> A lightweight, batteries-included Python code editor built with SimpleEdit and Tkinter
+> A lightweight, batteries-included Python code editor built with Tkinter
+
+<div align="center">
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
 [![Version 0.0.3](https://img.shields.io/badge/Version-0.0.3-brightgreen.svg)](#)
 
-## ?? About
+</div>
+
+---
+
+## 📚 Table of Contents
+
+- [About](#-about)
+- [Features](#-core-features)
+- [Quick Start](#-quick-start)
+- [Usage](#-usage)
+- [Configuration](#-configuration)
+- [Project Structure](#-project-structure)
+- [Testing](#-testing)
+- [Development](#-development)
+- [License](#-license)
+
+---
+
+## 🎯 About
 
 Started as a weekend boredom project and evolved into a fully-featured Python code editor. Features **syntax highlighting**, **text formatting** (bold/italic/underline), **file management**, and experimental **JavaScript execution** support.
 
-> **Fun fact:** The editor is written in the editor it powers! ?
+> **Fun fact:** The editor is written in the editor it powers! 🎉
 
-### ? Quick Stats
+### ⚡ Quick Stats
 
-- **Pure Tkinter** - No external GUI dependencies required
-- **Threaded** - Responsive UI with background syntax highlighting
-- **Optional AI** - GPT-2 powered code suggestions (if ML libraries available)
-- **HTML/Markdown Support** - Parse and render web documents
-- **Cross-Platform** - Windows executable available (or run on Linux/Mac)
+| Feature | Details |
+|---------|---------|
+| 🎨 **Pure Tkinter** | No external GUI dependencies required |
+| ⚙️ **Threaded** | Responsive UI with background syntax highlighting |
+| 🤖 **Optional AI** | GPT-2 powered code suggestions (if ML libraries available) |
+| 🌐 **HTML/Markdown Support** | Parse and render web documents |
+| 🖥️ **Cross-Platform** | Windows executable or Linux/Mac via source
 
-## ?? Screenshots
+## 📸 Screenshots
 
 | Main Editor | Rendered View |
 |---|---|
@@ -28,137 +50,140 @@ Started as a weekend boredom project and evolved into a fully-featured Python co
 
 ---
 
-## ? Core Features
+## 🚀 Core Features
 
-### 1?? Text Editing & Formatting
-
-| Feature | Description |
-|---------|-------------|
-| ?? **Syntax Highlighting** | Dynamic Python code highlighting with configurable colors and keywords |
-| ?? **Text Formatting** | Toggle bold, italic, underline, small text on selections |
-| ?? **Multiple Tabs** | Open multiple files simultaneously with tabbed interface |
-| ?? **Undo/Redo** | Full undo/redo support (configurable via settings) |
-| ?? **Find/Replace** | Built-in find and replace functionality |
-| ?? **Go To Line** | Navigate to specific line numbers (`Ctrl+G`) |
-
-### 2?? File Management
+### 📝 Text Editing & Formatting
 
 | Feature | Description |
 |---------|-------------|
-| ?? **Save/Load** | Standard file operations with error handling |
-| ?? **Recent Files** | MRU list with quick-open from menu (persisted to `config.ini`) |
-| ?? **Multiple Formats** | Support for plain text, HTML, Markdown, and more |
-| ?? **Auto-detect** | Detects HTML/Markdown content and parses to readable text |
-| ?? **Export** | Save with syntax highlighting as formatted Markdown or HTML |
+| 🎨 **Syntax Highlighting** | Dynamic Python code highlighting with configurable colors and keywords |
+| 📋 **Text Formatting** | Toggle bold, italic, underline, small text on selections |
+| 📑 **Multiple Tabs** | Open multiple files simultaneously with tabbed interface |
+| ↩️ **Undo/Redo** | Full undo/redo support (configurable via settings) |
+| 🔍 **Find/Replace** | Built-in find and replace functionality |
+| 📍 **Go To Line** | Navigate to specific line numbers (`Ctrl+G`) |
 
-### 3?? HTML/Markdown Rendering
-
-| Feature | Description |
-|---------|-------------|
-| ?? **HTML Parsing** | Converts HTML fragments to readable plain text with metadata |
-| ?? **Table Support** | Preserves table structure with cell attributes (colspan, rowspan, alignment) |
-| ?? **Code Blocks** | Renders `<pre>`/`<code>` blocks with language-specific syntax highlighting |
-| ??? **Link Extraction** | Captures and preserves hyperlinks with metadata |
-| ?? **Smart Whitespace** | Intelligent HTML parsing that preserves content structure |
-
-**Supported Code Languages:** Python � JSON � JavaScript � HTML � YAML � C/C++ � Markdown � Rathena NPC/YAML
-
-### 4?? JavaScript Execution (Experimental)
+### 💾 File Management
 
 | Feature | Description |
 |---------|-------------|
-| ?? **Script Loading** | Extracts and executes `<script>` tags from HTML documents |
-| ?? **jsmini Engine** | Custom lightweight JavaScript interpreter |
-| ??? **DOM Simulation** | Basic DOM API support for element manipulation |
-| ?? **Host Callbacks** | Scripts can call `host.setRaw()` to update document content |
-| ??? **JS Console** | Optional popup console for script output and debugging |
-| ?? **Error Context** | Detailed error reporting with source code snippets |
+| 📁 **Save/Load** | Standard file operations with error handling |
+| 🕐 **Recent Files** | MRU list with quick-open from menu (persisted to `config.ini`) |
+| 📄 **Multiple Formats** | Support for plain text, HTML, Markdown, and more |
+| 🔎 **Auto-detect** | Detects HTML/Markdown content and parses to readable text |
+| 📤 **Export** | Save with syntax highlighting as formatted Markdown or HTML |
 
-### 5?? AI Features (Optional)
-
-Requires: `torch` and `tiktoken`
+### 🌐 HTML/Markdown Rendering
 
 | Feature | Description |
 |---------|-------------|
-| ?? **AI Autocomplete** | GPT-2 based code suggestion |
-| ?? **Smart Loading** | Lazy-loads AI model with progress feedback |
-| ?? **Context Window** | Configurable token context (default: 512 tokens) |
-| ??? **Temperature Control** | Adjustable sampling temperature and top-k parameters |
-| ?? **UI Controls** | Load/unload model from toolbar |
-| ?? **Persistent** | AI preferences saved to config file |
+| 🏷️ **HTML Parsing** | Converts HTML fragments to readable plain text with metadata |
+| 📊 **Table Support** | Preserves table structure with cell attributes (colspan, rowspan, alignment) |
+| 💾 **Code Blocks** | Renders `<pre>`/`<code>` blocks with language-specific syntax highlighting |
+| 🔗 **Link Extraction** | Captures and preserves hyperlinks with metadata |
+| 📐 **Smart Whitespace** | Intelligent HTML parsing that preserves content structure |
 
-### 6?? Configuration & Customization
+**Supported Code Languages:** Python • JSON • JavaScript • HTML • YAML • C/C++ • Markdown • Rathena NPC/YAML
+
+### ⚡ JavaScript Execution (Experimental)
 
 | Feature | Description |
 |---------|-------------|
-| ?? **Font Selection** | Dropdown for font family and size |
-| ?? **Color Scheme** | Customizable colors for syntax elements (stored in `config.ini`) |
-| ??? **Tag Colors** | Per-element color configuration (keywords, strings, comments, etc.) |
-| ?? **Syntax Presets** | Load custom syntax highlighting rules from `.ini` files |
-| ?? **CSS Modes** | Choose inline, inline-block, or external CSS for HTML export |
+| 📜 **Script Loading** | Extracts and executes `<script>` tags from HTML documents |
+| ⚙️ **jsmini Engine** | Custom lightweight JavaScript interpreter |
+| 🎯 **DOM Simulation** | Basic DOM API support for element manipulation |
+| 🔌 **Host Callbacks** | Scripts can call `host.setRaw()` to update document content |
+| 💬 **JS Console** | Optional popup console for script output and debugging |
+| ⚠️ **Error Context** | Detailed error reporting with source code snippets |
+
+### 🤖 AI Features (Optional)
+
+**Requirements:** `torch` and `tiktoken`
+
+| Feature | Description |
+|---------|-------------|
+| 💡 **AI Autocomplete** | GPT-2 based code suggestion |
+| ⚡ **Smart Loading** | Lazy-loads AI model with progress feedback |
+| 🪟 **Context Window** | Configurable token context (default: 512 tokens) |
+| 🌡️ **Temperature Control** | Adjustable sampling temperature and top-k parameters |
+| 🎮 **UI Controls** | Load/unload model from toolbar |
+| 💾 **Persistent** | AI preferences saved to config file |
+
+### ⚙️ Configuration & Customization
+
+| Feature | Description |
+|---------|-------------|
+| 🔤 **Font Selection** | Dropdown for font family and size |
+| 🎨 **Color Scheme** | Customizable colors for syntax elements (stored in `config.ini`) |
+| 🏷️ **Tag Colors** | Per-element color configuration (keywords, strings, comments, etc.) |
+| 📋 **Syntax Presets** | Load custom syntax highlighting rules from `.ini` files |
+| 🎨 **CSS Modes** | Choose inline, inline-block, or external CSS for HTML export |
 
 ---
 
-## ?? Quick Start
+## 🚀 Quick Start
 
-### Installation
+### 📥 Installation
 
-**Option 1: Run from Source**
+#### Option 1: Run from Source
+
 ```bash
 git clone https://github.com/balrogbob/SimpleEdit.git
 cd SimpleEdit
 python PythonApplication1.py
 ```
 
-**Option 2: Windows Executable** (No Python Required!)
+#### Option 2: Windows Executable (No Python Required!)
+
 ```bash
 # Download PythonApplication1.exe from releases
 ./PythonApplication1.exe
 ```
 
-**Option 3: Linux/Mac via Wine** (if needed)
+#### Option 3: Linux/Mac via Wine
+
 ```bash
 wine PythonApplication1.exe
 ```
 
-### Dependencies
+### 📦 Dependencies
 
-**Required:**
+#### Required
 - Python 3.8+
 - `tkinter` (built-in with most Python installations)
 
-**Optional:**
+#### Optional
 - `torch` - AI autocomplete
 - `tiktoken` - AI tokenizer
 - `pyinstaller` - Build Windows executable
 
 ---
 
-## ?? Usage
+## 📖 Usage
 
 ### Basic Workflow
 
-1. **New File** - `File` ? `New` or `Ctrl+N`
-2. **Open File** - `File` ? `Open` or use Recent menu
-3. **Edit** - Type in main text area; formatting applied automatically
-4. **Apply Formatting** - Select text ? `Edit` menu ? choose **Bold/Italic/Underline**
-5. **Save** - `File` ? `Save` or `Ctrl+S`
-6. **Export** - `File` ? `Save as Markdown` (preserves syntax highlighting)
+1. **New File** — `File` → `New` or `Ctrl+N`
+2. **Open File** — `File` → `Open` or use Recent menu
+3. **Edit** — Type in main text area; formatting applied automatically
+4. **Apply Formatting** — Select text → `Edit` menu → choose **Bold/Italic/Underline**
+5. **Save** — `File` → `Save` or `Ctrl+S`
+6. **Export** — `File` → `Save as Markdown` (preserves syntax highlighting)
 
 ### HTML/Markdown Mode
 
 When opening `.html`, `.md`, or `.php` files:
 
-? Content is automatically parsed and displayed as readable text  
-? Original HTML is preserved internally  
-? Toggle between raw and rendered views via menu  
+- ✅ Content is automatically parsed and displayed as readable text
+- ✅ Original HTML is preserved internally
+- ✅ Toggle between raw and rendered views via menu
 
 ### JavaScript Execution
 
 1. Open an HTML file containing `<script>` tags
 2. Scripts automatically extract and execute
-3. Check `Settings` ? `Enable debug logging` for detailed execution trace
-4. Output appears in optional JS Console (`Settings` ? menu option)
+3. Check `Settings` → `Enable debug logging` for detailed execution trace
+4. Output appears in optional JS Console (`Settings` → menu option)
 
 ### AI Autocomplete
 
@@ -169,7 +194,7 @@ When opening `.html`, `.md`, or `.php` files:
 
 ---
 
-## ?? Keyboard Shortcuts
+## ⌨️ Keyboard Shortcuts
 
 | Shortcut | Action |
 |----------|--------|
@@ -188,7 +213,7 @@ When opening `.html`, `.md`, or `.php` files:
 
 ---
 
-## ?? Configuration
+## ⚙️ Configuration
 
 Configuration is stored in **`config.ini`** (created automatically on first run).
 
@@ -231,35 +256,35 @@ urls=["https://example.com"]
 
 ---
 
-## ?? Project Structure
+## 📁 Project Structure
 
 ```
 SimpleEdit/
-??? ?? PythonApplication1.py      # Main GUI application
-??? ?? functions.py               # Helper functions (HTML, scripts, etc.)
-??? ?? jsmini.py                  # JavaScript interpreter
-??? ?? js_builtins.py             # JS built-in functions
-??? ?? model.py                   # GPT model (if ML available)
-??? ? syntax_worker.py            # Background syntax highlighting
-??? ?? config.ini                  # Runtime configuration
-??? ?? tests/                     # Test suite
-?   ??? test_base.py
-?   ??? test_js_builtins.py
-?   ??? test_dom_events.py
-?   ??? test_run_scripts_update.py
-?   ??? __init__.py
-??? ?? syntax/                    # Syntax definition files
-    ??? python.ini
-    ??? json.ini
-    ??? yaml.ini
-    ??? cpp.ini
-    ??? csharp.ini
-    ??? ...
+├── 📄 PythonApplication1.py      # Main GUI application
+├── 📄 functions.py               # Helper functions (HTML, scripts, etc.)
+├── 📄 jsmini.py                  # JavaScript interpreter
+├── 📄 js_builtins.py             # JS built-in functions
+├── 📄 model.py                   # GPT model (if ML available)
+├── 📄 syntax_worker.py           # Background syntax highlighting
+├── 📄 config.ini                 # Runtime configuration
+├── 📁 tests/                     # Test suite
+│   ├── 📄 test_base.py
+│   ├── 📄 test_js_builtins.py
+│   ├── 📄 test_dom_events.py
+│   ├── 📄 test_run_scripts_update.py
+│   └── 📄 __init__.py
+└── 📁 syntax/                    # Syntax definition files
+    ├── 📄 python.ini
+    ├── 📄 json.ini
+    ├── 📄 yaml.ini
+    ├── 📄 cpp.ini
+    ├── 📄 csharp.ini
+    └── ...
 ```
 
 ---
 
-## ?? Testing
+## 🧪 Testing
 
 Located in `PythonApplication1/tests/` directory:
 
@@ -290,7 +315,7 @@ python -m pytest PythonApplication1/tests/ -v
 
 ---
 
-## ??? Development
+## 👨‍💻 Development
 
 ### Code Standards
 
@@ -316,23 +341,23 @@ python -m pytest PythonApplication1/tests/ -v
 
 **Optional:**
 - `torch` - AI autocomplete
-- `tiktoken` - AI tokenizer  
+- `tiktoken` - AI tokenizer
 - `pyinstaller` - Windows executable building
 
 ---
 
-## ?? Known Limitations
+## ⚠️ Known Limitations
 
 | Limitation | Details |
 |-----------|---------|
-| ?? **AI Memory** | AI model requires significant memory (~500MB+) |
-| ?? **JS API** | JavaScript interpreter is simplified; not all browser APIs available |
-| ?? **Table Editing** | Best-effort only (metadata preserved but limited UI) |
-| ? **Performance** | Syntax highlighting may lag on very large files (>50KB) |
+| 💾 **AI Memory** | AI model requires significant memory (~500MB+) |
+| 📜 **JS API** | JavaScript interpreter is simplified; not all browser APIs available |
+| 📊 **Table Editing** | Best-effort only (metadata preserved but limited UI) |
+| ⚡ **Performance** | Syntax highlighting may lag on very large files (>50KB) |
 
 ---
 
-## ?? Contributing
+## 🤝 Contributing
 
 Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
@@ -345,40 +370,41 @@ Follow PEP 8 with the additions in our style guide:
 
 ---
 
-## ?? License
+## 📜 License
 
-This project is licensed under the **MIT License** - see [LICENSE.txt](LICENSE.txt) for details.
+This project is licensed under the **MIT License** — see [LICENSE.txt](LICENSE.txt) for details.
 
 ---
 
-## ?? Author
+## 👤 Author
 
 **Joshua Richards**  
-Created as a fun programming project � [GitHub](https://github.com/balrogbob/SimpleEdit)
+Created as a fun programming project • [GitHub](https://github.com/balrogbob/SimpleEdit)
 
 ---
 
-## ?? Support
+## 💬 Support
 
 For issues, questions, or suggestions:
-- ?? [Report a Bug](https://github.com/balrogbob/SimpleEdit/issues)
-- ?? [Request a Feature](https://github.com/balrogbob/SimpleEdit/issues)
-- ?? Check existing issues for similar problems
+
+- 🐛 [Report a Bug](https://github.com/balrogbob/SimpleEdit/issues)
+- ✨ [Request a Feature](https://github.com/balrogbob/SimpleEdit/issues)
+- 🔍 Check existing issues for similar problems
 
 ---
 
-## ?? Additional Resources
+## 📚 Additional Resources
 
-- [Detailed API Documentation](docs/API.md) - Coming soon
-- [Syntax Highlighting Guide](docs/SYNTAX.md) - Coming soon
-- [JavaScript Engine Docs](docs/JSMINI.md) - Coming soon
+- 📖 [Detailed API Documentation](docs/API.md) — Coming soon
+- 🎨 [Syntax Highlighting Guide](docs/SYNTAX.md) — Coming soon
+- ⚙️ [JavaScript Engine Docs](docs/JSMINI.md) — Coming soon
 
 ---
 
 <div align="center">
 
-**Made with ?? in Python**
+**Made with ❤️ in Python**
 
-Give us a ? if you found this useful!
+Give us a ⭐ if you found this useful!
 
 </div>
