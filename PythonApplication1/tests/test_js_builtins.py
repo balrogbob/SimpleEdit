@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
+from test_base import CleanTestCase
 
 # Add parent directory to sys.path so this test can import local modules kept separate from main code.
 _project_root = Path(__file__).resolve().parent.parent
@@ -12,7 +13,7 @@ import jsmini
 from js_builtins import register_builtins
 
 
-class TestJSBuiltins(unittest.TestCase):
+class TestJSBuiltins(CleanTestCase):
     def test_array_push_pop(self):
         ctx = jsmini.make_context()
         register_builtins(ctx, jsmini.JSFunction)

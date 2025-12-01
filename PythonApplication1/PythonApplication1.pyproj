@@ -13,6 +13,8 @@
     <RootNamespace>PythonApplication1</RootNamespace>
     <InterpreterId>CondaEnv|CondaEnv|env1</InterpreterId>
     <TestFramework>unittest</TestFramework>
+    <UnitTestPattern>test*.py</UnitTestPattern>
+    <UnitTestRootDirectory>tests/</UnitTestRootDirectory>
   </PropertyGroup>
   <PropertyGroup Condition=" '$(Configuration)' == 'Debug' ">
     <DebugSymbols>true</DebugSymbols>
@@ -27,17 +29,22 @@
     <Compile Include="examples\run_jsmini_demo.py" />
     <Compile Include="functions.py" />
     <Compile Include="jsmini.py" />
+    <Compile Include="js_builtins.py" />
     <Compile Include="minitokentester.py" />
     <Compile Include="moartest.py" />
     <Compile Include="model.py" />
     <Compile Include="PythonApplication1.py" />
     <Compile Include="recent_files.py" />
     <Compile Include="run_jsmini_demo.py" />
+    <Compile Include="tests\test_base.py" />
+    <Compile Include="tests\test_dom_events.py" />
+    <Compile Include="tests\test_event_builtin.py" />
     <Compile Include="tests\test_json_reviver.py" />
     <Compile Include="tests\test_object_helpers.py" />
+    <Compile Include="tests\__init__.py" />
     <Compile Include="test\test_js_builtins.py" />
     <Compile Include="tests\test_run_scripts_update.py" />
-    <Compile Include="tests\tokendiag_run_test.py" />
+    <Compile Include="test_tokendiag_run_test.py" />
   </ItemGroup>
   <ItemGroup>
     <Interpreter Include="env\">

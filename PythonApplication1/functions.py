@@ -2051,20 +2051,206 @@ def extract_script_tags(html: str) -> list:
         out.append({'src': src, 'inline': inline if inline.strip() else None, 'attrs': attrs})
     return out
 
-def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host_update_cb: Optional[Callable[[str], None]] = None, show_console: Optional[bool] = None, run_blocking: bool = False):
-    """Execute script entries using jsmini.
-
-    Behaviour changes:
-    - When called from the Tk main thread and `run_blocking` is False (default),
-      scripts will run asynchronously on a background thread and this function
-      returns immediately with `[('async', None)]`. This gives the same perceived
-      responsiveness whether or not the JS Console is open.
-    - Callers that need synchronous results can pass `run_blocking=True`.
-    - `show_console` controls whether a reusable popup console is opened (when True)
-      or the persisted default is used when None.
-    - `log_fn` is still supported and will receive the same log lines as the console.
+def _should_execute_script(attrs: dict | None) -> bool:
     """
-    results = []
+    Return True if a <script> with given attrs should be executed as JavaScript.
+    - Execute when no type/language is specified.
+    - Execute when type contains 'javascript' or 'ecmascript'.
+    - Skip known non-JS types (json, module, anything clearly not JS).
+    """
+    try:
+        if not attrs:
+            return True
+        typ = (attrs.get('type') or '').strip().lower()
+        lang = (attrs.get('language') or '').strip().lower()
+        # If no type/lang hint, assume JS
+        if not typ and not lang:
+            return True
+        # Positive JS indicators
+        if 'javascript' in typ or 'ecmascript' in typ or typ in ('text/jscript', 'application/x-javascript'):
+            return True
+        if lang in ('javascript', 'js', 'ecmascript'):
+            return True
+        # Known non-JS cases
+        if typ in ('module', 'application/module'):
+            return False
+        if 'json' in typ:
+            return False
+        # Default: be conservative and do not execute if type is specified and not clearly JS
+        return False
+    except Exception:
+        return True
+
+
+def _load_script_text(entry: dict, base_url: Optional[str]) -> tuple[Optional[str], Optional[str]]:
+    """
+    Resolve and load script text for a script entry.
+    Supports:
+      - inline script (entry['inline'])
+      - http/https/file URLs via urllib
+      - data: URLs (base64 or URL-encoded)
+      - filesystem paths (relative to base_url path when applicable)
+    Returns (text, error). On success error is None.
+    """
+    try:
+        inline = entry.get('inline')
+        if inline is not None:
+            return inline, None
+
+        src = entry.get('src') or ''
+        if not src:
+            return '', None
+
+        # data: URL
+        if src.startswith('data:'):
+            try:
+                header_and_data = src[5:]
+                comma = header_and_data.find(',')
+                if comma == -1:
+                    return None, "Malformed data: URL"
+                header = header_and_data[:comma]
+                data_part = header_and_data[comma + 1:]
+                is_base64 = ';base64' in header.lower()
+                charset = 'utf-8'
+                mcs = re.search(r'charset=([A-Za-z0-9_\-]+)', header, flags=re.I)
+                if mcs:
+                    charset = mcs.group(1)
+                if is_base64:
+                    raw = base64.b64decode(data_part)
+                else:
+                    raw = _up.unquote_to_bytes(data_part)
+                try:
+                    return raw.decode(charset, errors='replace'), None
+                except Exception:
+                    return raw.decode('utf-8', errors='replace'), None
+            except Exception as e:
+                return None, f"Failed to decode data URL: {e}"
+
+        # URL-like?
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', src):
+            try:
+                req = _urr.Request(src, headers={"User-Agent": "SimpleEdit/jsmini"})
+                with _urr.urlopen(req, timeout=10) as resp:
+                    raw_bytes = resp.read()
+                    # prefer explicit charset on tag
+                    charset = (entry.get('attrs') or {}).get('charset')
+                    if charset:
+                        return raw_bytes.decode(charset, errors='replace'), None
+                    return raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace'), None
+            except Exception as e:
+                return None, f"Failed to fetch {src}: {e}"
+
+        # If we have a base_url that is a URL, urljoin it
+        resolved = src
+        try:
+            if base_url:
+                # File URL base => join as URLs
+                if base_url.startswith('file:'):
+                    resolved = _up.urljoin(base_url, src)
+                # HTTP(S) base => join as URLs
+                elif re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', base_url):
+                    resolved = _up.urljoin(base_url, src)
+        except Exception:
+            pass
+
+        if re.match(r'^[a-zA-Z][a-zA-Z0-9+.\-]*://', resolved):
+            try:
+                req = _urr.Request(resolved, headers={"User-Agent": "SimpleEdit/jsmini"})
+                with _urr.urlopen(req, timeout=10) as resp:
+                    raw_bytes = resp.read()
+                    charset = (entry.get('attrs') or {}).get('charset')
+                    if charset:
+                        return raw_bytes.decode(charset, errors='replace'), None
+                    return raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace'), None
+            except Exception as e:
+                return None, f"Failed to fetch {resolved}: {e}"
+
+        # Filesystem path
+        path = resolved
+        try:
+            if not os.path.isabs(path):
+                # If base_url looks like a file path, resolve relative to it
+                if base_url and '://' not in base_url:
+                    base_dir = base_url
+                    # if base_url points to a file, take its directory
+                    if os.path.splitext(base_url)[1]:
+                        base_dir = os.path.dirname(base_url)
+                    path = os.path.normpath(os.path.join(base_dir, path))
+                else:
+                    path = os.path.normpath(os.path.join(os.getcwd(), path))
+            with open(path, 'rb') as fh:
+                raw_bytes = fh.read()
+            charset = (entry.get('attrs') or {}).get('charset') or 'utf-8'
+            return raw_bytes.decode(charset, errors='replace'), None
+        except Exception as e:
+            return None, f"Failed to read {path}: {e}"
+    except Exception as e:
+        return None, str(e)
+
+# ADDITIONAL NOTES FOR THE UPDATED run_scripts FUNCTION
+# ----------------------------------------------------
+# New parameters:
+#   return_dom (bool): when True, returns a dict containing results, optional per-script DOM snapshots,
+#                      and the final document.body.innerHTML ('final_dom').
+#   collect_dom_each (bool): when True, captures body.innerHTML after each script execution (success or failure).
+#
+# Return shapes:
+#   - Legacy mode (return_dom=False): results is a list of {'ok': bool, 'error': str|None}
+#     (replaces previous list of (bool, error) tuples; callers expecting tuple can adapt easily).
+#   - Extended mode (return_dom=True):
+#         {
+#           'results': [...],
+#           'per_script_dom': ['<div...>', ...] | None,
+#           'final_dom': '<div id="demo">hello-text...</div>'
+#         }
+#     Async path returns immediately with the (possibly incomplete) 'results' list plus final_dom=None;
+#     final DOM will be appended asynchronously (worker updates results list and final_dom entry).
+#
+# Host bridging:
+#   - If host_update_cb is supplied, a host object {'setRaw': cb, 'forceRerender': lambda: cb(None)}
+#     is attached early via context['__attachHost'] when available (preferred) or directly
+#     through context['host'] and document['__setHost'] fallback.
+#   - DOM mutations inside jsmini's Element class call host.setRaw(body.innerHTML).
+#
+# Per-script DOM capture:
+#   - Uses _snapshot_dom(ctx) to read current document.body.innerHTML after each script and after errors.
+#
+# Backwards compatibility:
+#   - Existing callers that only check truthiness of first element or iterate results will continue to work,
+#     though tuple unpack (success, error) must be updated to dict access if used.
+#   - To keep strict backward compatibility you can wrap results with:
+#       legacy = [(r['ok'], r['error']) for r in results]
+#     if needed elsewhere.
+#
+# Timer draining unchanged except now we snapshot final DOM after timers complete.
+
+def run_scripts(
+    scripts: list,
+    base_url: Optional[str] = None,
+    log_fn=None,
+    host_update_cb: Optional[Callable[[str], None]] = None,
+    show_console: Optional[bool] = None,
+    run_blocking: bool = False,
+    return_dom: bool = False,
+    collect_dom_each: bool = False,
+):
+    """
+    Execute script entries using jsmini.
+    Console behavior:
+      - Debug messages: "[jsconsole] ..." and "[js_builtins] ..."
+          * If debug is True -> auto-open console and show them
+          * If debug is False -> suppress (no console, no stdout)
+      - Script errors always auto-open the console and print context.
+      - Non-debug logs follow show_console flag or Section1/jsConsoleOnRun setting.
+
+    Other behavior:
+      - Skips non-JS <script> types (module, json, etc.).
+      - Supports data: URLs and local relative paths.
+      - Bounded timer draining after execution (process deferred events / one-shots).
+    """
+    results: list = []
+    per_script_dom: list[str] = []          # optional DOM snapshots per script
+    final_dom_html: Optional[str] = None    # final DOM fragment (document.body.innerHTML)
     try:
         import jsmini
     except Exception as e:
@@ -2072,185 +2258,67 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
             results.append((False, f"jsmini import failed: {e}"))
         return results
 
+    # Settings
     try:
-        actual_show_console = show_console if show_console is not None else get_js_console_default()
+        pref_show_console = get_js_console_default()
     except Exception:
-        actual_show_console = bool(show_console)
+        pref_show_console = False
+    try:
+        debug_pref = get_debug_default()
+    except Exception:
+        debug_pref = False
 
-    on_main = threading.current_thread().name == 'MainThread'
+    # Initial console visibility:
+    # - If debug is enabled, force console visible (to show debug streams)
+    # - Otherwise use explicit arg or persisted setting
+    if show_console is None:
+        actual_show_console = bool(pref_show_console or debug_pref)
+    else:
+        actual_show_console = bool(show_console or debug_pref)
 
-    # If caller is on main thread and not forcing blocking, run asynchronously on a worker
-    if on_main and not run_blocking:
-        def _worker():
-            local_results = []
-            try:
-                # create console if requested (scheduled on UI thread inside helper)
+    def _log_route(s: str, console_requested: bool):
+        """
+        Route logs based on category:
+        - Debug-only: "[jsconsole]" or "[js_builtins]"
+            * debug OFF -> suppress entirely
+            * debug ON  -> send to console (or stdout/log_fn if console not requested)
+        - Others follow console_requested (and may still be forwarded to log_fn).
+        """
+        try:
+            msg = s or ""
+            # For future use: is_jsconsole = "[jsconsole]" in msg
+            is_jsbuiltins = "[js_builtins]" in msg
+            is_jsminirecursion = "[jsmini.recursion]" in msg
+            is_jsminitrace = "[jsmini.trace]" in msg
+            is_jsminiintercept = "[jsmini.intercept]" in msg
+            is_jsminiguard = "[jsmini.guard]" in msg
+            is_debug_line = is_jsbuiltins or is_jsminirecursion or is_jsminitrace or is_jsminiintercept or is_jsminiguard
+
+            # Suppress all debug lines when debug is off
+            if is_debug_line and not debug_pref:
+                return
+
+            # Route
+            if console_requested:
+                _console_append(msg)
+            elif callable(log_fn):
                 try:
-                    if actual_show_console:
-                        _ensure_js_console()
+                    log_fn(msg)
+                except Exception:
+                    try:
+                        print(msg)
+                    except Exception:
+                        pass
+            else:
+                try:
+                    print(msg)
                 except Exception:
                     pass
 
-                # combined logger: writes to console (if available) and to provided log_fn
-                def _combined_log(s: str):
-                    try:
-                        # suppress internal builtins debug output unless debug setting enabled
-                        if not get_debug_default() and "[js_builtins]" in (s or ""):
-                            return
-                        if actual_show_console:
-                            _console_append(s)
-                        elif callable(log_fn):
-                            try:
-                                log_fn(s)
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                print(s)
-                            except Exception:
-                                pass
-                        # always call external log_fn as well if present
-                        if callable(log_fn):
-                            try:
-                                log_fn(s)
-                            except Exception:
-                                pass
-                    except Exception:
-                        try:
-                            print(s)
-                        except Exception:
-                            pass
-
-                # create a shared context so timers/globals persist across scripts
-                ctx = jsmini.make_context(log_fn=_combined_log if (actual_show_console or callable(log_fn)) else None)
-
-                if host_update_cb:
-                    try:
-                        ctx['setRaw'] = host_update_cb
-                        ctx['host'] = {'setRaw': host_update_cb, 'forceRerender': lambda: host_update_cb(None)}
-                    except Exception:
-                        pass
-
-                for idx, s in enumerate(scripts):
-                    try:
-                        src_info = s.get('src') or '<inline>'
-                        _combined_log(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}")
-                        preview = (s.get('inline') or '')[:400] if not s.get('src') else None
-                        if preview:
-                            _combined_log(f"[jsconsole] Inline preview: {preview!r}{'...' if len(s.get('inline') or '')>400 else ''}")
-                    except Exception:
-                        pass
-
-                    if s.get('src'):
-                        src = s['src']
-                        resolved = src
-                        try:
-                            if base_url:
-                                resolved = _up.urljoin(base_url, src)
-                            req = _urr.Request(resolved, headers={"User-Agent": "SimpleEdit/jsmini"})
-                            with _urr.urlopen(req, timeout=10) as resp:
-                                raw_bytes = resp.read()
-                                script_src = raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace')
-                        except Exception as fe:
-                            _combined_log(f"[jsconsole] Failed to fetch {resolved}: {fe}")
-                            local_results.append((False, f"Failed to fetch {resolved}: {fe}"))
-                            continue
-                    else:
-                        script_src = s.get('inline', '') or ''
-
-                    run_src = _strip_leading_license_comment(script_src if 'script_src' in locals() else (s.get('inline') or ''))
-                    if run_src != (script_src if 'script_src' in locals() else (s.get('inline') or '')):
-                        """try:
-                            _console_append("[jsconsole] Stripped leading /*!...*/ license header before execution (common in minified libs).")
-                        except Exception:
-                            pass"""
-                    
-                    try:
-                        jsmini.run_with_interpreter(run_src, ctx)
-                        _combined_log(f"[jsconsole] Script {idx + 1} executed successfully.")
-                    except Exception as rexc:
-                        # capture traceback string (best-effort)
-                        try:
-                            tb_str = _traceback.format_exc()
-                        except Exception:
-                            tb_str = None
-                    
-                        # Primary context from original source (helps identify problematic header/content)
-                        try:
-                            original_src = script_src if 'script_src' in locals() else (s.get('inline') or '')
-                            ctx_primary = _format_js_error_context(original_src, rexc, tb_str)
-                            _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
-                            if ctx_primary:
-                                _console_append("[jsconsole] Error context (from original source, approx):")
-                                for ln in str(ctx_primary).splitlines():
-                                    _console_append("  " + ln)
-                        except Exception:
-                            _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
-                    
-                        # Secondary context from cleaned source (if different) to show where execution actually reached
-                        try:
-                            if run_src and run_src != (original_src if 'original_src' in locals() else ''):
-                                ctx_clean = _format_js_error_context(run_src, rexc, tb_str)
-                                if ctx_clean:
-                                    _console_append("[jsconsole] Error context (from cleaned source, approx):")
-                                    for ln in str(ctx_clean).splitlines():
-                                        _console_append("  " + ln)
-                        except Exception:
-                            pass
-                    
-                        results.append((False, f"Execution error: {rexc}"))
-                        continue
-
-                # run timers after scripts
+            # Optionally forward to external log_fn even when console is used
+            if console_requested and callable(log_fn):
                 try:
-                    _combined_log("[jsconsole] Running timers...")
-                    jsmini.run_timers(ctx)
-                    _combined_log("[jsconsole] Timers run complete.")
-                except Exception as exc:
-                    _combined_log(f"[jsconsole] Timers error: {exc}")
-
-                _combined_log("[jsconsole] All scripts processed.")
-            except Exception as e:
-                try:
-                    _console_append(f"[jsconsole] Unexpected error in async worker: {e}")
-                except Exception:
-                    try:
-                        print(f"[jsconsole] Unexpected error in async worker: {e}")
-                    except Exception:
-                        pass
-            finally:
-                # If a caller later inspects results via side-channel you could persist them somewhere.
-                return
-
-        Thread(target=_worker, daemon=True).start()
-        return [('async', None)]
-
-
-    # Synchronous (blocking) path: run in current thread (used when run_blocking=True or not on main thread)
-    console_created = False
-    if actual_show_console:
-        try:
-            _ensure_js_console()
-            console_created = True
-            _console_append(f"[jsconsole] Opened console for {len(scripts)} script(s).")
-        except Exception:
-            console_created = False
-
-    # combined logger for sync path
-    def _combined_log_sync(s: str):
-        try:
-            if not get_debug_default() and "[js_builtins]" in (s or ""):
-                return
-            if actual_show_console:
-                _console_append(s)
-            if callable(log_fn):
-                try:
-                    log_fn(s)
-                except Exception:
-                    pass
-            if not actual_show_console and not callable(log_fn):
-                try:
-                    print(s)
+                    log_fn(msg)
                 except Exception:
                     pass
         except Exception:
@@ -2259,8 +2327,182 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
             except Exception:
                 pass
 
+    def _drain_timers(ctx, console_flag: bool, label: str):
+        try:
+            max_cycles = 8
+            for i in range(max_cycles):
+                pending = list(ctx.get('_timers', []))
+                non_interval = [t for t in pending if not (isinstance(t, tuple) and len(t) == 2 and t[0] == '__interval__')]
+                if not pending or not non_interval:
+                    break
+                if debug_pref:
+                    _log_route(f"[jsconsole] {label}: draining timers cycle {i+1}, pending={len(pending)} (non-interval={len(non_interval)})", console_flag)
+                before = len(pending)
+                jsmini.run_timers(ctx)
+                after = len(ctx.get('_timers', []))
+                if after >= before and i >= 2:
+                    break
+        except Exception as exc:
+            _log_route(f"[jsconsole] Timers drain error: {exc}", console_flag)
 
-    ctx = jsmini.make_context(log_fn=_combined_log_sync if (actual_show_console or callable(log_fn)) else None)
+    on_main = threading.current_thread().name == 'MainThread'
+
+    def _create_context(console_flag: bool):
+        # Attach log_fn when console is desired or an external log_fn is supplied
+        ctx = jsmini.make_context(
+            log_fn=(lambda s: _log_route(s, True)) if (console_flag or callable(log_fn)) else None
+        )
+        # If caller requested immediate host bridge, wire it now (so early DOM mutations propagate)
+        if host_update_cb:
+            try:
+                host_obj = {
+                    'setRaw': host_update_cb,
+                    'forceRerender': lambda: host_update_cb(None),
+                }
+                # Preferred attach path (provided by jsmini.make_context)
+                if '__attachHost' in ctx and callable(ctx.get('__attachHost')):
+                    ctx['__attachHost'](host_obj)
+                else:
+                    # Fallback: set directly (Element mutation code expects dict host)
+                    ctx['host'] = host_obj
+                    # Best-effort: if document shim exposes internal setter
+                    doc = ctx.get('document')
+                    if isinstance(doc, dict) and callable(doc.get('__setHost')):
+                        doc['__setHost'](host_obj)
+            except Exception:
+                pass
+        return ctx
+
+    def _snapshot_dom(ctx) -> str:
+        """Return current body.innerHTML (safe fallback)."""
+        try:
+            doc = ctx.get('document')
+            if not isinstance(doc, dict):
+                return ''
+            body = doc.get('body')
+            if hasattr(body, 'innerHTML'):
+                return getattr(body, 'innerHTML')
+            # Fallback: serialize textContent if innerHTML not available
+            if hasattr(body, 'textContent'):
+                return html.escape(getattr(body, 'textContent') or '')
+        except Exception:
+            pass
+        return ''
+
+    def _maybe_open_console_if_allowed():
+        if actual_show_console:
+            try:
+                _ensure_js_console()
+            except Exception:
+                pass
+
+    def _auto_open_console_on_error(current_flag: bool) -> bool:
+        """Open console when an error occurs, regardless of setting; return new console flag."""
+        if not current_flag:
+            try:
+                _ensure_js_console()
+            except Exception:
+                pass
+            _log_route("[jsconsole] (Console auto-opened on error)", True)
+            return True
+        return current_flag
+
+    # Async path
+    if on_main and not run_blocking:
+        def _worker():
+            try:
+                # Open console at start if allowed (debug or setting/arg)
+                _maybe_open_console_if_allowed()
+                ctx = _create_context(actual_show_console)
+
+                console_flag = actual_show_console
+                for idx, entry in enumerate(scripts):
+                    try:
+                        attrs = entry.get('attrs') or {}
+                        src_info = entry.get('src') or '<inline>'
+                        if not _should_execute_script(attrs):
+                            _log_route(f"[jsconsole] Skipping non-JS script {idx + 1}/{len(scripts)} - {src_info}", console_flag)
+                            continue
+
+                        _log_route(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}", console_flag)
+                        if entry.get('inline') and not entry.get('src'):
+                            preview = (entry.get('inline') or '')[:400]
+                            if preview:
+                                _log_route(f"[jsconsole] Inline preview: {preview!r}{'...' if len(entry.get('inline') or '') > 400 else ''}", console_flag)
+
+                        script_src, load_err = _load_script_text(entry, base_url)
+                        if load_err:
+                            _log_route(f"[jsconsole] {load_err}", console_flag)
+                            results.append((False, load_err))
+                            continue
+                        if host_update_cb:
+                            try:
+                                ctx['setRaw'] = host_update_cb
+                                ctx['host'] = {'setRaw': host_update_cb, 'forceRerender': lambda: host_update_cb(None)}
+                            except Exception:
+                                pass
+                        run_src = _strip_leading_license_comment(script_src or '')
+                        try:
+                            jsmini.run_with_interpreter(run_src, ctx)
+                            _log_route(f"[jsconsole] Script {idx + 1} executed successfully.", console_flag)
+                        except Exception as rexc:
+                            # Auto-open on error regardless of setting
+                            console_flag = _auto_open_console_on_error(console_flag)
+                            try:
+                                tb_str = _traceback.format_exc()
+                            except Exception:
+                                tb_str = None
+                            try:
+                                ctx_primary = _format_js_error_context(script_src or '', rexc, tb_str)
+                                _log_route(f"[jsconsole] Execution error in script {idx + 1}: {rexc}", console_flag)
+                                if ctx_primary:
+                                    _log_route("[jsconsole] Error context (original):", console_flag)
+                                    for ln in str(ctx_primary).splitlines():
+                                        _log_route("  " + ln, console_flag)
+                            except Exception:
+                                _log_route(f"[jsconsole] Execution error in script {idx + 1}: {rexc}", console_flag)
+                            try:
+                                if run_src and run_src != (script_src or ''):
+                                    ctx_clean = _format_js_error_context(run_src, rexc, tb_str)
+                                    if ctx_clean:
+                                        _log_route("[jsconsole] Error context (cleaned):", console_flag)
+                                        for ln in str(ctx_clean).splitlines():
+                                            _log_route("  " + ln, console_flag)
+                            except Exception:
+                                pass
+                            results.append((False, f"Execution error: {rexc}"))
+                            continue
+                    except Exception as e:
+                        _log_route(f"[jsconsole] Unexpected error running script {idx + 1}: {e}", console_flag)
+
+                _drain_timers(ctx, console_flag, "async")
+                _log_route("[jsconsole] Running timers...", console_flag)
+                jsmini.run_timers(ctx)
+                _log_route("[jsconsole] Timers run complete.", console_flag)
+                final_dom_html = _snapshot_dom(ctx)
+                _log_route("[jsconsole] All scripts processed.", console_flag)
+                if return_dom:
+                    results.append({'final_dom': final_dom_html})
+            except Exception as e:
+                # Errors here should still show in console to surface failures
+                cf = _auto_open_console_on_error(False)
+                _log_route(f"[jsconsole] Unexpected error in async worker: {e}", cf)
+
+        Thread(target=_worker, daemon=True).start()
+        if return_dom:
+            return results, None
+        return results
+    # Synchronous path
+    console_created = False
+    if actual_show_console:
+        try:
+            _ensure_js_console()
+            console_created = True
+            _log_route(f"[jsconsole] Opened console for {len(scripts)} script(s).", True)
+        except Exception:
+            console_created = False
+
+    ctx = _create_context(actual_show_console)
     if host_update_cb:
         try:
             ctx['setRaw'] = host_update_cb
@@ -2271,96 +2513,91 @@ def run_scripts(scripts: list, base_url: Optional[str] = None, log_fn=None, host
         except Exception:
             pass
 
-    for idx, s in enumerate(scripts):
+    console_flag = actual_show_console
+    for idx, entry in enumerate(scripts):
         try:
-            try:
-                src_info = s.get('src') or '<inline>'
-                _combined_log_sync(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}")
-                preview = (s.get('inline') or '')[:400] if not s.get('src') else None
+            attrs = entry.get('attrs') or {}
+            src_info = entry.get('src') or '<inline>'
+            if not _should_execute_script(attrs):
+                _log_route(f"[jsconsole] Skipping non-JS script {idx + 1}/{len(scripts)} - {src_info}", console_flag)
+                results.append((True, None))
+                continue
+
+            _log_route(f"[jsconsole] Running script {idx + 1}/{len(scripts)} - {src_info}", console_flag)
+            if entry.get('inline') and not entry.get('src'):
+                preview = (entry.get('inline') or '')[:400]
                 if preview:
-                    _combined_log_sync(f"[jsconsole] Inline preview: {preview!r}{'...' if len(s.get('inline') or '')>400 else ''}")
-            except Exception:
-                pass
+                    _log_route(f"[jsconsole] Inline preview: {preview!r}{'...' if len(entry.get('inline') or '') > 400 else ''}", console_flag)
 
-            if s.get('src'):
-                src = s['src']
-                resolved = src
-                try:
-                    if base_url:
-                        resolved = _up.urljoin(base_url, src)
-                    req = _urr.Request(resolved, headers={"User-Agent": "SimpleEdit/jsmini"})
-                    with _urr.urlopen(req, timeout=10) as resp:
-                        raw_bytes = resp.read()
-                        script_src = raw_bytes.decode(resp.headers.get_content_charset() or 'utf-8', errors='replace')
-                except Exception as fe:
-                    _combined_log_sync(f"[jsconsole] Failed to fetch {resolved}: {fe}")
-                    results.append((False, f"Failed to fetch {resolved}: {fe}"))
-                    continue
-            else:
-                script_src = s.get('inline', '') or ''
+            script_src, load_err = _load_script_text(entry, base_url)
+            if load_err:
+                _log_route(f"[jsconsole] {load_err}", console_flag)
+                results.append((False, load_err))
+                continue
 
-            run_src = _strip_leading_license_comment(script_src if 'script_src' in locals() else (s.get('inline') or ''))
-            if run_src != (script_src if 'script_src' in locals() else (s.get('inline') or '')):
-                try:
-                    _console_append("[jsconsole] Stripped leading /*!...*/ license header before execution (common in minified libs).")
-                except Exception:
-                    pass
-            
+            run_src = _strip_leading_license_comment(script_src or '')
             try:
                 jsmini.run_with_interpreter(run_src, ctx)
-                _combined_log_sync(f"[jsconsole] Script {idx + 1} executed successfully.")
+                _log_route(f"[jsconsole] Script {idx + 1} executed successfully.", console_flag)
+                results.append({'ok': True, 'error': None})
             except Exception as rexc:
-                # capture traceback string (best-effort)
+                # Auto-open on error regardless of setting
+                console_flag = _auto_open_console_on_error(console_flag)
                 try:
                     tb_str = _traceback.format_exc()
                 except Exception:
                     tb_str = None
-            
-                # Primary context from original source (helps identify problematic header/content)
                 try:
-                    original_src = script_src if 'script_src' in locals() else (s.get('inline') or '')
-                    ctx_primary = _format_js_error_context(original_src, rexc, tb_str)
-                    _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
+                    ctx_primary = _format_js_error_context(script_src or '', rexc, tb_str)
+                    _log_route(f"[jsconsole] Execution error in script {idx + 1}: {rexc}", console_flag)
                     if ctx_primary:
-                        _console_append("[jsconsole] Error context (from original source, approx):")
+                        _log_route("[jsconsole] Error context (original):", console_flag)
                         for ln in str(ctx_primary).splitlines():
-                            _console_append("  " + ln)
+                            _log_route("  " + ln, console_flag)
                 except Exception:
-                    _console_append(f"[jsconsole] Execution error in script {idx + 1}: {rexc}")
-            
-                # Secondary context from cleaned source (if different) to show where execution actually reached
+                    _log_route(f"[jsconsole] Execution error in script {idx + 1}: {rexc}", console_flag)
                 try:
-                    if run_src and run_src != (original_src if 'original_src' in locals() else ''):
+                    if run_src and run_src != (script_src or ''):
                         ctx_clean = _format_js_error_context(run_src, rexc, tb_str)
                         if ctx_clean:
-                            _console_append("[jsconsole] Error context (from cleaned source, approx):")
+                            _log_route("[jsconsole] Error context (cleaned):", console_flag)
                             for ln in str(ctx_clean).splitlines():
-                                _console_append("  " + ln)
+                                _log_route("  " + ln, console_flag)
                 except Exception:
                     pass
-            
-                results.append((False, f"Execution error: {rexc}"))
+                results.append({'ok': False, 'error': f"Execution error: {rexc}"})
+                if collect_dom_each:
+                    per_script_dom.append(_snapshot_dom(ctx))
                 continue
+            if collect_dom_each:
+                per_script_dom.append(_snapshot_dom(ctx))
 
-            try:
-                if console_created:
+            if console_created:
+                try:
                     _bring_console_to_front()
-            except Exception:
-                pass
-
-            results.append((True, None))
+                except Exception:
+                    pass
         except Exception as e:
-            _combined_log_sync(f"[jsconsole] Unexpected error running script {idx + 1}: {e}")
-            results.append((False, str(e)))
+            _log_route(f"[jsconsole] Unexpected error running script {idx + 1}: {e}", console_flag)
+            results.append({'ok': False, 'error': str(e)})
+            if collect_dom_each:
+                per_script_dom.append(_snapshot_dom(ctx))
 
-    try:
-        _combined_log_sync("[jsconsole] Running timers...")
-        jsmini.run_timers(ctx)
-        _combined_log_sync("[jsconsole] Timers run complete.")
-    except Exception as exc:
-        _combined_log_sync(f"[jsconsole] Timers error: {exc}")
+    _drain_timers(ctx, console_flag, "sync")
+    _log_route("[jsconsole] Running timers...", console_flag)
+    jsmini.run_timers(ctx)
+    _log_route("[jsconsole] Timers run complete.", console_flag)
+    final_dom_html = _snapshot_dom(ctx)
+    _log_route("[jsconsole] All scripts processed.", console_flag)
 
-    _combined_log_sync("[jsconsole] All scripts processed.")
+    if return_dom:
+        # Return (results_with_optional_per_script_dom, final_dom_fragment)
+        payload = {
+            'results': results,
+            'per_script_dom': per_script_dom if collect_dom_each else None,
+            'final_dom': final_dom_html
+        }
+        return payload
     return results
 
 def get_hex_color(color_tuple):

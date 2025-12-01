@@ -6,23 +6,18 @@ This test fetches a jQuery build from Google CDN, parses it with jsmini,
 executes it, runs queued timers and performs basic sanity checks.
 """
 from __future__ import annotations
-import sys
 import unittest
-from pathlib import Path
 import urllib.request as _urr
 import urllib.error as _urlerr
 
 # Ensure local package directory is importable so the test remains separate from main code.
-_this_dir = Path(__file__).resolve().parent
-_this_dir_str = str(_this_dir)
-if _this_dir_str not in sys.path:
-    sys.path.insert(0, _this_dir_str)
 
-import jsmini
-
+from PythonApplication1.jsmini import make_context, run_with_interpreter
+import PythonApplication1.jsmini as jsmini
 
 class TestTokenDiagRun(unittest.TestCase):
     def setUp(self):
+        super().setUp()
         # prepare a fresh context with console.log hooked to print
         self.ctx = jsmini.make_context(log_fn=print)
 

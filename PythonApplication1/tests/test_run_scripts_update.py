@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
+from test_base import CleanTestCase
 
 # Ensure this test can import the local `functions` module kept in the same directory.
 _project_root = Path(__file__).resolve().parent.parent
@@ -11,8 +12,9 @@ if _project_root_str not in sys.path:
 import functions as funcs
 
 
-class TestRunScriptsUpdate(unittest.TestCase):
+class TestRunScriptsUpdate(CleanTestCase):
     def setUp(self):
+        super().setUp()
         # load example HTML used by the test
         self.html_path = Path(__file__).resolve().parent / "examples" / "demo.html"
         self.raw = self.html_path.read_text(encoding="utf-8")

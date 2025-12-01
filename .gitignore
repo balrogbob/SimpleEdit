@@ -397,3 +397,5 @@ FodyWeavers.xsd
 /PythonApplication1/test.txt
 /test.txt
 /PythonApplication1/doc/JSON roadmap.md
+/PythonApplication1/doc/test_js_builtins.py
+/PythonApplication1/doc/test_tokendiag_run_test.py

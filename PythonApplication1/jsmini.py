@@ -11,21 +11,29 @@ Usage:
     run_timers(ctx)  # execute scheduled callbacks
 """
 from __future__ import annotations
+import logging
 import re
 import random
 import math
 import html
+import sys
 from html.parser import HTMLParser
 from typing import Any, Dict, List, Optional, Tuple
 try:
+    from . import js_builtins
+except ImportError:
     import js_builtins
+
+try:
+    sys.setrecursionlimit(5000)  # Allow deep recursion for complex JS
 except Exception:
-    js_builtins = None
+    pass  # Ignore if setting fails
+
 # --- Tokenizer --------------------------------------------------------------
 Token = Tuple[str, str]  # (type, value)
 
 _LAST_INTERPRETER = None
-
+JSFUNCTION_REGISTRY: Dict[int, str] = {}
 # -- Token definitions (fixed to accept leading-dot decimals and exponents) --
 TOKEN_SPEC = [
     ('NUMBER',   r'(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?'),   # accepts 1, 1.0, .1, 1., 1e3, .1e-2
@@ -885,77 +893,215 @@ class JSFunction:
             except Exception:
                 self.prototype = {}
 
+        # Debugging aid: stable short descriptor for anonymous functions so logs identify the specific JSFunction object.
+        try:
+            body_head = None
+            if isinstance(self.body, tuple) and len(self.body) > 0:
+                body_head = self.body[0]
+            elif self.body is None:
+                body_head = 'native-body'
+            else:
+                body_head = str(type(self.body))
+            # keep a short body snippet (repr) to help identify creation site when recursion prints
+            try:
+                body_snippet = repr(self.body)
+                if len(body_snippet) > 200:
+                    body_snippet = body_snippet[:200] + "..."
+            except Exception:
+                body_snippet = body_head
+            self._debug_label = f"{self.name or '<anon>'}@{id(self)} params={len(self.params)} body_head={body_head}"
+            # register snippet globally for quick lookup during recursion diagnostics
+            try:
+                JSFUNCTION_REGISTRY[id(self)] = body_snippet
+            except Exception:
+                pass
+        except Exception:
+            self._debug_label = f"{self.name or '<anon>'}@{id(self)}"
+
+    def debug_label(self):
+        """Return a compact debug label for this JSFunction instance."""
+        try:
+            return self._debug_label
+        except Exception:
+            return f"{self.name or '<anon>'}@{id(self)}"
+
+    @staticmethod
+    def _compress_call_stack(cs: List[str], max_run_display: int = 6) -> List[str]:
+        """
+        Compress consecutive repeated frames in a call-stack for clearer logging.
+        """
+        try:
+            if not cs:
+                return []
+            out: List[str] = []
+            last = cs[0]
+            run = 1
+            for e in cs[1:]:
+                if e == last:
+                    run += 1
+                else:
+                    if run > max_run_display:
+                        out.append(f"{last} (repeated {run}x)")
+                    elif run > 1:
+                        out.extend([last] * run)
+                    else:
+                        out.append(last)
+                    last = e
+                    run = 1
+            if run > max_run_display:
+                out.append(f"{last} (repeated {run}x)")
+            elif run > 1:
+                out.extend([last] * run)
+            else:
+                out.append(last)
+            return out
+        except Exception:
+            return cs
+
     def call(self, interpreter, this, args):
         """
-        Invoke this JSFunction.
-
-        interpreter may be:
-          - an Interpreter instance (normal)
-          - a context dict containing an Interpreter under '_interp' (host helpers)
-          - (fallback) missing/incorrectly passed: try module-level _LAST_INTERPRETER
-
-        This function is defensive because native built-ins and host code sometimes
-        call JSFunction.call with different shapes during interop.
+        Invoke this JSFunction with interpreter and JS-like `this`.
+        Includes a deterministic per-function recursion depth guard.
         """
         interp = interpreter
         try:
-            # Common: caller passed a context dict instead of Interpreter
             if not hasattr(interp, '_eval_stmt'):
                 if isinstance(interp, dict):
                     interp = interp.get('_interp', interp)
-                # Some callers stash interpreter on `this` (rare)
                 if not hasattr(interp, '_eval_stmt') and isinstance(this, dict):
                     interp = this.get('_interp', interp)
         except Exception:
             pass
 
-        # Last-resort: use module-level last-interpreter if available.
+        # Last-resort: use module-level last interpreter
         global _LAST_INTERPRETER
         if not hasattr(interp, '_eval_stmt'):
             if _LAST_INTERPRETER is not None and hasattr(_LAST_INTERPRETER, '_eval_stmt'):
                 interp = _LAST_INTERPRETER
 
+        try:
+            if not hasattr(interp, '_eval_stmt'):
+                logger = logging.getLogger('jsmini')
+                caller_repr = repr(interpreter)[:200]
+                logger.warning("JSFunction.call received non-Interpreter interp (type=%s). Caller repr (trimmed): %s",
+                               type(interpreter).__name__, caller_repr)
+        except Exception:
+            pass
+
         if not hasattr(interp, '_eval_stmt'):
             raise RuntimeError(
-                f"JSFunction.call expected Interpreter instance as first arg (or context with '_interp'); "
-                f"got {type(interpreter)!r}"
+                f"JSFunction.call expected Interpreter instance as first arg (or context with '_interp'); got {type(interpreter)!r}"
             )
 
-        # Native implementation takes precedence
+        # Deterministic per-function recursion depth guard
+        fn_id = id(self)
+        depth_limit = int(getattr(interp, '_per_fn_call_threshold', 0) or 0)
+        try:
+            cur_depth = int(getattr(interp, '_per_fn_call_depth', {}).get(fn_id, 0))
+        except Exception:
+            cur_depth = 0
+        try:
+            if not hasattr(interp, '_per_fn_call_depth'):
+                interp._per_fn_call_depth = {}
+            interp._per_fn_call_depth[fn_id] = cur_depth + 1
+            if depth_limit and (cur_depth + 1) > depth_limit:
+                try:
+                    cs = list(getattr(interp, '_call_stack', []))
+                    cs_comp = self._compress_call_stack(cs)
+                    import sys, re
+                    print(f"[jsmini.recursion] Per-function recursion depth limit hit for {self.debug_label()} (depth={cur_depth + 1}). Call stack:", file=sys.stderr)
+                    for line in cs_comp[-80:]:
+                        m = re.search(r'@(\d+)', line)
+                        if m:
+                            try:
+                                fn_id_m = int(m.group(1))
+                                snip = JSFUNCTION_REGISTRY.get(fn_id_m)
+                                if snip:
+                                    print(f"  {line} -> snippet: {snip!r}", file=sys.stderr)
+                                    continue
+                            except Exception:
+                                pass
+                        print(f"  {line}", file=sys.stderr)
+                except Exception:
+                    pass
+                raise RuntimeError(f"Per-function recursion limit hit for {self.debug_label()} (count/depth={cur_depth + 1})")
+        except RuntimeError:
+            try:
+                d = interp._per_fn_call_depth.get(fn_id, 1)
+                if d <= 1:
+                    interp._per_fn_call_depth.pop(fn_id, None)
+                else:
+                    interp._per_fn_call_depth[fn_id] = d - 1
+            except Exception:
+                pass
+            raise
+        except Exception:
+            pass
+
+        # Native implementation
         if self.native_impl is not None:
             try:
+                try:
+                    if hasattr(interp, '_per_fn_call_counts'):
+                        interp._per_fn_call_counts[fn_id] = interp._per_fn_call_counts.get(fn_id, 0) + 1
+                except Exception:
+                    pass
                 return self.native_impl(interp, this, list(args or ()))
             except ReturnExc as r:
                 return r.value
+            except JSError as je:
+                raise je
             except Exception:
-                return undefined
+                try:
+                    return getattr(interp, '_get_interp_undefined', lambda: None)()
+                except Exception:
+                    return None
+            finally:
+                # decrement depth
+                try:
+                    d = getattr(interp, '_per_fn_call_depth', {}).get(fn_id, 1)
+                    if d <= 1:
+                        interp._per_fn_call_depth.pop(fn_id, None)
+                    else:
+                        interp._per_fn_call_depth[fn_id] = d - 1
+                except Exception:
+                    pass
 
-        # Scripted function execution
+        # Scripted function
         local = Env(self.env)
-        # bind `this` into the function local scope
         local.set_local('this', this)
         for i, p in enumerate(self.params):
             local.set_local(p, args[i] if i < len(args) else undefined)
         if self.name:
             local.set_local(self.name, self)
 
-        # push function name onto interpreter call-stack (for diagnostics)
-        fn_label = self.name or '<anon>'
+        fn_label = self.debug_label()
         try:
-            # ensure interpreter has call-stack attributes
             if not hasattr(interp, '_call_stack'):
                 interp._call_stack = []
-            # If the JS call stack grows very large, fail fast with a clear diagnostic
-            # rather than rely on Python RecursionError. Threshold chosen conservatively.
+            max_depth = getattr(interp, '_max_js_call_depth', 0)
             try:
                 current_depth = len(interp._call_stack)
             except Exception:
                 current_depth = 0
-            if current_depth > 400:
+            if max_depth and current_depth > max_depth:
                 try:
                     cs = list(interp._call_stack)
-                    import traceback, sys
-                    print(f"[jsmini.recursion] Deep JS call stack detected (len={len(cs)}): {cs}", file=sys.stderr)
+                    cs_comp = self._compress_call_stack(cs)
+                    import sys, re
+                    print(f"[jsmini.recursion] Deep JS call stack detected (len={len(cs)}). Top frames:", file=sys.stderr)
+                    for line in cs_comp[-50:]:
+                        m = re.search(r'@(\d+)', line)
+                        if m:
+                            try:
+                                fn_id_m = int(m.group(1))
+                                snip = JSFUNCTION_REGISTRY.get(fn_id_m)
+                                if snip:
+                                    print(f"  {line} -> snippet: {snip!r}", file=sys.stderr)
+                                    continue
+                            except Exception:
+                                pass
+                        print(f"  {line}", file=sys.stderr)
                 except Exception:
                     pass
                 raise RuntimeError(f"Deep JS recursion detected; call_stack (top->bottom): {getattr(interp, '_call_stack', None)}")
@@ -963,9 +1109,56 @@ class JSFunction:
         except Exception:
             pass
 
+        try:
+            try:
+                try:
+                    if hasattr(interp, '_per_fn_call_counts'):
+                        interp._per_fn_call_counts[fn_id] = interp._per_fn_call_counts.get(fn_id, 0) + 1
+                except Exception:
+                    pass
+                return interp._eval_stmt(self.body, local, this)
+            except ReturnExc as r:
+                return r.value
+            except RecursionError:
+                try:
+                    cs = getattr(interp, '_call_stack', None) or []
+                    cs_comp = self._compress_call_stack(list(cs))
+                    import traceback, sys, re
+                    print(f"[jsmini.recursion] RecursionError in JSFunction {self.debug_label()}; call_stack (top->bottom):", file=sys.stderr)
+                    for line in cs_comp[-100:]:
+                        m = re.search(r'@(\d+)', line)
+                        if m:
+                            try:
+                                fn_id_m = int(m.group(1))
+                                snip = JSFUNCTION_REGISTRY.get(fn_id_m)
+                                if snip:
+                                    print(f"  {line} -> snippet: {snip!r}", file=sys.stderr)
+                                    continue
+                            except Exception:
+                                pass
+                        print(f"  {line}", file=sys.stderr)
+                    traceback.print_exc()
+                except Exception:
+                    pass
+                raise
+        finally:
+            # pop call-stack and decrement per-function depth
+            try:
+                if hasattr(interp, '_call_stack') and interp._call_stack:
+                    interp._call_stack.pop()
+            except Exception:
+                pass
+            try:
+                d = getattr(interp, '_per_fn_call_depth', {}).get(fn_id, 1)
+                if d <= 1:
+                    interp._per_fn_call_depth.pop(fn_id, None)
+                else:
+                    interp._per_fn_call_depth[fn_id] = d - 1
+            except Exception:
+                pass
+
     def __repr__(self):
-        return f"<JSFunction {self.name or '<anon>'}>"
-    
+        return f"<JSFunction {self.name or '<anon>'}>"    
 class ReturnExc(Exception):
     def __init__(self, value):
         self.value = value
@@ -976,39 +1169,51 @@ class Interpreter:
         if globals_map:
             for k, v in globals_map.items():
                 self.global_env.set_local(k, v)
-        # runtime instrumentation: counters and call stack to diagnose hangs
-        # sensible default; increase if your script legitimately runs many statements
         self._exec_count = 0
         self._exec_limit = 200_000
         self._call_stack: List[str] = []
-        self._trace = False  # set True for periodic progress prints
-        # record last-created interpreter so JSFunction.call can recover it as a best-effort fallback
+        self._trace = False
+        self._max_js_call_depth = 2000
+        self._context: Optional[Dict[str, Any]] = globals_map if isinstance(globals_map, dict) else None
+        # New: per-function reentrancy guard counters
+        # - _per_fn_call_counts: total calls (legacy counter kept for diagnostics)
+        # - _per_fn_call_depth: current call depth per function (used to guard recursion deterministically)
+        self._per_fn_call_counts: Dict[int, int] = {}
+        self._per_fn_call_depth: Dict[int, int] = {}
+        # Threshold at which we abort with a descriptive RuntimeError.
+        # Applied to the per-function DEPTH so we stop before Python recursion blows up.
+        self._per_fn_call_threshold: int = 1500  # Increased from 1200 for jQuery
+
         global _LAST_INTERPRETER
         try:
             _LAST_INTERPRETER = self
         except Exception:
             _LAST_INTERPRETER = None
 
+        """Prototype-aware property lookup with cycle detection. Returns `undefined` when not found."""
     def _prop_get(self, obj, key):
-        """Prototype-aware property lookup. Returns `undefined` when not found."""
         try:
-            # dict-like JS objects: walk __proto__ chain
+            # dict-like JS objects: walk __proto__ chain with cycle detection
             if isinstance(obj, dict):
-                # normalize key to string for dict-like JS objects (JS property keys are strings)
                 lookup_key = self._norm_prop_key(key)
                 cur = obj
+                seen = set()  # Track visited object IDs to detect cycles
+                
                 while cur is not None:
+                    obj_id = id(cur)
+                    if obj_id in seen:
+                        # Cycle detected in prototype chain - return undefined to break loop
+                        return undefined
+                    seen.add(obj_id)
+                    
                     if lookup_key in cur:
                         return cur[lookup_key]
                     cur = cur.get('__proto__', None)
                 return undefined
-
-            # JSFunction instances: prefer prototype lookup (JS semantics).
-            # Expose JS-level properties that were attached to the function instance
-            # (e.g. static methods like Object.create). Do not expose Python methods.
+    
+            # JSFunction instances: prefer prototype lookup (JS semantics)
             if isinstance(obj, JSFunction):
                 try:
-                    # instance prototype (per-instance) then class-level prototype
                     proto = getattr(obj, 'prototype', None)
                     if isinstance(proto, dict) and key in proto:
                         return proto[key]
@@ -1020,26 +1225,21 @@ class Interpreter:
                         return cls_proto[key]
                 except Exception:
                     pass
-                # If a JSFunction instance has an attribute that is itself a JSFunction
-                # (or a non-callable JS-value assigned on the instance), return it.
-                # This preserves the ability to attach static helpers via setattr(obj, name, JSFunction(...))
                 try:
                     attr = getattr(obj, key, undefined)
                     if isinstance(attr, JSFunction):
                         return attr
-                    # return non-callable instance attributes (primitives, dicts, lists)
                     if attr is not undefined and not callable(attr):
                         return attr
                 except Exception:
                     pass
-                # fallthrough: do not expose Python methods or other callables
                 return undefined
-
-            # fallback for host/python objects: use attribute
+    
+            # fallback for host/python objects
             return getattr(obj, key, undefined)
         except Exception:
             return undefined
-
+    
     def _prop_set(self, obj, key, value):
         """Interpreter method: set own property on object (no prototype walk)."""
         try:
@@ -1050,10 +1250,10 @@ class Interpreter:
             return True
         except Exception:
             return False
-
+     
     def _norm_prop_key(self, key):
         """Normalize a property key to the string form used for dict-backed JS objects.
-
+     
         JS semantics: property keys are strings. Numeric indices like 0 or 0.0 should map to "0".
         This helper:
          - converts integral floats to integer string (0.0 -> "0")
@@ -1083,16 +1283,39 @@ class Interpreter:
                 return str(key)
             except Exception:
                 return ""
-
+     
     def run_ast(self, ast):
         return self._eval_prog(ast, self.global_env)
-
+     
     def _eval_prog(self, node, env):
         assert node[0] == 'prog'
         res = undefined
+
+        jquery_each_depth = getattr(self, '_jquery_each_depth', 0)
+
         try:
             for st in node[1]:
                 res = self._eval_stmt(st, env, None)
+                
+                # **GUARD: Detect runaway jQuery.each recursion**
+                try:
+                    # Check if we're stuck in a loop calling the same function repeatedly
+                    if hasattr(self, '_call_stack') and len(self._call_stack) > 100:
+                        # Count consecutive identical frames
+                        stack = self._call_stack[-100:]
+                        if len(set(stack)) == 1:  # All frames are identical
+                            # Extract function being called
+                            frame = stack[0]
+                            if 'each' in frame.lower():
+                                raise RuntimeError(
+                                    f"Detected infinite jQuery.each() recursion loop. "
+                                    f"Stack has {len(stack)} identical frames: {frame}"
+                                )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+                    
             return res
         except BreakExc:
             # Uncaught `break` bubbled out of any loop context -> provide a clear runtime error.
@@ -1100,7 +1323,7 @@ class Interpreter:
         except ContinueExc:
             # Uncaught `continue` bubbled out of any loop context -> provide a clear runtime error.
             raise RuntimeError("Uncaught 'continue' (continue statement not inside loop)")
-
+     
     def _eval_stmt(self, node, env: Env, this):
         # lightweight execution watchdog to diagnose runaway execution/hangs.
         # Increment the interpreter-wide counter and emit a helpful error when the
@@ -1113,7 +1336,7 @@ class Interpreter:
                 self._exec_count = 1
             except Exception:
                 pass
-
+     
         # optional periodic trace output
         try:
             if getattr(self, '_trace', False) and (self._exec_count % 50000) == 0:
@@ -1121,7 +1344,7 @@ class Interpreter:
                 print(f"[jsmini.trace] executed={self._exec_count} call_stack={cs}")
         except Exception:
             pass
-
+     
         # abort with diagnostic when execution count passes configured limit
         try:
             if getattr(self, '_exec_limit', 0) and self._exec_count > self._exec_limit:
@@ -1135,7 +1358,7 @@ class Interpreter:
         except Exception:
             # ignore instrumentation failures (do not alter semantics)
             pass
-
+     
         typ = node[0]
         typ = node[0]
         if typ == 'empty':
@@ -1214,7 +1437,7 @@ class Interpreter:
                         continue
                     raise
             return res
-
+     
         # do-while loop support (handles labeled break/continue robustly)
         if typ == 'do':
             _, body, cond = node
@@ -1240,7 +1463,7 @@ class Interpreter:
                 except Exception:
                     break
             return res
-
+     
         # for-in evaluator (handles labeled break/continue)
         if typ == 'for_in':
             _, lhs, rhs, body = node
@@ -1251,13 +1474,13 @@ class Interpreter:
                     self._eval_stmt(lhs, local, this)
                 except Exception:
                     pass
-
+     
             res = undefined
             try:
                 target = self._eval_expr(rhs, local, this)
             except Exception:
                 target = None
-
+     
             # Collect enumerable keys (best-effort)
             keys: List[str] = []
             try:
@@ -1277,7 +1500,7 @@ class Interpreter:
                         keys = []
             except Exception:
                 keys = []
-
+     
             for k in keys:
                 try:
                     # assign iteration variable according to lhs shape
@@ -1319,7 +1542,7 @@ class Interpreter:
                     # per-iteration errors should not abort entire loop
                     continue
             return res
-
+     
         # classic C-style for(init; cond; post)
         if typ == 'for':
             _, init, cond, post, body = node
@@ -1354,7 +1577,7 @@ class Interpreter:
                         # post-expression errors ignored (best-effort)
                         pass
             return res
-
+     
         if typ == 'switch':
             _, expr, cases, default_block = node
             val = self._eval_expr(expr, env, this)
@@ -1401,7 +1624,7 @@ class Interpreter:
         if typ == 'expr':
             return self._eval_expr(node[1], env, this)
         raise RuntimeError(f"Unknown stmt {typ}")
-
+     
     def _eval_expr(self, node, env: Env, this):
         t = node[0]
         if t == 'num': return node[1]
@@ -1412,7 +1635,7 @@ class Interpreter:
         if t == 'bool': return node[1]
         if t == 'null': return None
         if t == 'undef': return undefined
-
+     
         # delete unary operator: best-effort removal of property; returns True/False like JS (non-strict)
         if t == 'delete':
             _, target_node = node
@@ -1459,7 +1682,7 @@ class Interpreter:
                     return False
             except Exception:
                 return True
-
+     
         if t == 'typeof':
             _, expr_node = node
             try:
@@ -1482,7 +1705,7 @@ class Interpreter:
                 return 'function'
             # arrays / dicts / objects / Element -> object
             return 'object'
-
+     
         # void unary: evaluate operand for side-effects, always return undefined
         if t == 'void':
             _, expr_node = node
@@ -1493,7 +1716,7 @@ class Interpreter:
                 # swallow errors (best-effort like other unary handlers)
                 pass
             return undefined
-
+     
         # Helpers for ++/-- handling (unchanged) ...
         def _to_number(v):
             if v is undefined or v is None:
@@ -1509,7 +1732,7 @@ class Interpreter:
                     return float(str(v))
                 except Exception:
                     return float('nan')
-
+     
         def _get_target_value(target_node):
             # identifier
             if target_node[0] == 'id':
@@ -1538,7 +1761,7 @@ class Interpreter:
                     return undefined
             # fallback: evaluate normally
             return self._eval_expr(target_node, env, this)
-
+     
         def _set_target_value(target_node, value):
             if target_node[0] == 'id':
                 name = target_node[1]
@@ -1561,7 +1784,7 @@ class Interpreter:
                 except Exception:
                     return False
             return False
-
+     
         # prefix ++/--
         if t == 'preop':
             _, op, target = node
@@ -1571,7 +1794,7 @@ class Interpreter:
             newv = nold + delta
             _set_target_value(target, newv)
             return newv
-
+     
         # postfix ++/--
         if t == 'postop':
             _, op, target = node
@@ -1582,17 +1805,24 @@ class Interpreter:
             _set_target_value(target, newv)
             # Return original value (best-effort)
             return old
-
+     
         # Function expression (returns a JSFunction closure)
         if t == 'func':
             _, name, params, body = node
             fn = JSFunction(params, body, env, name)
             return fn
-
+     
         # Object literal: ('obj', [(key, val_node), ...])
         if t == 'obj':
             _, props = node
             out = {}
+            # Link to Object.prototype for proper inheritance
+            try:
+                obj_ctor = self._context.get('Object') if self._context else None
+                if obj_ctor and hasattr(obj_ctor, 'prototype'):
+                    out['__proto__'] = obj_ctor.prototype
+            except Exception:
+                pass
             for k, v_node in props:
                 try:
                     # evaluate property value (best-effort)
@@ -1601,11 +1831,18 @@ class Interpreter:
                     val = undefined
                 out[str(k)] = val
             return out
-
+     
         # Array literal: ('arr', [elem_node, ...]) - supports holes represented as ('undef', None)
         if t == 'arr':
             _, elems = node
-            out: Dict[str, Any] = {}
+            out: Dict[str, Any] = {'__proto__': None}
+            # Try to get Arr.prototype from context
+            try:
+                arr_ctor = self._context.get('Array') if self._context else None
+                if arr_ctor and hasattr(arr_ctor, 'prototype'):
+                    out['__proto__'] = arr_ctor.prototype
+            except Exception:
+                pass
             idx = 0
             for el in elems:
                 # sparse array hole
@@ -1620,7 +1857,7 @@ class Interpreter:
                 idx += 1
             out['length'] = idx
             return out
-
+     
         if t == 'id':
             name = node[1]
             try:
@@ -1654,7 +1891,7 @@ class Interpreter:
             if self._is_truthy(c):
                 return self._eval_expr(true_node, env, this)
             return self._eval_expr(false_node, env, this)
-
+     
         # Comma operator: evaluate left (for side-effects) then return right
         if t == 'comma':
             _, left_node, right_node = node
@@ -1664,7 +1901,7 @@ class Interpreter:
                 # best-effort continue to evaluate right
                 pass
             return self._eval_expr(right_node, env, this)
-
+     
         if t == 'unary':
             _, op, x = node
             v = self._eval_expr(x, env, this)
@@ -1688,7 +1925,7 @@ class Interpreter:
                 iv = _to_int32(v)
                 res = (~iv) & 0xFFFFFFFF
                 return res - 0x100000000 if res & 0x80000000 else res
-
+     
         if t == 'bin':
             _, op, a, b = node
             # short-circuit logical operators with JS-like truthiness and short-circuit semantics
@@ -1704,7 +1941,7 @@ class Interpreter:
                 return self._eval_expr(b, env, this)
             lhs = self._eval_expr(a, env, this)
             rhs = self._eval_expr(b, env, this)
-
+     
             # Bitwise operations: ToInt32 semantics (best-effort)
             def _to_int32_local(x):
                 try:
@@ -1716,7 +1953,7 @@ class Interpreter:
                         n = 0
                 n = n & 0xFFFFFFFF
                 return n - 0x100000000 if n & 0x80000000 else n
-
+     
             if op == '&' or op == '|' or op == '^':
                 ai = _to_int32_local(lhs)
                 bi = _to_int32_local(rhs)
@@ -1730,12 +1967,84 @@ class Interpreter:
                 r = r & 0xFFFFFFFF
                 return r - 0x100000000 if r & 0x80000000 else r
 
+            if op in ('<<', '>>', '>>>'):
+                ai = _to_int32_local(lhs)
+                bi = _to_int32_local(rhs) & 0x1F  # Mask to 5 bits (JS spec)
+                
+                if op == '<<':
+                    r = (ai << bi) & 0xFFFFFFFF
+                elif op == '>>':
+                    # Signed right shift
+                    if ai & 0x80000000:
+                        r = (ai >> bi) | ~(0xFFFFFFFF >> bi)
+                    else:
+                        r = ai >> bi
+                else:  # '>>>'
+                    # Unsigned right shift
+                    r = (ai & 0xFFFFFFFF) >> bi
+                
+                return r - 0x100000000 if r & 0x80000000 else r
+            
             return self._apply_bin(op, lhs, rhs)
-
+     
         if t == 'assign':
             _, left, right = node
             r = self._eval_expr(right, env, this)
-            # left can be id or get (property)
+            
+            # **NEW: Intercept jQuery.each assignment and replace with native implementation**
+            try:
+                # Detect if we're assigning to jQuery.each or $.each
+                is_jquery_each_assignment = False
+                target_obj = None
+                
+                if left[0] == 'get':
+                    # Assignment to property: obj.prop or obj['prop']
+                    target_node = left[1]
+                    prop_node = left[2]
+                    
+                    # Get property name
+                    if prop_node[0] == 'id':
+                        prop_name = prop_node[1]
+                    else:
+                        prop_name = self._eval_expr(prop_node, env, this)
+                    
+                    # Check if property is 'each'
+                    if str(prop_name) == 'each':
+                        # Evaluate the target object
+                        target_obj = self._eval_expr(target_node, env, this)
+                        
+                        # Check if target is jQuery or $ (stored in global context)
+                        try:
+                            jquery_obj = self.global_env.vars.get('jQuery')
+                            dollar_obj = self.global_env.vars.get('$')
+                            
+                            if (isinstance(target_obj, dict) and 
+                                'fn' in target_obj and  # jQuery.fn exists
+                                'extend' in target_obj):  # jQuery.extend exists
+                                is_jquery_each_assignment = True
+                        except Exception:
+                            pass
+                
+                # If assigning to jQuery.each or $.each, replace with our native implementation
+                if is_jquery_each_assignment and target_obj is not None:
+                    # Import the native implementation from js_builtins
+                    try:
+                        # Get the native jQuery.each from context (registered by js_builtins)
+                        native_jquery = self._context.get('jQuery') if self._context else None
+                        if native_jquery and isinstance(native_jquery, dict):
+                            native_each = native_jquery.get('each')
+                            if native_each:
+                                # Override jQuery's each with our native version
+                                if isinstance(target_obj, dict):
+                                    target_obj['each'] = native_each
+                                print(f"[jsmini.intercept] Replaced jQuery.each with native implementation")
+                                return native_each  # Return the native function, not jQuery's
+                    except Exception as e:
+                        print(f"[jsmini.intercept] Failed to replace jQuery.each: {e}")
+            except Exception:
+                pass  # Fall through to normal assignment
+            
+            # Normal assignment continues...
             if left[0] == 'id':
                 name = left[1]
                 env.set(name, r)
@@ -1749,14 +2058,14 @@ class Interpreter:
                     key = self._eval_expr(prop_node, env, this)
                 try:
                     if isinstance(target, dict):
-                        target[key] = r
+                        target[self._norm_prop_key(key)] = r
                     else:
                         setattr(target, key, r)
                 except Exception:
                     pass
                 return r
             raise RuntimeError("Invalid assignment target")
-
+     
         if t == 'get':
             _, target_node, prop_node = node
             obj = self._eval_expr(target_node, env, this)
@@ -1769,41 +2078,94 @@ class Interpreter:
                 return self._prop_get(obj, key)
             except Exception:
                 return undefined
-
+     
         if t == 'call':
             _, callee_node, args_nodes = node
-
-            # member call: callee_node can be ('get', target, prop)
+     
             receiver = None
             fn_val = None
             if isinstance(callee_node, tuple) and callee_node[0] == 'get':
-                # evaluate receiver object
                 receiver = self._eval_expr(callee_node[1], env, this)
                 prop_node = callee_node[2]
                 if prop_node[0] == 'id':
                     fn_val = self._prop_get(receiver, prop_node[1])
+                    if prop_node[1] == 'each' and isinstance(fn_val, JSFunction):
+                        # Check if we're already deep in this specific function
+                        fn_id = id(fn_val)
+                        try:
+                            depth = self._per_fn_call_depth.get(fn_id, 0)
+                            # jQuery's each should never recurse more than 2-3 levels
+                            if depth > 100:
+                                print(f"[jsmini.guard] Blocking deep jQuery.each recursion (depth={depth})")
+                                return undefined  # Break the loop by returning early
+                        except Exception:
+                            pass
                 else:
                     fn_val = self._eval_expr(prop_node, env, this)
             else:
                 fn_val = self._eval_expr(callee_node, env, this)
-
+            
             args = [self._eval_expr(a, env, this) for a in args_nodes]
-
+     
             # JSFunction (scripted/native)
             if isinstance(fn_val, JSFunction):
+                # New: per-function reentrancy guard — count repeated invocations
+                try:
+                    fid = id(fn_val)
+                    cnt = self._per_fn_call_counts.get(fid, 0) + 1
+                    self._per_fn_call_counts[fid] = cnt
+                    if self._per_fn_call_threshold and cnt > self._per_fn_call_threshold:
+                        # Emit compressed call stack and annotate the offending function
+                        try:
+                            cs = list(getattr(self, '_call_stack', []))
+                            cs_comp = JSFunction._compress_call_stack(cs)
+                            import sys, re
+                            print(f"[jsmini.recursion] Per-function call threshold exceeded for {fn_val.debug_label()} (count={cnt}). Call stack:", file=sys.stderr)
+                            for line in cs_comp[-80:]:
+                                m = re.search(r'@(\d+)', line)
+                                if m:
+                                    try:
+                                        fn_id = int(m.group(1))
+                                        snip = JSFUNCTION_REGISTRY.get(fn_id)
+                                        if snip:
+                                            print(f"  {line} -> snippet: {snip!r}", file=sys.stderr)
+                                            continue
+                                    except Exception:
+                                        pass
+                                print(f"  {line}", file=sys.stderr)
+                        except Exception:
+                            pass
+                        raise RuntimeError(f"Per-function recursion limit hit for {fn_val.debug_label()} (count={cnt})")
+                except Exception:
+                    # if guard bookkeeping fails, continue without guard
+                    pass
+     
                 return fn_val.call(self, receiver, args)
-
+     
             # Host python-callable (native helpers)
             if callable(fn_val) and not isinstance(fn_val, JSFunction):
+                try:
+                    mutating_methods = {'appendChild', 'insertBefore', 'replaceChild', 'removeChild', 'setAttribute', 'innerHTML'}
+                    fn_name = getattr(fn_val, '__name__', None)
+                    is_element_method = isinstance(receiver, Element) and fn_name in mutating_methods
+                except Exception:
+                    is_element_method = False
+                if is_element_method and self._context is not None:
+                    try:
+                        timer_args = tuple([receiver] + list(args or ()))
+                        self._context.setdefault('_timers', []).append((fn_val, timer_args))
+                        return undefined
+                    except Exception:
+                        pass
                 try:
                     if receiver is not None:
                         return fn_val(receiver, *args)
                     return fn_val(*args)
                 except TypeError:
                     return fn_val(*args)
-
+     
             return undefined
-
+     
         if t == 'new':
             # node shape: ('new', callee_node)
             # callee_node may itself be a ('call', target, args) when parentheses present.
@@ -1815,11 +2177,11 @@ class Interpreter:
             else:
                 target_node = callee_node
                 args_nodes = []
-
+     
             # Evaluate constructor and arguments
             ctor = self._eval_expr(target_node, env, this)
             args_vals = [self._eval_expr(a, env, this) for a in args_nodes]
-
+     
             # If constructor is a JSFunction, perform JS 'new' semantics:
             # - create a fresh object with its __proto__ set to ctor.prototype
             # - call ctor with that object as `this`
@@ -1837,7 +2199,7 @@ class Interpreter:
                     if isinstance(res, dict) or isinstance(res, JSFunction):
                         return res
                     return new_obj
-
+     
                 # If ctor is a host-callable (unlikely for JS constructors), try calling it.
                 if callable(ctor) and not isinstance(ctor, JSFunction):
                     try:
@@ -1848,11 +2210,11 @@ class Interpreter:
                         pass
                     # best-effort fallback: return a plain object
                     return {}
-
+     
             except Exception:
                 # On error, return undefined sentinel (best-effort)
                 return undefined
-
+     
     def _apply_bin(self, op, a, b):
         # existing arithmetic / comparison handlers...
         try:
@@ -1869,7 +2231,7 @@ class Interpreter:
         except TypeError:
             # fall through to guarded handling below when operands aren't directly comparable
             pass
-
+     
         # 'in' operator: property in object
         if op == 'in':
             try:
@@ -1879,7 +2241,7 @@ class Interpreter:
                 return hasattr(b, key)
             except Exception:
                 return False
-
+     
         # 'instanceof' semantics: walk prototype chain
         if op == 'instanceof':
             try:
@@ -1890,7 +2252,16 @@ class Interpreter:
                         cur = a.get('__proto__', None)
                     else:
                         cur = getattr(a, '__proto__', None)
+                    
+                    # Add cycle detection for prototype chain walk
+                    seen = set()
                     while cur is not None:
+                        cur_id = id(cur)
+                        if cur_id in seen:
+                            # Cycle detected - not an instance
+                            return False
+                        seen.add(cur_id)
+                        
                         if cur is target_proto:
                             return True
                         if isinstance(cur, dict):
@@ -1906,12 +2277,12 @@ class Interpreter:
                 return False
             except Exception:
                 return False
-
+     
         if op in ('==','==='):
             return a == b
         if op in ('!=','!=='):
             return a != b
-
+     
         # Relational comparisons: guard against incompatible Python comparisons (e.g. Undefined)
         if op in ('<', '>', '<=', '>='):
             # If both are strings, perform lexicographic compare (JS does this when both ToPrimitive yield strings)
@@ -1920,7 +2291,7 @@ class Interpreter:
                 if op == '>': return a > b
                 if op == '<=': return a <= b
                 if op == '>=': return a >= b
-
+     
             # JS-like numeric coercion for relation: undefined -> NaN, null -> 0, booleans -> 1/0
             def _relnum(x):
                 if x is undefined:
@@ -1936,7 +2307,7 @@ class Interpreter:
                 except Exception:
                     # non-numeric string / object -> NaN for relation
                     return float('nan')
-
+     
             na = _relnum(a)
             nb = _relnum(b)
             # Any NaN in relational comparison -> false (matches JS behavior where ToNumber(undefined) is NaN)
@@ -1946,15 +2317,15 @@ class Interpreter:
             if op == '>': return na > nb
             if op == '<=': return na <= nb
             if op == '>=': return na >= nb
-
+     
         # fallback comparisons and operators preserved
         if op == '<': return a < b
         if op == '>': return a > b
         if op == '<=': return a <= b
         if op == '>=': return a >= b
-
+     
         return None
-
+     
     def _is_truthy(self, v):
         if v is undefined or v is None: return False
         if isinstance(v, bool): return v
@@ -1962,6 +2333,7 @@ class Interpreter:
         if isinstance(v, str): return v != ''
         if isinstance(v, (list, dict)): return True
         return True
+    
 
 # --- Tiny DOM shim helpers --------------------------------------------------
 # --- Tiny DOM shim helpers --------------------------------------------------
@@ -2005,12 +2377,35 @@ class Element:
     def __init__(self, tag: str):
         self.tagName = tag
         self.attrs: Dict[str, Any] = {}
-        # children is a JSList so JS code can read `.length`
         self.children: JSList = JSList()
         self.id: Optional[str] = None
-        self.parent = None  # parentNode reference for DOM manipulations
-        # simple classList representation (exposes add/remove/contains/toggle)
+        self.parent = None
         self._class_set = set()
+        # Host / document links (set by make_dom_shim or when appended)
+        self._host = None
+        self._owner_document = None
+
+    def _notify_dom_change(self):
+        """
+        Best-effort: when this element (or any descendant) mutates, push updated body HTML
+        through host.setRaw(). Uses ownerDocument['body'].innerHTML for serialization.
+        """
+        try:
+            host = self._host
+            doc = self._owner_document
+            if not host or not isinstance(host, dict):
+                return
+            if not doc or not isinstance(doc, dict):
+                return
+            body = doc.get('body')
+            if not isinstance(body, Element):
+                return
+            set_raw = host.get('setRaw')
+            if callable(set_raw):
+                # Use body.innerHTML (lightweight fragment) instead of full serialization
+                set_raw(body.innerHTML)
+        except Exception:
+            pass
 
     def setAttribute(self, k: str, v: Any) -> None:
         self.attrs[k] = v
@@ -2018,10 +2413,335 @@ class Element:
             self.id = v
         if k == 'class':
             try:
-                # keep classSet in sync with attribute
                 self._class_set = set(str(v).split())
             except Exception:
                 self._class_set = set()
+        self._notify_dom_change()
+
+    def getAttribute(self, k: str) -> Optional[str]:
+        """Return attribute value or None (closest to DOM behavior)."""
+        try:
+            return self.attrs.get(k)
+        except Exception:
+            return None
+
+    def removeAttribute(self, k: str) -> None:
+        try:
+            self.attrs.pop(k, None)
+            if k == 'id':
+                self.id = None
+            if k == 'class':
+                self._class_set = set()
+        except Exception:
+            pass
+        self._notify_dom_change()
+
+    def appendChild(self, child: Any) -> None:
+        try:
+            if isinstance(child, Element):
+                child.parent = self
+                # Propagate host/document into newly attached subtree
+                child._host = self._host
+                child._owner_document = self._owner_document
+            self.children.append(child)
+        except Exception:
+            try:
+                self.children.append(child)
+            except Exception:
+                pass
+        self._notify_dom_change()
+
+    def removeChild(self, child: Any) -> None:
+        try:
+            if isinstance(self.children, JSList):
+                lst = self.children._list
+                if child in lst:
+                    lst.remove(child)
+                    if isinstance(child, Element):
+                        child.parent = None
+            else:
+                if child in self.children:
+                    self.children.remove(child)
+                    if isinstance(child, Element):
+                        child.parent = None
+        except Exception:
+            pass
+        self._notify_dom_change()
+
+    def insertBefore(self, newNode: Any, referenceNode: Any) -> None:
+        try:
+            lst = self.children._list
+            try:
+                idx = lst.index(referenceNode)
+            except ValueError:
+                idx = len(lst)
+            if isinstance(newNode, Element):
+                newNode.parent = self
+                newNode._host = self._host
+                newNode._owner_document = self._owner_document
+            lst.insert(idx, newNode)
+        except Exception:
+            try:
+                self.appendChild(newNode)
+            except Exception:
+                pass
+        self._notify_dom_change()
+
+    def replaceChild(self, newNode: Any, oldNode: Any) -> None:
+        try:
+            lst = self.children._list
+            try:
+                idx = lst.index(oldNode)
+                if isinstance(newNode, Element):
+                    newNode.parent = self
+                    newNode._host = self._host
+                    newNode._owner_document = self._owner_document
+                lst[idx] = newNode
+                if isinstance(oldNode, Element):
+                    oldNode.parent = None
+            except ValueError:
+                if isinstance(newNode, Element):
+                    newNode.parent = self
+                    newNode._host = self._host
+                    newNode._owner_document = self._owner_document
+                lst.append(newNode)
+        except Exception:
+            pass
+        self._notify_dom_change()
+
+    @property
+    def classList(self):
+        el = self
+        def _add(this, *cls_names):
+            try:
+                for nm in cls_names:
+                    el._class_set.add(str(nm))
+                el.attrs['class'] = ' '.join(el._class_set)
+            except Exception:
+                pass
+            el._notify_dom_change()
+        def _remove(this, *cls_names):
+            try:
+                for nm in cls_names:
+                    el._class_set.discard(str(nm))
+                el.attrs['class'] = ' '.join(el._class_set)
+            except Exception:
+                pass
+            el._notify_dom_change()
+        def _contains(this, name):
+            try:
+                return str(name) in el._class_set
+            except Exception:
+                return False
+        def _toggle(this, name, force=None):
+            try:
+                n = str(name)
+                if force is None:
+                    present = n not in el._class_set
+                    if present:
+                        el._class_set.add(n)
+                    else:
+                        el._class_set.remove(n)
+                else:
+                    if bool(force):
+                        el._class_set.add(n); present = True
+                    else:
+                        el._class_set.discard(n); present = False
+                el.attrs['class'] = ' '.join(el._class_set)
+            except Exception:
+                present = False
+            el._notify_dom_change()
+            return present
+        return {
+            'add': lambda *a: _add(None, *a),
+            'remove': lambda *a: _remove(None, *a),
+            'contains': lambda a: _contains(None, a),
+            'toggle': lambda a, f=None: _toggle(None, a, f)
+        }
+
+    def hasAttribute(self, k: str) -> bool:
+        try:
+            return k in self.attrs
+        except Exception:
+            return False
+
+    def addEventListener(self, event: str, handler, useCapture: bool = False) -> None:
+        try:
+            if not hasattr(self, '_listeners'):
+                self._listeners = {}
+            lst = self._listeners.setdefault(event, [])
+            if handler not in lst:  # ← Prevent duplicates
+                lst.append(handler)
+        except Exception:
+            pass
+
+    def removeEventListener(self, event: str, handler=None) -> None:
+        try:
+            if not hasattr(self, '_listeners'):
+                return
+            if handler is None:
+                self._listeners.pop(event, None)
+                return
+            lst = self._listeners.get(event)
+            if not lst:
+                return
+            try:
+                while handler in lst:
+                    lst.remove(handler)
+            except Exception:
+                pass
+            if not lst:
+                self._listeners.pop(event, None)
+        except Exception:
+            pass
+
+    def dispatchEvent(self, ev) -> None:
+        """
+        Dispatch event to stored listeners.
+        - Accepts a string event type or an event object (dict-like).
+        - For JSFunction handlers: enqueue via context timers to avoid synchronous re-entry.
+        - Ensures event.target, event.type, defaultPrevented flag semantics.
+        - RE-ENTRANCY GUARD: Prevents infinite recursion when handlers trigger more events.
+        - BATCH GUARD: Only enqueues each (element, event) pair once per timer drain cycle.
+        """
+        try:
+            # Normalize event object
+            if isinstance(ev, str):
+                ev_obj = {'type': ev, 'defaultPrevented': False, 'cancelBubble': False, 'target': self}
+            elif isinstance(ev, dict):
+                ev_obj = ev
+                try:
+                    if 'type' not in ev_obj or not isinstance(ev_obj.get('type'), str):
+                        ev_obj['type'] = str(ev_obj.get('type', ''))
+                except Exception:
+                    ev_obj['type'] = ''
+                try:
+                    ev_obj.setdefault('defaultPrevented', False)
+                    ev_obj.setdefault('cancelBubble', False)
+                    ev_obj['target'] = self
+                except Exception:
+                    pass
+            else:
+                ev_obj = {'type': str(ev), 'defaultPrevented': False, 'cancelBubble': False, 'target': self}
+    
+            etype = ev_obj.get('type')
+            
+            # **RE-ENTRANCY GUARD**: Check if we're already dispatching this event type on this element
+            dispatch_key = (id(self), etype)
+            
+            # Get or create the global dispatch tracker (lives on _LAST_INTERPRETER context)
+            try:
+                if _LAST_INTERPRETER is not None and hasattr(_LAST_INTERPRETER, '_context'):
+                    ctx = _LAST_INTERPRETER._context
+                elif hasattr(self, '_interp') and getattr(self, '_interp', None) is not None:
+                    ctx = getattr(self, '_interp', None)._context
+                else:
+                    ctx = None
+                    
+                if ctx is not None:
+                    active_dispatches = ctx.setdefault('_active_dispatches', set())
+                    
+                    # If already dispatching this event on this element, SKIP to avoid recursion
+                    if dispatch_key in active_dispatches:
+                        print(f"[Element.dispatchEvent] RE-ENTRY BLOCKED: {etype!r} on element {id(self)}")
+                        return  # ← CRITICAL: Exit immediately
+                    
+                    # Mark as active
+                    active_dispatches.add(dispatch_key)
+                    
+                    # **NEW: BATCH GUARD** - Track which (element, event) pairs have been enqueued this cycle
+                    pending_events = ctx.setdefault('_pending_events', set())
+                    
+                    # If this event is already pending in the queue, don't enqueue again
+                    if dispatch_key in pending_events:
+                        print(f"[Element.dispatchEvent] BATCH DUPLICATE BLOCKED: {etype!r} on element {id(self)} (already in queue)")
+                        active_dispatches.discard(dispatch_key)  # Clean up re-entrancy marker
+                        return  # ← Skip duplicate enqueue
+            except Exception:
+                # Fallback: proceed without guard (safer than blocking valid events)
+                ctx = None
+                active_dispatches = None
+                pending_events = None
+            
+            handlers = getattr(self, '_listeners', {}).get(etype, [])
+    
+            print(f"[Element.dispatchEvent] etype={etype!r}, num_handlers={len(handlers)}, handler_ids={[id(h) for h in handlers]}")
+    
+            for h in list(handlers):
+                print(f"[Element.dispatchEvent] Processing handler id={id(h)}, is_callable={callable(h)}, is_JSFunction={isinstance(h, JSFunction)}")
+                try:
+                    # Plain python callable -> invoke inline
+                    if callable(h) and not isinstance(h, JSFunction):
+                        print(f"[Element.dispatchEvent] Calling Python handler inline")
+                        try:
+                            h(ev_obj)
+                        except Exception as e:
+                            print(f"[Element.dispatchEvent] Python handler raised: {e}")
+                        print(f"[Element.dispatchEvent] Python handler done, continuing...")
+                        continue
+                    
+                    print(f"[Element.dispatchEvent] Handler is JSFunction, enqueuing...")
+    
+                    # JSFunction: enqueue into timers to avoid deep sync recursion
+                    handler_ctx = ctx  # Use the same context we checked earlier
+                    if handler_ctx is None:
+                        try:
+                            if hasattr(self, '_interp') and getattr(self, '_interp', None) is not None:
+                                handler_ctx = getattr(self, '_interp', None)._context
+                        except Exception:
+                            handler_ctx = None
+                    if handler_ctx is None and _LAST_INTERPRETER is not None:
+                        try:
+                            handler_ctx = getattr(_LAST_INTERPRETER, '_context', None)
+                        except Exception:
+                            handler_ctx = None
+    
+                    if handler_ctx is not None:
+                        try:
+                            # **Mark this event as pending before enqueuing**
+                            if pending_events is not None:
+                                pending_events.add(dispatch_key)
+                            
+                            handler_ctx.setdefault('_timers', []).append((h, (ev_obj,)))
+                            print(f"[Element.dispatchEvent] Enqueued handler, queue length now: {len(handler_ctx['_timers'])}")
+                            continue  # ← CRITICAL: Skip direct call!
+                        except Exception:
+                            pass  # Fall through to direct call on enqueue failure
+    
+                    # Last resort: direct call (only if ctx was None)
+                    try:
+                        if isinstance(h, JSFunction):
+                            h.call(_LAST_INTERPRETER, self, [ev_obj])
+                        elif callable(h):
+                            h(ev_obj)
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            # **CLEANUP**: Remove from active dispatches when done
+            try:
+                if ctx is not None and active_dispatches is not None:
+                    active_dispatches.discard(dispatch_key)
+            except Exception:
+                pass
+
+    def matches(self, selector: str) -> bool:
+        """Minimal selector support used by libraries: #id, .class, tag name."""
+        try:
+            sel = (selector or '').strip()
+            if not sel:
+                return False
+            if sel.startswith('#'):
+                return self.id == sel[1:]
+            if sel.startswith('.'):
+                cls = sel[1:]
+                return cls in (self.attrs.get('class') or '').split()
+            return self.tagName.lower() == sel.lower()
+        except Exception:
+            return False
 
     def appendChild(self, child: Any) -> None:
         # keep underlying storage and expose JS-like API
@@ -2167,13 +2887,14 @@ class Element:
         except Exception:
             return ''
 
+
     @textContent.setter
     def textContent(self, val: Any) -> None:
-        """Replace children with a single text node."""
         try:
             self.children = JSList([str(val)])
         except Exception:
             pass
+        self._notify_dom_change()
 
     @property
     def innerHTML(self) -> str:
@@ -2198,31 +2919,137 @@ class Element:
 
     @innerHTML.setter
     def innerHTML(self, html_str: Any) -> None:
-        """
-        innerHTML setter: parse a small, safe subset of HTML into Element/text children.
-        - No script/style execution.
-        - Supports simple tags and text nodes.
-        """
         try:
             raw = str(html_str or '')
             nodes = _parse_inner_html_fragment(raw)
-            # attach parent links for parsed Element nodes
             for n in nodes:
                 if isinstance(n, Element):
                     n.parent = self
+                    n._host = self._host
+                    n._owner_document = self._owner_document
             self.children = JSList(nodes)
         except Exception:
-            # fallback: replace with raw text (safe)
             try:
                 self.children = JSList([str(html_str)])
             except Exception:
                 pass
+        self._notify_dom_change()
+
+    @property
+    def nodeType(self) -> int:
+        """Return DOM node type (1 == Element)."""
+        try:
+            return 1
+        except Exception:
+            return 1
+
+    @property
+    def nodeName(self) -> str:
+        """Return tag name in DOM-style (typically uppercase in many environments)."""
+        try:
+            return (self.tagName or '').upper()
+        except Exception:
+            return (self.tagName or '').upper()
+
+    @property
+    def className(self) -> str:
+        """Reflect the 'class' attribute as a string (get/set)."""
+        try:
+            return str(self.attrs.get('class') or '')
+        except Exception:
+            return ''
+
+    @className.setter
+    def className(self, val: Any) -> None:
+        try:
+            s = '' if val is None else str(val)
+            self.attrs['class'] = s
+            self._class_set = set(s.split())
+        except Exception:
+            pass
+        self._notify_dom_change()
+
+    @property
+    def childNodes(self) -> JSList:
+        """Alias to children; preserves JS-like `.length` semantics."""
+        try:
+            return self.children
+        except Exception:
+            return JSList([])
+
+    @property
+    def ownerDocument(self):
+        """Return owner document if set by make_dom_shim; otherwise None."""
+        return getattr(self, '_owner_document', None)
+
+    def contains(self, other) -> bool:
+        """Return True if `other` is this node or a descendant of this node."""
+        try:
+            if other is None:
+                return False
+            if other is self:
+                return True
+            # walk up parents from `other`
+            cur = getattr(other, 'parent', None)
+            while cur is not None:
+                if cur is self:
+                    return True
+                cur = getattr(cur, 'parent', None)
+            return False
+        except Exception:
+            return False
+
+    def closest(self, selector: str):
+        """
+        Return the closest ancestor (including self) that matches selector.
+        Uses the same simple selector syntax as `matches`.
+        """
+        try:
+            sel = selector or ''
+            cur = self
+            while cur is not None:
+                try:
+                    if isinstance(cur, Element) and cur.matches(sel):
+                        return cur
+                except Exception:
+                    pass
+                cur = getattr(cur, 'parent', None)
+            return None
+        except Exception:
+            return None
+
+    def getElementsByClassName(self, class_name: str):
+        """
+        Return JSList of descendant elements that have the given class name.
+        Mirrors DOM semantics for a single class token (space-separated in the attribute).
+        """
+        try:
+            if not class_name:
+                return JSList([])
+            want = str(class_name)
+            out: List[Any] = []
+
+            def walk(node):
+                try:
+                    if not isinstance(node, Element):
+                        return
+                    classes = (node.attrs.get('class') or '').split()
+                    if want in classes:
+                        out.append(node)
+                    for ch in (node.children if isinstance(node.children, JSList) else []):
+                        walk(ch)
+                except Exception:
+                    pass
+
+            for ch in self.children:
+                walk(ch)
+            return JSList(out)
+        except Exception:
+            return JSList([])
 
     @property
     def classList(self):
-        """Expose a simple classList object with add/remove/contains/toggle methods."""
         el = self
-
         def _add(this, *cls_names):
             try:
                 for nm in cls_names:
@@ -2230,7 +3057,7 @@ class Element:
                 el.attrs['class'] = ' '.join(el._class_set)
             except Exception:
                 pass
-
+            el._notify_dom_change()
         def _remove(this, *cls_names):
             try:
                 for nm in cls_names:
@@ -2238,34 +3065,31 @@ class Element:
                 el.attrs['class'] = ' '.join(el._class_set)
             except Exception:
                 pass
-
+            el._notify_dom_change()
         def _contains(this, name):
             try:
                 return str(name) in el._class_set
             except Exception:
                 return False
-
         def _toggle(this, name, force=None):
             try:
                 n = str(name)
                 if force is None:
-                    if n in el._class_set:
-                        el._class_set.remove(n)
-                        present = False
-                    else:
+                    present = n not in el._class_set
+                    if present:
                         el._class_set.add(n)
-                        present = True
+                    else:
+                        el._class_set.remove(n)
                 else:
                     if bool(force):
                         el._class_set.add(n); present = True
                     else:
                         el._class_set.discard(n); present = False
                 el.attrs['class'] = ' '.join(el._class_set)
-                return present
             except Exception:
-                return False
-
-        # Return a plain dict-like object with callables; JS code will call these via the interpreter.
+                present = False
+            el._notify_dom_change()
+            return present
         return {
             'add': lambda *a: _add(None, *a),
             'remove': lambda *a: _remove(None, *a),
@@ -2381,105 +3205,43 @@ def _parse_inner_html_fragment(src: str) -> List[Any]:
         # fallback: single text node
         return [src]
 
-def make_dom_shim():
+def make_dom_shim(host=None):
     registry: Dict[str, Element] = {}
     root = Element('document')
     body = Element('body')
     root.body = body
 
-    # helper: simple CSS selector matcher (supports "#id", ".class", "tag", "[attr=value]")
-    def _matches(el: Element, selector: str) -> bool:
-        try:
-            selector = selector.strip()
-            if not selector:
-                return False
-            if selector.startswith('#'):
-                return (el.id == selector[1:])
-            if selector.startswith('.'):
-                cls = selector[1:]
-                classes = (el.attrs.get('class') or '').split()
-                return cls in classes
-            # attribute selector [attr=value] or [attr]
-            m = re.match(r'^\[([\w:-]+)(?:=(["\']?)(.*?)\2)?\]$', selector)
-            if m:
-                attr = m.group(1)
-                val = m.group(3)
-                if attr not in el.attrs:
-                    return False if val is not None else False
-                if val is None:
-                    return True
-                return str(el.attrs.get(attr)) == val
-            # tag name
-            return el.tagName.lower() == selector.lower()
-        except Exception:
-            return False
+    # Attach host / document pointers to body
+    body._host = host
+    document = {}  # placeholder until populated
+    body._owner_document = document
 
-    def _query_within_single(root_el: Element, selector: str, many: bool):
-        # Support simple selectors; if selector contains spaces, treat as descendant by splitting and narrowing
+    def _notify_dom_change():
         try:
-            parts = [p.strip() for p in selector.split() if p.strip()]
-            candidates = [root_el]
-            for part in parts:
-                new_candidates = []
-                for c in candidates:
-                    # traverse subtree (breadth-first)
-                    stack = [c]
-                    while stack:
-                        node = stack.pop(0)
-                        for ch in (node.children if isinstance(node.children, JSList) else []):
-                            if isinstance(ch, Element):
-                                if _matches(ch, part):
-                                    new_candidates.append(ch)
-                                stack.append(ch)
-                candidates = new_candidates
-            if many:
-                return JSList(candidates)
-            return candidates[0] if candidates else None
+            if host and isinstance(host, dict):
+                set_raw = host.get('setRaw')
+                if callable(set_raw):
+                    set_raw(body.innerHTML)
         except Exception:
-            return JSList([]) if many else None
+            pass
 
-    def querySelector(sel: str) -> Optional[Element]:
-        # support comma-separated selectors: return first match in selector-list order
+    def _attach(el: Element):
         try:
-            for part in (s.strip() for s in (sel or '').split(',') if s.strip()):
-                found = _query_within_single(body, part, many=False)
-                if found:
-                    return found
-            return None
+            el._host = host
+            el._owner_document = document
         except Exception:
-            return None
-
-    def querySelectorAll(sel: str):
-        # support comma-separated selectors: union of results, preserve order, avoid duplicates
-        try:
-            seen = set()
-            out: List[Any] = []
-            for part in (s.strip() for s in (sel or '').split(',') if s.strip()):
-                res = _query_within_single(body, part, many=True)
-                if not res:
-                    continue
-                for e in list(res._list if isinstance(res, JSList) else []):
-                    # identify elements by id() to avoid Python unhashable Elements - use id()
-                    uid = ('el', id(e))
-                    if uid in seen:
-                        continue
-                    seen.add(uid)
-                    out.append(e)
-            return JSList(out)
-        except Exception:
-            return JSList([])
+            pass
+        return el
 
     def createElement(tag: str) -> Element:
-        return Element(tag)
+        return _attach(Element(tag))
 
     def getElementById(idv: str) -> Optional[Element]:
-        # naive walk
         if body.id == idv:
             return body
         for c in body.children:
             if isinstance(c, Element) and c.id == idv:
                 return c
-            # deep search
             stack = [c] if isinstance(c, Element) else []
             while stack:
                 n = stack.pop(0)
@@ -2491,41 +3253,199 @@ def make_dom_shim():
         return None
 
     def append_to_body(el: Any) -> None:
+        if isinstance(el, Element):
+            _attach(el)
+        body.appendChild(el)
+        _notify_dom_change()
+
+    def querySelector(sel: str) -> Optional[Element]:
+        """Minimal querySelector: supports #id, .class, tag selectors."""
+        try:
+            if not sel:
+                return None
+            sel = sel.strip()
+            if sel.startswith('#'):
+                return getElementById(sel[1:])
+            # For class/tag, do a simple walk (not optimized)
+            if sel.startswith('.'):
+                cls = sel[1:]
+                for el in [body] + list(body.getElementsByClassName(cls)):
+                    if isinstance(el, Element):
+                        return el
+                return None
+            # Tag selector
+            for el in [body] + list(body.getElementsByTagName(sel)):
+                if isinstance(el, Element):
+                    return el
+            return None
+        except Exception:
+            return None
+
+    def querySelectorAll(sel: str):
+        """Minimal querySelectorAll: returns JSList."""
+        try:
+            if not sel:
+                return JSList([])
+            sel = sel.strip()
+            if sel.startswith('.'):
+                return body.getElementsByClassName(sel[1:])
+            return body.getElementsByTagName(sel)
+        except Exception:
+            return JSList([])
+
+    def append_to_body(el: Any) -> None:
         body.appendChild(el)
 
-    # document is a dict (so document['body'] resolves to Element via dict.get in evaluator)
-    document = {
-        'createElement': createElement,
-        'getElementById': getElementById,
-        'querySelector': querySelector,
-        'querySelectorAll': querySelectorAll,
-        'body': body,
-        'appendChild': append_to_body
-    }
-    return document
+    def append_to_body(el: Any) -> None:
+        body.appendChild(el)
 
+
+    # Document-level event helpers (unchanged)
+    def _doc_add_event_listener(ev_type, handler, useCapture: bool = False):
+        try:
+            if ev_type is None:
+                return
+            et = ev_type[2:] if isinstance(ev_type, str) and ev_type.startswith('on') else ev_type
+            if not hasattr(root, '_listeners'):
+                root._listeners = {}
+            listeners = root._listeners.setdefault(et, [])
+            
+            print(f"[_doc_add_event_listener] event={et!r}, handler_id={id(handler)}, already_in_list={handler in listeners}, list_len={len(listeners)}")
+            
+            if handler not in listeners:
+                listeners.append(handler)
+                print(f"[_doc_add_event_listener] ADDED handler, new_len={len(listeners)}")
+            else:
+                print(f"[_doc_add_event_listener] SKIPPED (duplicate)")
+        except Exception as e:
+            print(f"[_doc_add_event_listener] EXCEPTION: {e}")
+
+    def _doc_remove_event_listener(ev_type, handler=None, useCapture: bool = False):
+        try:
+            if ev_type is None:
+                return
+            et = ev_type[2:] if isinstance(ev_type, str) and ev_type.startswith('on') else ev_type
+            if not hasattr(root, '_listeners'):
+                return
+            if handler is None:
+                root._listeners.pop(et, None)
+                return
+            lst = root._listeners.get(et)
+            if not lst:
+                return
+            try:
+                while handler in lst:
+                    lst.remove(handler)
+            except Exception:
+                pass
+            if not lst:
+                root._listeners.pop(et, None)
+        except Exception:
+            pass
+
+    def _doc_attach_event(evt_name, handler):
+        try:
+            if not isinstance(evt_name, str):
+                return
+            name = evt_name[2:] if evt_name.startswith('on') else evt_name
+            _doc_add_event_listener(name, handler, False)
+        except Exception:
+            pass
+
+    def _doc_dispatch_event(ev):
+        print(f"[_doc_dispatch_event] CALLED with ev={ev!r}")
+        try:
+            root.dispatchEvent(ev)
+        except Exception:
+            pass
+
+    # Flexible wrappers that work for both Python and JS callers
+    def _w_create_element(*args):
+        tag = args[1] if len(args) > 1 else args[0] if args else ''
+        return createElement(tag)
+
+    def _w_get_element_by_id(*args):
+        idv = args[1] if len(args) > 1 else args[0] if args else ''
+        return getElementById(idv)
+
+    def _w_append_child(*args):
+        el = args[1] if len(args) > 1 else args[0] if args else None
+        return append_to_body(el)
+
+    def _w_add_event_listener(*args):
+        # args can be (doc, ev_type, handler, useCapture) or (ev_type, handler, useCapture)
+        if len(args) >= 3:
+            # Assume first arg is doc (from JS), rest are actual params
+            return _doc_add_event_listener(args[1], args[2], args[3] if len(args) > 3 else False)
+        elif len(args) >= 2:
+            # Called from Python without doc
+            return _doc_add_event_listener(args[0], args[1], args[2] if len(args) > 2 else False)
+        return None
+
+    def _w_remove_event_listener(*args):
+        if len(args) >= 2:
+            # (doc, ev_type, handler, useCapture) from JS
+            return _doc_remove_event_listener(args[1], args[2] if len(args) > 2 else None, args[3] if len(args) > 3 else False)
+        elif len(args) >= 1:
+            # (ev_type, handler, useCapture) from Python
+            return _doc_remove_event_listener(args[0], args[1] if len(args) > 1 else None, args[2] if len(args) > 2 else False)
+        return None
+
+    def _w_attach_event(*args):
+        if len(args) >= 2:
+            return _doc_attach_event(args[1], args[2] if len(args) > 2 else None)
+        elif len(args) >= 1:
+            return _doc_attach_event(args[0], args[1] if len(args) > 1 else None)
+        return None
+
+    def _w_dispatch_event(*args):
+        print(f"[_w_dispatch_event] CALLED with args={args}")
+        ev = args[1] if len(args) > 1 else args[0] if args else None
+        return _doc_dispatch_event(ev)
+
+    # document is a dict; values are flexible wrappers
+    def _w_query_selector(*args):
+        sel = args[1] if len(args) > 1 else args[0] if args else ''
+        return querySelector(sel)
+
+    def _w_query_selector_all(*args):
+        sel = args[1] if len(args) > 1 else args[0] if args else ''
+        return querySelectorAll(sel)
+
+    document = {
+        'createElement': _w_create_element,
+        'getElementById': lambda *a: getElementById(a[1] if len(a) > 1 else a[0] if a else ''),
+        'querySelector': lambda *a: querySelector(a[1] if len(a) > 1 else a[0] if a else ''),
+        'querySelectorAll': lambda *a: querySelectorAll(a[1] if len(a) > 1 else a[0] if a else ''),
+        'body': body,
+        'appendChild': _w_append_child,
+        'addEventListener': _w_add_event_listener,
+        'removeEventListener': _w_remove_event_listener,
+        'attachEvent': _w_attach_event,
+        'dispatchEvent': _w_dispatch_event,
+        '_notify_dom_change': _notify_dom_change,
+        '__setHost': lambda h: (_set_host(h))
+    }
+    body._owner_document = document
+
+    def _set_host(h):
+        nonlocal host
+        host = h
+        body._host = h
+        document['host'] = h
+        _notify_dom_change()
+
+    if host is not None:
+        _set_host(host)
+
+    return document
 # --- timers / scheduler -----------------------------------------------------
 def make_timers_container():
     return {'_timers': []}  # timers: list of (fn, args)
 
 def run_timers_from_context(context: Dict[str,Any]):
-    """Run queued timers stored in context['_timers'].
-
-    Behavior:
-    - Processes a snapshot of the current timers queue so newly re-queued intervals
-      are not executed in the same run.
-    - Supports plain timers stored as (fn, args).
-    - Supports interval markers stored as ('__interval__', id) where a mapping of
-      active intervals may live in `context['_intervals']`. If an interval id is
-      still active after execution it will be re-queued for the next cycle.
-    - When calling JSFunction instances, prefer the interpreter stored at
-      context['_interp'] or fall back to module-level _LAST_INTERPRETER. If an
-      interpreter is found, ensure it is also stored into context['_interp'] so
-      JSFunction.call can discover it.
-    """
-    # Ensure timers list exists and operate on the actual list in context.
+    """Run queued timers with enhanced guards against infinite loops."""
     timers = context.setdefault('_timers', [])
-    # Prefer interpreter from context; fall back to last-created interpreter.
     interp = context.get('_interp') or _LAST_INTERPRETER
     if interp is not None and context.get('_interp') is None:
         try:
@@ -2533,32 +3453,78 @@ def run_timers_from_context(context: Dict[str,Any]):
         except Exception:
             pass
 
-    # Intervals mapping (optional). js_builtins should store active intervals here
-    # if it wants run_timers to be able to look them up.
     intervals = context.get('_intervals', None)
+    
+    # Enhanced: Track total timer executions across all drain cycles
+    total_executed = context.get('_total_timer_executions', 0)
+    max_total_executions = 10000  # Absolute cap
+    
+    if total_executed >= max_total_executions:
+        raise RuntimeError(
+            f"Timer execution limit exceeded ({total_executed} total executions). "
+            "Possible infinite timer loop detected."
+        )
 
-    # Process a snapshot (initial length) so re-queued intervals are not processed
-    # in this same invocation.
     initial_len = len(timers)
+    executed_count = 0
+    
+    # **NEW GUARD**: Detect runaway queue growth (enqueuing faster than executing)
+    max_growth_per_cycle = 100  # Allow queue to grow by max 100 items per drain
+    
     for _ in range(initial_len):
+        if executed_count >= 1000:  # Per-drain-cycle limit
+            break
+        
+        # **CHECK QUEUE GROWTH**: If queue is growing too fast, abort
+        current_queue_size = len(timers)
+        if current_queue_size > (initial_len + max_growth_per_cycle):
+            raise RuntimeError(
+                f"Timer queue explosion detected: started with {initial_len} timers, "
+                f"now have {current_queue_size} after {executed_count} executions. "
+                "Event handlers are likely enqueuing new events faster than they can be processed."
+            )
+            
+        if not timers:  # Queue emptied early
+            break
+            
         item = timers.pop(0)
         try:
-            # Special interval marker: ('__interval__', tid)
+            def _check_timer_guard(fn_obj):
+                try:
+                    if not isinstance(fn_obj, JSFunction):
+                        return
+                    interp_local = context.get('_interp') or _LAST_INTERPRETER
+                    limit = int(getattr(interp_local, '_per_fn_call_threshold', 0) or 0)
+                    if not limit:
+                        return
+                    counts = context.setdefault('_timer_call_counts', {})
+                    fid = id(fn_obj)
+                    cnt = counts.get(fid, 0) + 1
+                    counts[fid] = cnt
+                    if cnt > limit:
+                        raise RuntimeError(
+                            f"Per-function recursion limit hit for {fn_obj.debug_label()} "
+                            f"(timer-invocations={cnt})"
+                        )
+                except RuntimeError:
+                    raise
+                except Exception:
+                    pass
+
+            # Interval handling
             if isinstance(item, tuple) and len(item) == 2 and item[0] == '__interval__':
                 tid = item[1]
                 if not intervals:
-                    # No interval registry available; ignore marker.
                     continue
                 entry = intervals.get(tid)
                 if not entry:
-                    # interval was cleared
                     continue
-                fn, it_args = entry  # it_args expected to be a sequence/tuple
-                # Ensure interpreter available for JSFunction.call
+                fn, it_args = entry
+                _check_timer_guard(fn)
+                
                 call_interp = interp or _LAST_INTERPRETER
                 if isinstance(fn, JSFunction):
                     if call_interp:
-                        # make sure context has interp for nested JSFunction.call lookup
                         try:
                             if context.get('_interp') is None:
                                 context['_interp'] = call_interp
@@ -2570,14 +3536,14 @@ def run_timers_from_context(context: Dict[str,Any]):
                         fn(*list(it_args or ()))
                     except Exception:
                         pass
-                # If interval still active, re-queue marker for next cycle
                 if tid in intervals:
                     timers.append(('__interval__', tid))
+                executed_count += 1
                 continue
 
-            # Normal timer entry: (fn, args)
+            # Regular timer
             fn, args = item
-            # JSFunction: call with interpreter as required
+            _check_timer_guard(fn)
             if isinstance(fn, JSFunction):
                 call_interp = interp or _LAST_INTERPRETER
                 if call_interp:
@@ -2587,20 +3553,33 @@ def run_timers_from_context(context: Dict[str,Any]):
                     except Exception:
                         pass
                     fn.call(call_interp, None, list(args or ()))
-                else:
-                    # no interpreter available - skip JSFunction invocation
-                    pass
-            # Python callable
             elif callable(fn):
                 try:
                     fn(*list(args or ()))
                 except Exception:
                     pass
-        except Exception:
-            # swallow errors from timer callbacks (best-effort)
+            executed_count += 1
+            
+        except Exception as e:
+            if isinstance(e, RuntimeError) and "recursion limit" in str(e).lower():
+                raise
             pass
+    
+    # Update total execution counter
+    context['_total_timer_executions'] = total_executed + executed_count
+    
+    # **NEW: Clear the pending events batch tracker for next cycle**
+    try:
+        context.pop('_pending_events', None)
+    except Exception:
+        pass
 
 # --- Public helpers ---------------------------------------------------------
+def run_in_interpreter(src: str, interp) -> Any:
+    """Evaluate `src` in an existing Interpreter (preserves variables and function bindings)."""
+    ast = parse(src)
+    return interp.run_ast(ast)
+
 def make_context(log_fn=None):
     """Return a globals dict suitable for Interpreter — pass log_fn to capture console.log."""
     def _log(*args):
@@ -2625,7 +3604,7 @@ def make_context(log_fn=None):
     }
 
     # context - created mutable to allow setTimeout closure reference
-    context_ref: Dict[str,Any] = {
+    context_ref = {
         'console': {'log': _log},
         'Math': Math,
         'document': document,
@@ -2633,6 +3612,18 @@ def make_context(log_fn=None):
         'setTimeout': setTimeout
     }
     context_ref['undefined'] = undefined
+
+        # minimal environment metadata helpful to many libraries (jQuery, gtag)
+    try:
+        # window/globalThis refer to the context dict itself (document already present)
+        context_ref.setdefault('window', context_ref)
+        context_ref.setdefault('globalThis', context_ref)
+        # minimal location object (string fields only)
+        context_ref.setdefault('location', {'href': '', 'protocol': '', 'host': '', 'hostname': '', 'pathname': ''})
+        # navigator stub
+        context_ref.setdefault('navigator', {'userAgent': 'jsmini/0'})
+    except Exception:
+        pass
     # --- Host shims to satisfy common tag runtime checks (avoid tight re-check loops) ---
     # Real environments expose `window.google_tags_first_party` and `google_tag_data`.
     # Provide minimal sane defaults so minified code paths that probe these don't loop.
@@ -2642,40 +3633,15 @@ def make_context(log_fn=None):
 
     # Prefer centralized builtins module; register early so consumers of the context get canonical builtins.
     # Fall back to very small safe stubs when js_builtins is missing or registration fails.
-    try:
-        if js_builtins is not None:
-            js_builtins.register_builtins(context_ref, JSFunction)
-            context_ref["_builtins_registered"] = True
-    except Exception:
-        # Non-fatal fallback: provide minimal Object/Array/JSON so host code that probes these names doesn't crash.
-        try:
-            Obj = JSFunction(params=[], body=None, env=None, name='Object', native_impl=lambda i, t, a: t or {})
-            setattr(Obj, 'create', JSFunction(params=[], body=None, env=None, name='create', native_impl=lambda i, t, a: {'__proto__': a[0] if a else None}))
-            setattr(Obj, 'keys', JSFunction(params=[], body=None, env=None, name='keys', native_impl=lambda i, t, a: {'__proto__': None, 'length': 0}))
-            context_ref.setdefault('Object', Obj)
-        except Exception:
-            pass
-        try:
-            Arr = JSFunction(params=[], body=None, env=None, name='Array', native_impl=lambda i, t, a: t or {})
-            # minimal prototype so `.length` access on arrays created by host code will not raise
-            try:
-                Arr.prototype.setdefault('push', JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda i, t, a: None))
-            except Exception:
-                Arr.prototype['push'] = JSFunction(params=[], body=None, env=None, name='push', native_impl=lambda i, t, a: None)
-            context_ref.setdefault('Array', Arr)
-        except Exception:
-            pass
-        try:
-            context_ref.setdefault('JSON', {
-                'parse': JSFunction(params=[], body=None, env=None, name='JSON.parse', native_impl=lambda i, t, a: None),
-                'stringify': JSFunction(params=[], body=None, env=None, name='JSON.stringify', native_impl=lambda i, t, a: None),
-            })
-        except Exception:
-            pass
-        context_ref["_builtins_registered"] = False
-
-    # expose constructors on global context should already be handled by js_builtins.register_builtins
-    # (or by the tiny fallback above). Return the context.
+    
+   
+    js_builtins.register_builtins(context_ref, JSFunction)
+    context_ref["_builtins_registered"] = True
+    # Helper to set host later (used by run_scripts)
+    context_ref['__attachHost'] = lambda h: (
+        document.get('__setHost') and document['__setHost'](h)
+    )
+    
     return context_ref
 def run(src: str, context: Optional[Dict[str,Any]]=None):
     """Backward-compatible: Parse and execute JS source string in a fresh interpreter with given context dict."""

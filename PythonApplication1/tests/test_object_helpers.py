@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 import unittest
+from test_base import CleanTestCase
 
 # Add parent directory to sys.path so this test can import local modules kept separate from main code.
 _project_root = Path(__file__).resolve().parent.parent
@@ -12,8 +13,9 @@ import jsmini
 from js_builtins import register_builtins
 
 
-class TestObjectHelpers(unittest.TestCase):
+class TestObjectHelpers(CleanTestCase):
     def setUp(self):
+        super().setUp()
         self.ctx = jsmini.make_context()
         # register the project builtins implementation into the context
         register_builtins(self.ctx, jsmini.JSFunction)

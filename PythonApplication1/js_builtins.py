@@ -18,6 +18,13 @@ import importlib
 import math
 import logging
 
+# Define JSError locally to avoid circular import
+class JSError(Exception):
+    """Local JSError class to avoid circular import with jsmini."""
+    def __init__(self, value):
+        self.value = value
+        super().__init__(str(value))
+
 def register_builtins(context: Dict[str, Any], JSFunction):
     # --- Host environment shims (conservative, inert defaults) ---
     # Provide aliases and minimal google_tag* structures so real-world tag code
@@ -259,17 +266,27 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             return context.get("undefined")
 
     def _array_for_each(interp, this, args):
+        """Array.prototype.forEach with stack depth guard."""
         cb = args[0] if args else None
         this_arg = args[1] if len(args) > 1 else None
         if not cb:
             return context.get("undefined")
+        
         length = int(this.get("length", 0) or 0)
         for i in range(length):
             key = str(i)
             if key not in this:
                 continue
             val = this.get(key)
+            
+            # Guard against deep recursion before callback
             if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:  # Conservative limit
+                        raise RuntimeError(f"Array.forEach callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
                 cb.call(interp, this_arg, [val, i, this])
             elif callable(cb):
                 try:
@@ -280,8 +297,9 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 except Exception:
                     pass
         return context.get("undefined")
-
+    
     def _array_map(interp, this, args):
+        """Array.prototype.map with stack depth guard."""
         cb = args[0] if args else None
         this_arg = args[1] if len(args) > 1 else None
         length = int(this.get("length", 0) or 0)
@@ -289,13 +307,22 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         out_index = 0
         if not cb:
             return res
+        
         for i in range(length):
             key = str(i)
             if key not in this:
-                # minimal: skip holes
+                # Skip holes in sparse arrays
                 continue
             val = this.get(key)
+            
+            # Guard against deep recursion before callback
             if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.map callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
                 rv = cb.call(interp, this_arg, [val, i, this])
             elif callable(cb):
                 try:
@@ -308,8 +335,9 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             out_index += 1
         res["length"] = out_index
         return res
-
+    
     def _array_filter(interp, this, args):
+        """Array.prototype.filter with stack depth guard."""
         cb = args[0] if args else None
         this_arg = args[1] if len(args) > 1 else None
         length = int(this.get("length", 0) or 0)
@@ -317,12 +345,21 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         out_index = 0
         if not cb:
             return res
+        
         for i in range(length):
             key = str(i)
             if key not in this:
                 continue
             val = this.get(key)
+            
+            # Guard against deep recursion before callback
             if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.filter callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
                 test = cb.call(interp, this_arg, [val, i, this])
             elif callable(cb):
                 try:
@@ -331,11 +368,212 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                     test = False
             else:
                 test = False
+            
             if interp._is_truthy(test):
                 res[str(out_index)] = val
                 out_index += 1
         res["length"] = out_index
         return res
+    
+    def _array_reduce(interp, this, args):
+        """Array.prototype.reduce with stack depth guard (added for completeness)."""
+        cb = args[0] if args else None
+        length = int(this.get("length", 0) or 0)
+        
+        if not cb:
+            raise JSError("TypeError: undefined is not a function")
+        
+        # Determine initial value
+        has_initial = len(args) > 1
+        if has_initial:
+            accumulator = args[1]
+            start_idx = 0
+        else:
+            # Find first non-hole element
+            accumulator = context.get("undefined")
+            start_idx = 0
+            for i in range(length):
+                key = str(i)
+                if key in this:
+                    accumulator = this.get(key)
+                    start_idx = i + 1
+                    break
+            if accumulator is context.get("undefined"):
+                raise JSError("TypeError: Reduce of empty array with no initial value")
+        
+        # Iterate and reduce
+        for i in range(start_idx, length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # Guard against deep recursion before callback
+            if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.reduce callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
+                accumulator = cb.call(interp, context.get("undefined"), [accumulator, val, i, this])
+            elif callable(cb):
+                try:
+                    accumulator = cb(accumulator, val, i, this)
+                except Exception:
+                    accumulator = context.get("undefined")
+            else:
+                raise JSError("TypeError: callback is not a function")
+        
+        return accumulator
+    
+    def _array_some(interp, this, args):
+        """Array.prototype.some with stack depth guard (added for completeness)."""
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get("length", 0) or 0)
+        
+        if not cb:
+            return False
+        
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # Guard against deep recursion before callback
+            if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.some callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
+                test = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    test = False
+            else:
+                test = False
+            
+            if interp._is_truthy(test):
+                return True
+        
+        return False
+    
+    def _array_every(interp, this, args):
+        """Array.prototype.every with stack depth guard (added for completeness)."""
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get("length", 0) or 0)
+        
+        if not cb:
+            return True
+        
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # Guard against deep recursion before callback
+            if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.every callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
+                test = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    test = False
+            else:
+                test = False
+            
+            if not interp._is_truthy(test):
+                return False
+        
+        return True
+    
+    def _array_find(interp, this, args):
+        """Array.prototype.find with stack depth guard (added for completeness)."""
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get("length", 0) or 0)
+        
+        if not cb:
+            return context.get("undefined")
+        
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # Guard against deep recursion before callback
+            if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.find callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
+                test = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    test = False
+            else:
+                test = False
+            
+            if interp._is_truthy(test):
+                return val
+        
+        return context.get("undefined")
+    
+    def _array_find_index(interp, this, args):
+        """Array.prototype.findIndex with stack depth guard (added for completeness)."""
+        cb = args[0] if args else None
+        this_arg = args[1] if len(args) > 1 else None
+        length = int(this.get("length", 0) or 0)
+        
+        if not cb:
+            return -1
+        
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # Guard against deep recursion before callback
+            if isinstance(cb, JSFunction):
+                try:
+                    call_depth = len(getattr(interp, '_call_stack', []))
+                    if call_depth > 500:
+                        raise RuntimeError(f"Array.findIndex callback stack overflow (depth={call_depth})")
+                except AttributeError:
+                    pass
+                test = cb.call(interp, this_arg, [val, i, this])
+            elif callable(cb):
+                try:
+                    test = cb(this_arg, val, i, this) if this_arg is not None else cb(val, i, this)
+                except Exception:
+                    test = False
+            else:
+                test = False
+            
+            if interp._is_truthy(test):
+                return i
+        
+        return -1
 
     def _array_slice(interp, this, args):
         length = int(this.get("length", 0) or 0)
@@ -449,21 +687,171 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         res["length"] = out_idx
         return res
 
-    # Create constructor and attach prototype methods
+    # Add this to register_builtins() in js_builtins.py, after the Array.prototype methods:
+    
+    def _array_each_jquery_compat(interp, this, args):
+        """
+        jQuery-compatible .each() implementation.
+        Signature: array.each(callback)
+        - callback receives (index, value) (jQuery convention, REVERSED from standard forEach)
+        - returns the array itself (for chaining)
+        """
+        cb = args[0] if args else None
+        if not cb:
+            return this
+        
+        length = int(this.get("length", 0) or 0)
+        for i in range(length):
+            key = str(i)
+            if key not in this:
+                continue
+            val = this.get(key)
+            
+            # jQuery convention: callback(index, value) - REVERSED!
+            if isinstance(cb, JSFunction):
+                try:
+                    # Break on false return (jQuery .each() stops iteration if callback returns false)
+                    result = cb.call(interp, val, [i, val])  # this=element, args=[index, value]
+                    if result is False:  # Explicit False breaks iteration
+                        break
+                except Exception:
+                    pass
+            elif callable(cb):
+                try:
+                    result = cb(i, val)
+                    if result is False:
+                        break
+                except Exception:
+                    pass
+        
+        return this  # Return array for chaining
+    
+    # Register it on Array.prototype
+
+    # Create constructor and attach ALL prototype methods (replace existing block)
     Arr = JSFunction(params=[], body=None, env=None, name="Array", native_impl=_array_ctor)
+    Arr.prototype["each"] = JSFunction(params=[], body=None, env=None, name="each", native_impl=_array_each_jquery_compat)
+    # Mutating methods
     Arr.prototype["push"] = JSFunction(params=[], body=None, env=None, name="push", native_impl=_array_push)
     Arr.prototype["pop"] = JSFunction(params=[], body=None, env=None, name="pop", native_impl=_array_pop)
+    Arr.prototype["splice"] = JSFunction(params=[], body=None, env=None, name="splice", native_impl=_array_splice)
+    
+    # Iteration methods (with stack guards)
     Arr.prototype["forEach"] = JSFunction(params=[], body=None, env=None, name="forEach", native_impl=_array_for_each)
     Arr.prototype["map"] = JSFunction(params=[], body=None, env=None, name="map", native_impl=_array_map)
     Arr.prototype["filter"] = JSFunction(params=[], body=None, env=None, name="filter", native_impl=_array_filter)
+    Arr.prototype["reduce"] = JSFunction(params=[], body=None, env=None, name="reduce", native_impl=_array_reduce)
+    Arr.prototype["some"] = JSFunction(params=[], body=None, env=None, name="some", native_impl=_array_some)
+    Arr.prototype["every"] = JSFunction(params=[], body=None, env=None, name="every", native_impl=_array_every)
+    Arr.prototype["find"] = JSFunction(params=[], body=None, env=None, name="find", native_impl=_array_find)
+    Arr.prototype["findIndex"] = JSFunction(params=[], body=None, env=None, name="findIndex", native_impl=_array_find_index)
+    
+    # Non-mutating methods
     Arr.prototype["slice"] = JSFunction(params=[], body=None, env=None, name="slice", native_impl=_array_slice)
-    Arr.prototype["splice"] = JSFunction(params=[], body=None, env=None, name="splice", native_impl=_array_splice)
-    Arr.prototype["indexOf"] = JSFunction(params=[], body=None, env=None, name="indexOf", native_impl=_array_index_of)
     Arr.prototype["concat"] = JSFunction(params=[], body=None, env=None, name="concat", native_impl=_array_concat)
-
-    # expose constructor
+    Arr.prototype["indexOf"] = JSFunction(params=[], body=None, env=None, name="indexOf", native_impl=_array_index_of)
+    
+    # Expose constructor
     context["Array"] = Arr
 
+    def _jquery_static_each(interp, this, args):
+        """
+        jQuery.each(obj, callback) - static utility function
+        **CRITICAL: This must NOT call jQuery.each recursively!**
+        - Iterates over arrays (by index) or objects (by key)
+        - Callback signature: callback.call(value, index_or_key, value)
+        - Returns false to break iteration
+        - Returns the collection (for chaining)
+        """
+        obj = args[0] if args else None
+        callback = args[1] if len(args) > 1 else None
+        
+        if not obj or not callback:
+            return obj
+        
+        # **CRITICAL FIX: Use native Python iteration, NOT jQuery.each!**
+        # This prevents infinite recursion when jQuery's each() calls S.each(this, callback)
+        
+        try:
+            # Array-like iteration (has 'length' property)
+            if isinstance(obj, dict) and 'length' in obj:
+                try:
+                    length = int(obj.get('length', 0) or 0)
+                except Exception:
+                    length = 0
+                
+                # **USE PYTHON LOOP - DO NOT call any JS function that might recurse!**
+                for i in range(length):
+                    key = str(i)
+                    if key not in obj:
+                        continue
+                    val = obj.get(key)
+                    
+                    # jQuery convention: callback.call(element, index, element)
+                    if isinstance(callback, JSFunction):
+                        try:
+                            result = callback.call(interp, val, [i, val])
+                            # Explicit false breaks iteration
+                            if result is False:
+                                break
+                        except Exception as e:
+                            # Log but don't break - match jQuery's error handling
+                            print(f"[_jquery_static_each] Callback error at index {i}: {e}")
+                            pass
+                    elif callable(callback):
+                        try:
+                            result = callback(i, val)
+                            if result is False:
+                                break
+                        except Exception:
+                            pass
+            
+            # Object iteration (dict without 'length')
+            elif isinstance(obj, dict):
+                for key in list(obj.keys()):
+                    if key == '__proto__':
+                        continue
+                    val = obj.get(key)
+                    
+                    if isinstance(callback, JSFunction):
+                        try:
+                            result = callback.call(interp, val, [key, val])
+                            if result is False:
+                                break
+                        except Exception as e:
+                            print(f"[_jquery_static_each] Callback error at key {key}: {e}")
+                            pass
+                    elif callable(callback):
+                        try:
+                            result = callback(key, val)
+                            if result is False:
+                                break
+                        except Exception:
+                            pass
+        except Exception as e:
+            print(f"[_jquery_static_each] Fatal error: {e}")
+            pass
+        
+        return obj  # Return collection for chaining
+
+    print(f"[js_builtins] Creating jQuery.each stub, id={id(_jquery_static_each)}")
+
+    
+    jquery_obj_plain = {
+        'each': JSFunction(params=[], body=None, env=None, name='each', native_impl=_jquery_static_each)
+    }
+    # Replace the ProtectedJQuery approach with this interceptor:
+    
+    # Create jQuery stub WITHOUT protection
+    jquery_obj_plain = {
+        'each': JSFunction(params=[], body=None, env=None, name='each', native_impl=_jquery_static_each)
+    }
+    
+    # Register it directly (no protection wrapper)
+    context['jQuery'] = jquery_obj_plain
+    context['$'] = jquery_obj_plain
+    
+    print(f"[js_builtins] Registered jQuery.each stub (will be replaced by jQuery's own implementation)")
     # ---- INTERNAL: safe caller that captures `context` closure ----
     def _get_interp_undefined(interp):
         # Prefer the sentinel stored on the shared context (set by make_context / run).
@@ -484,97 +872,21 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         return None
 
     def _call_js_fn(fn, this_obj, call_args, interp):
-        """Call a JSFunction defensively and return value; uses interp for lookup.
-        Verbose diagnostics to track `undefined` sentinel identity and call shapes.
-        This function CLOSES OVER the `context` parameter so it uses the correct shared context.
-        """
-        # safe Python-side logger (no JS callbacks)
-        def _dbg(msg: str):
-            try:
-                logger = logging.getLogger("js_builtins")
-                if logger.handlers:
-                    logger.debug(msg)
-                else:
-                    print(msg)
-            except Exception:
-                try:
-                    print(msg)
-                except Exception:
-                    pass
-
+        """Call a JSFunction defensively and return value."""
         try:
-            # ensure context knows the interpreter (helps nested calls that expect context['_interp'])
-            try:
-                if isinstance(interp, dict) and interp.get('_interp') is None:
-                    interp['_interp'] = interp
-            except Exception:
-                pass
-
-            # Call-site diagnostics (Python-side only)
-            try:
-                _dbg(f"[js_builtins] CALL: fn={getattr(fn,'name',str(fn))} ({type(fn).__name__}) this_obj={type(this_obj).__name__} id={id(this_obj)} call_args_preview={call_args[:2]}")
-                try:
-                    mod_name = getattr(interp.__class__, '__module__', None) if not isinstance(interp, dict) else None
-                    module_undef = None
-                    if mod_name:
-                        mod = importlib.import_module(mod_name)
-                        module_undef = getattr(mod, 'undefined', None)
-                    ctx_undef = context.get('undefined', None)
-                    _dbg(f"[js_builtins] SENTINELS: context.undefined={ctx_undef!r} id={id(ctx_undef)} module.undefined={module_undef!r} id={id(module_undef) if module_undef is not None else None}")
-                except Exception:
-                    pass
-            except Exception:
-                pass
-
-            # Invoke target
-            rv = None
-            try:
-                rv = fn.call(interp, this_obj, call_args)
-            except RecursionError:
-                # On recursion, print Python traceback (no JS callbacks) and re-raise
-                import traceback as _tb
-                _dbg("[js_builtins] RecursionError raised while calling JS function. Dumping Python traceback:")
-                try:
-                    print(_tb.format_exc())
-                except Exception:
-                    pass
-                raise
-
-            # Detailed post-call diagnostics
-            try:
-                interp_undef = _get_interp_undefined(interp)
-                is_interp_undef = (rv is interp_undef)
-                is_context_undef = (rv is context.get('undefined'))
-                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} type={type(rv).__name__} is_interp_undef={is_interp_undef} is_context_undef={is_context_undef}")
-            except Exception:
-                _dbg(f"[js_builtins] RETURN: fn={getattr(fn,'name',str(fn))} rv={rv!r} (failed sentinel checks)")
-
-            try:
-                if rv is None or rv is _get_interp_undefined(interp):
-                    _dbg(f"[js_builtins] _call_js_fn: fn={getattr(fn,'name',str(fn))} returned {rv!r} for args={call_args[:1]}")
-            except Exception:
-                pass
-
+            # Remove ALL the debug logging code - it's just noise
+            rv = fn.call(interp, this_obj, call_args)
             return rv
-        except Exception as e:
-            try:
-                _dbg(f"[js_builtins] _call_js_fn EXCEPTION: fn={getattr(fn,'name',str(fn))} args={call_args[:1]} error={e}")
-            except Exception:
-                pass
-            return _get_interp_undefined(interp)
-
+        except RecursionError:
+            # Only catch RecursionError
+            raise
+        # REMOVE the generic Exception handler - let exceptions propagate!
     # --- JSON.parse / stringify implementations (use _call_js_fn above) ----
     def _json_parse_native(interp, this, args):
-        """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver.
-
-        Reviver (if a JSFunction) is applied in post-order traversal:
-          - Traverse object/array children first
-          - Call reviver(holder, key, value) for each property/element
-          - If reviver returns interpreter `undefined` sentinel -> delete the property
-          - Otherwise assign the returned value
-
-        Returns a JS-shaped structure (dicts for objects, array-like dicts with 'length').
-        """
+        """JSON.parse(text[, reviver]) -> JS-shaped value; supports reviver."""
+        print(f"[DEBUG _json_parse_native] interp type: {type(interp).__name__}")
+        print(f"[DEBUG _json_parse_native] has _eval_stmt: {hasattr(interp, '_eval_stmt')}")
+        print(f"[DEBUG _json_parse_native] args: {args}")        
         s = args[0] if args else None
         reviver = args[1] if len(args) > 1 else None
         if not isinstance(s, str):
@@ -582,13 +894,13 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 s = str(s)
             except Exception:
                 raise JSError("Invalid JSON input")
-
+    
         try:
             py_val = json.loads(s)
         except Exception as e:
             raise JSError(str(e))
-
-        # Convert Python-native json result into JS-shaped value our interpreter expects.
+    
+        # Convert Python-native json result into JS-shaped value
         def _to_js(v):
             if v is None:
                 return None
@@ -609,14 +921,14 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 return str(v)
             except Exception:
                 return None
-
+    
         top = _to_js(py_val)
-
+    
         # If no reviver or reviver not callable JSFunction -> return converted structure
         if not isinstance(reviver, JSFunction):
             return top
-
-        # Post-order traversal per spec. `holder` is a dict-like parent; `key` is string key (or index string).
+    
+        # Post-order traversal per spec
         def _get_interp_undefined_local(interp_local):
             try:
                 if 'undefined' in context:
@@ -631,57 +943,45 @@ def register_builtins(context: Dict[str, Any], JSFunction):
             except Exception:
                 pass
             return None
-
+    
         def _walk(holder, key):
-            try:
+            val = holder.get(key) if isinstance(holder, dict) else None
+    
+            if isinstance(val, dict) and 'length' in val:
                 try:
-                    val = holder.get(key)
+                    length = int(val.get('length', 0) or 0)
                 except Exception:
-                    val = None
-
-                if isinstance(val, dict) and 'length' in val:
-                    try:
-                        length = int(val.get('length', 0) or 0)
-                    except Exception:
-                        length = 0
-                    for i in range(length):
-                        k = str(i)
-                        # call for elements (holes included)
-                        _walk(val, k)
-                elif isinstance(val, dict):
-                    for k in list(val.keys()):
-                        if k == "__proto__":
-                            continue
-                        _walk(val, k)
-
-                try:
-                    cur_val = holder.get(key)
-                except Exception:
-                    cur_val = None
-
-                try:
-                    res = _call_js_fn(reviver, holder, [key, cur_val], interp)
-                except Exception:
-                    raise
-                if res is _get_interp_undefined_local(interp):
-                    try:
-                        if key in holder:
-                            del holder[key]
-                    except Exception:
-                        pass
-                else:
-                    try:
-                        holder[key] = res
-                    except Exception:
-                        pass
-            except JSError:
-                raise
-            except Exception:
-                pass
-
+                    length = 0
+                for i in range(length):
+                    k = str(i)
+                    _walk(val, k)
+            elif isinstance(val, dict):
+                for k in list(val.keys()):
+                    if k == "__proto__":
+                        continue
+                    _walk(val, k)
+    
+            # Re-fetch current value after children have been walked
+            cur_val = holder.get(key) if isinstance(holder, dict) else None
+    
+            res = _call_js_fn(reviver, holder, [key, cur_val], interp)
+            
+            undef_sentinel = _get_interp_undefined_local(interp)
+            if res is undef_sentinel:
+                if isinstance(holder, dict) and key in holder:
+                    del holder[key]
+            else:
+                if isinstance(holder, dict):
+                    holder[key] = res
+    
         wrapper = {"": top}
         _walk(wrapper, "")
-        return wrapper[""]
+        
+        # Return the result
+        if "" in wrapper:
+            return wrapper[""]
+        else:
+            return _get_interp_undefined(interp)
 
     def _json_stringify_native(interp, this, args):
         """
@@ -753,142 +1053,102 @@ def register_builtins(context: Dict[str, Any], JSFunction):
                 except Exception:
                     pass
 
-        def _serialize(holder, key, value, stack, in_array=False, path=()):
+        def _serialize(holder, key, value, stack, in_array=False, path=(), max_depth=100):
             """
-            holder: containing object (dict)
-            key: property key string
-            value: JS-shaped value (dict/list-like/primitive)
-            stack: set of ids for circular detection
-            in_array: whether this value is inside an array (affects undefined -> null behavior)
-            path: tuple of path components for logging (root is ('',))
-            returns: Python primitive / list / dict, or UNSET to indicate omitted property
+            Serialize with depth limit to prevent runaway recursion.
+            max_depth: Maximum nesting depth (default 100).
             """
             try:
+                # Guard against excessive nesting depth
+                if len(path) > max_depth:
+                    raise JSError(f"JSON.stringify: Maximum nesting depth ({max_depth}) exceeded")
+                
+                # toJSON logic
                 try:
-                    p = '.'.join(map(str, path)) or '(root)'
                     if isinstance(value, dict):
-                        _dbg(f"[js_builtins] _serialize BEFORE toJSON: path='{p}' key={key!r} value_keys={list(value.keys())}")
-                    else:
-                        _dbg(f"[js_builtins] _serialize BEFORE toJSON: path='{p}' key={key!r} value_type={type(value).__name__} value={value!r}")
+                        tojson = value.get("toJSON", None)
+                        if isinstance(tojson, JSFunction):
+                            ret = _call_js_fn(tojson, value, [key], interp)
+                            value = ret
                 except Exception:
-                    pass
-                if isinstance(value, dict):
-                    tojson = value.get("toJSON", None)
-                    if isinstance(tojson, JSFunction):
-                        ret = _call_js_fn(tojson, value, [key], interp)
-                        try:
-                            _dbg(f"[js_builtins] toJSON called at path='{p}' returned: {ret!r} (type={type(ret).__name__})")
-                        except Exception:
-                            pass
-                        value = ret
+                    value = _get_interp_undefined(interp)
+                
+                # Replacer logic
                 if replacer_fn:
                     value = _call_js_fn(replacer_fn, holder, [key, value], interp)
+                
+                # Check for undefined/function (omit from JSON)
+                undef_check = _get_interp_undefined(interp)
+                if value is undef_check or callable(value):
+                    return UNSET
+                
+                # Array handling
+                if isinstance(value, dict) and "length" in value:
+                    vid = id(value)
+                    if vid in stack:
+                        raise JSError("Converting circular structure to JSON")
+                    stack.add(vid)
+                    out_list = []
+                    try:
+                        length = int(value.get("length", 0) or 0)
+                    except Exception:
+                        length = 0
+                    for i in range(length):
+                        k = str(i)
+                        child_path = tuple(list(path) + [i])
+                        if k in value:
+                            pv = _serialize(value, k, value.get(k), stack, in_array=True, 
+                                          path=child_path, max_depth=max_depth)
+                            out_list.append(None if pv is UNSET else pv)
+                        else:
+                            out_list.append(None)
+                    stack.remove(vid)
+                    return out_list
+                    
+                # Object handling  
+                if isinstance(value, dict):
+                    vid = id(value)
+                    if vid in stack:
+                        raise JSError("Converting circular structure to JSON")
+                    stack.add(vid)
+                    obj_out = {}
+                    keys = property_list if property_list is not None else [k for k in value.keys() if k != "__proto__"]
+                    for k in keys:
+                        if k == "__proto__":
+                            continue
+                        if k not in value:
+                            continue
+                        vv = value.get(k)
+                        child_path = tuple(list(path) + [k])
+                        pv = _serialize(value, k, vv, stack, in_array=False, 
+                                      path=child_path, max_depth=max_depth)
+                        if pv is UNSET:
+                            continue
+                        obj_out[str(k)] = pv
+                    stack.remove(vid)
+                    return obj_out
+                
+                # Primitive handling (THIS WAS MISSING!)
+                # null, boolean, number, string
+                if value is None:
+                    return None
+                if isinstance(value, bool):
+                    return value
+                if isinstance(value, (int, float)):
+                    # NaN and Infinity become null in JSON
+                    if math.isnan(value) or math.isinf(value):
+                        return None
+                    return value
+                if isinstance(value, str):
+                    return value
+                
+                # Unknown type - omit
+                return UNSET
+                
             except JSError:
                 raise
-            except Exception:
-                value = _get_interp_undefined(interp)
-
-            if value is _get_interp_undefined(interp):
-                p = '.'.join(map(str, path)) or '(root)'
-                if in_array:
-                    _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (replacer/toJSON returned undefined or threw)")
-                    return None
-                else:
-                    _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (replacer/toJSON returned undefined or threw)")
-                    return UNSET
-
-            if value is None:
-                p = '.'.join(map(str, path)) or '(root)'
-                _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (JS null)")
-                return None
-
-            if isinstance(value, bool):
-                return value
-
-            if isinstance(value, (int, float)):
-                try:
-                    fv = float(value)
-                    try:
-                        _dbg(f"[js_builtins] numeric value at path '{p}': {fv!r} (type={type(value).__name__})")
-                    except Exception:
-                        pass
-                    if math.isnan(fv) or math.isinf(fv):
-                        p = '.'.join(map(str, path)) or '(root)'
-                        _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (NaN or Infinity coerced to null)")
-                        return None
-                    if fv == 0.0:
-                        return 0
-                    return fv
-                except Exception:
-                    return None
-
-            if isinstance(value, str):
-                return value
-
-            if isinstance(value, JSFunction) or callable(value):
-                p = '.'.join(map(str, path)) or '(root)'
-                if in_array:
-                    _dbg(f"[js_builtins] JSON.stringify: null at path '{p}' (function in array -> null)")
-                    return None
-                else:
-                    _dbg(f"[js_builtins] JSON.stringify: property omitted at path '{p}' (function -> undefined)")
-                    return UNSET
-
-            if isinstance(value, dict) and "length" in value:
-                try:
-                    length = int(value.get("length", 0) or 0)
-                except Exception:
-                    length = 0
-                vid = id(value)
-                if vid in stack:
-                    raise JSError("Converting circular structure to JSON")
-                stack.add(vid)
-                out_list = []
-                for i in range(length):
-                    k = str(i)
-                    child_path = tuple(list(path) + [i])
-                    if k in value:
-                        pv = _serialize(value, k, value.get(k), stack, in_array=True, path=child_path)
-                        out_list.append(None if pv is UNSET else pv)
-                    else:
-                        _dbg(f"[js_builtins] JSON.stringify: null at path '{'.'.join(map(str, child_path))}' (array hole -> null)")
-                        out_list.append(None)
-                stack.remove(vid)
-                return out_list
-
-            if isinstance(value, dict):
-                vid = id(value)
-                if vid in stack:
-                    raise JSError("Converting circular structure to JSON")
-                stack.add(vid)
-                obj_out = {}
-                keys = property_list if property_list is not None else [k for k in value.keys() if k != "__proto__"]
-                for k in keys:
-                    if k == "__proto__":
-                        continue
-                    if k not in value:
-                        continue
-                    vv = value.get(k)
-                    child_path = tuple(list(path) + [k])
-                    pv = _serialize(value, k, vv, stack, in_array=False, path=child_path)
-                    try:
-                        _dbg(f"[js_builtins] pv for path '{'.'.join(map(str, child_path))}': {pv!r} (type={type(pv).__name__})")
-                    except Exception:
-                        pass
-                    if pv is UNSET:
-                        continue
-                    obj_out[str(k)] = pv
-                stack.remove(vid)
-                return obj_out
-
-            try:
-                s = str(value)
-                p = '.'.join(map(str, path)) or '(root)'
-                _dbg(f"[js_builtins] JSON.stringify: coercing host object at path '{p}' to string")
-                return s
-            except Exception:
-                return None
-
+            except Exception as e:
+                raise JSError(str(e))
         try:
             pure = _serialize({"": val}, "", val, set(), in_array=False, path=("",))
         except JSError:
@@ -913,6 +1173,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
         'parse': JSFunction(params=[], body=None, env=None, name='JSON.parse', native_impl=_json_parse_native),
         'stringify': JSFunction(params=[], body=None, env=None, name='JSON.stringify', native_impl=_json_stringify_native),
     }
+    
     # --- Object helpers ------------------------------------------------------
     def _object_create(interp, this, args):
         proto = args[0] if args else None
@@ -1030,6 +1291,7 @@ def register_builtins(context: Dict[str, Any], JSFunction):
     setattr(Obj, "create", JSFunction(params=[], body=None, env=None, name="create", native_impl=_object_create))
     setattr(Obj, "keys", JSFunction(params=[], body=None, env=None, name="keys", native_impl=_object_keys))
     setattr(Obj, "assign", JSFunction(params=[], body=None, env=None, name="assign", native_impl=_object_assign))
+    
     # Attach hasOwnProperty on Object.prototype so instances can call it (obj.hasOwnProperty('x'))
     try:
         Obj.prototype.setdefault("hasOwnProperty", JSFunction(params=[], body=None, env=None, name="hasOwnProperty", native_impl=_has_own_property))
@@ -1083,10 +1345,118 @@ def register_builtins(context: Dict[str, Any], JSFunction):
 
         return JSFunction(params=[], body=None, env=None, name="bound", native_impl=_bound_native)
 
-    # Attach call/apply/bind as prototype methods on JSFunction so JS `fn.call(...)` resolves
-    # via prototype lookup instead of shadowing the Python method on the class.
-    # These are JSFunction instances (native_impl) so interpreter will treat them as JS functions.
+    # Attach call/apply/bind on Function.prototype
     JSFunction.prototype['call'] = JSFunction(params=[], body=None, env=None, name='call', native_impl=_fn_call)
     JSFunction.prototype['apply'] = JSFunction(params=[], body=None, env=None, name='apply', native_impl=_fn_apply)
     JSFunction.prototype['bind'] = JSFunction(params=[], body=None, env=None, name='bind', native_impl=_fn_bind)
+
+
+    # --- Event constructor + prototype ------------------------------
+    def _event_ctor(interp, this, args):
+        """
+        new Event(type) -> minimal event object
+         - type: string
+         - defaultPrevented: boolean
+         - cancelBubble: boolean (stopPropagation flag)
+         - target: set later by dispatch
+         - also attach methods as own properties for robust lookup
+        """
+        try:
+            etype = args[0] if args else ''
+            try:
+                etype = str(etype)
+            except Exception:
+                etype = ''
+            this['type'] = etype
+            this['defaultPrevented'] = False
+            this['cancelBubble'] = False
+            # Attach methods on the instance as own properties to avoid prototype lookup issues
+            try:
+                pd = Event.prototype.get('preventDefault')
+                sp = Event.prototype.get('stopPropagation')
+                if isinstance(pd, JSFunction):
+                    this['preventDefault'] = pd
+                if isinstance(sp, JSFunction):
+                    this['stopPropagation'] = sp
+            except Exception:
+                pass
+            # target will be injected by dispatcher (Element / document)
+        except Exception:
+            pass
+        return this
+
+    def _event_prevent_default(interp, this, args):
+        """
+        Sets defaultPrevented flag. Returns undefined (like DOM spec).
+        Works for dict-backed events and host objects.
+        """
+        try:
+            if isinstance(this, dict):
+                this['defaultPrevented'] = True
+            else:
+                try:
+                    setattr(this, 'defaultPrevented', True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return context.get("undefined")
+    
+    def _event_stop_propagation(interp, this, args):
+        """
+        Sets cancelBubble flag. Returns undefined (like DOM spec).
+        Works for dict-backed events and host objects.
+        """
+        try:
+            if isinstance(this, dict):
+                this['cancelBubble'] = True
+            else:
+                try:
+                    setattr(this, 'cancelBubble', True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        return context.get("undefined")
+
+
+
+    Event = JSFunction(params=[], body=None, env=None, name="Event", native_impl=_event_ctor)
+    Event.prototype['preventDefault'] = JSFunction(params=[], body=None, env=None, name="preventDefault", native_impl=_event_prevent_default)
+    Event.prototype['stopPropagation'] = JSFunction(params=[], body=None, env=None, name="stopPropagation", native_impl=_event_stop_propagation)
+    context["Event"] = Event
+
+    def _array_is_array(interp, this, args):
+        """Array.isArray(obj) - critical for jQuery's each() to distinguish arrays from objects"""
+        try:
+            obj = args[0] if args else None
+            # Check if object is array-like (has numeric 'length' and numeric indices)
+            if isinstance(obj, dict) and 'length' in obj:
+                try:
+                    # Has __proto__ pointing to Array.prototype?
+                    if obj.get('__proto__') is Arr.prototype:
+                        return True
+                    # Fallback: check for numeric indices
+                    length = int(obj.get('length', 0))
+                    if length == 0:
+                        return True  # Empty array-like
+                    # Check if first and last index exist (heuristic)
+                    return '0' in obj or str(length - 1) in obj
+                except Exception:
+                    return False
+            return False
+        except Exception:
+            return False
+    
+    # Attach isArray as static method on Array constructor
+    Arr.isArray = JSFunction(params=[], body=None, env=None, name='isArray', native_impl=_array_is_array)
+    
+    # **ALSO: Ensure Array constructor is accessible via setattr for JS code**
+    try:
+        # Make sure static methods are accessible as properties
+        if not hasattr(Arr, 'isArray'):
+            setattr(Arr, 'isArray', Arr.isArray)
+    except Exception:
+        pass
+
     return None
