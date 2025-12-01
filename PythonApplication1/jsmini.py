@@ -2145,19 +2145,6 @@ class Interpreter:
             # Host python-callable (native helpers)
             if callable(fn_val) and not isinstance(fn_val, JSFunction):
                 try:
-                    mutating_methods = {'appendChild', 'insertBefore', 'replaceChild', 'removeChild', 'setAttribute', 'innerHTML'}
-                    fn_name = getattr(fn_val, '__name__', None)
-                    is_element_method = isinstance(receiver, Element) and fn_name in mutating_methods
-                except Exception:
-                    is_element_method = False
-                if is_element_method and self._context is not None:
-                    try:
-                        timer_args = tuple([receiver] + list(args or ()))
-                        self._context.setdefault('_timers', []).append((fn_val, timer_args))
-                        return undefined
-                    except Exception:
-                        pass
-                try:
                     if receiver is not None:
                         return fn_val(receiver, *args)
                     return fn_val(*args)
@@ -2384,6 +2371,40 @@ class Element:
         # Host / document links (set by make_dom_shim or when appended)
         self._host = None
         self._owner_document = None
+        # DOM change logger (callable: (element, op, details_dict) -> None), injected by make_context/__enableDomLog
+        self._dom_log = None
+            
+    def _dom_path(self) -> str:
+        """Return a simple CSS-like path for this element (#id > tag.class)."""
+        try:
+            parts = []
+            cur = self
+            while isinstance(cur, Element):
+                name = cur.tagName or 'node'
+                pid = f"#{cur.id}" if cur.id else ''
+                cls = cur.attrs.get('class') or ''
+                cls_sfx = ('.' + '.'.join(cls.split())) if cls else ''
+                parts.append(f"{name}{pid}{cls_sfx}")
+                cur = getattr(cur, 'parent', None)
+            return ' > '.join(reversed(parts))
+        except Exception:
+            return self.tagName or 'node'
+
+    def _log_change(self, op: str, details: Dict[str, Any]) -> None:
+        try:
+            cb = getattr(self, '_dom_log', None)
+            if not callable(cb):
+                # fallback: try from ownerDocument (document dict stores fn under '__dom_log_fn')
+                try:
+                    doc = getattr(self, '_owner_document', None)
+                    if isinstance(doc, dict):
+                        cb = doc.get('__dom_log_fn')
+                except Exception:
+                    cb = None
+            if callable(cb):
+                cb(self, op, details or {})
+        except Exception:
+            pass
 
     def _notify_dom_change(self):
         """
@@ -2402,7 +2423,6 @@ class Element:
                 return
             set_raw = host.get('setRaw')
             if callable(set_raw):
-                # Use body.innerHTML (lightweight fragment) instead of full serialization
                 set_raw(body.innerHTML)
         except Exception:
             pass
@@ -2416,14 +2436,8 @@ class Element:
                 self._class_set = set(str(v).split())
             except Exception:
                 self._class_set = set()
+        self._log_change('setAttribute', {'name': k, 'value': v, 'path': self._dom_path()})
         self._notify_dom_change()
-
-    def getAttribute(self, k: str) -> Optional[str]:
-        """Return attribute value or None (closest to DOM behavior)."""
-        try:
-            return self.attrs.get(k)
-        except Exception:
-            return None
 
     def removeAttribute(self, k: str) -> None:
         try:
@@ -2434,24 +2448,32 @@ class Element:
                 self._class_set = set()
         except Exception:
             pass
+        self._log_change('removeAttribute', {'name': k, 'path': self._dom_path()})
         self._notify_dom_change()
 
     def appendChild(self, child: Any) -> None:
+        """Attach child, propagate host/document and notify."""
         try:
             if isinstance(child, Element):
                 child.parent = self
-                # Propagate host/document into newly attached subtree
                 child._host = self._host
                 child._owner_document = self._owner_document
-            self.children.append(child)
+                # propagate logger
+                child._dom_log = getattr(self, '_dom_log', None) or (self._owner_document.get('__dom_log_fn') if isinstance(self._owner_document, dict) else None)
+            if isinstance(self.children, JSList):
+                self.children.append(child)
+            else:
+                self.children.append(child)
         except Exception:
             try:
                 self.children.append(child)
             except Exception:
                 pass
+        self._log_change('appendChild', {'child': getattr(child, 'tagName', type(child).__name__), 'path': self._dom_path()})
         self._notify_dom_change()
 
     def removeChild(self, child: Any) -> None:
+        """Detach child and notify (no exception on failure)."""
         try:
             if isinstance(self.children, JSList):
                 lst = self.children._list
@@ -2466,9 +2488,11 @@ class Element:
                         child.parent = None
         except Exception:
             pass
+        self._log_change('removeChild', {'child': getattr(child, 'tagName', type(child).__name__), 'path': self._dom_path()})
         self._notify_dom_change()
 
     def insertBefore(self, newNode: Any, referenceNode: Any) -> None:
+        """Insert newNode before referenceNode; append if ref not found; notify."""
         try:
             lst = self.children._list
             try:
@@ -2479,15 +2503,23 @@ class Element:
                 newNode.parent = self
                 newNode._host = self._host
                 newNode._owner_document = self._owner_document
+                newNode._dom_log = getattr(self, '_dom_log', None) or (self._owner_document.get('__dom_log_fn') if isinstance(self._owner_document, dict) else None)
             lst.insert(idx, newNode)
         except Exception:
             try:
                 self.appendChild(newNode)
+                return
             except Exception:
                 pass
+        self._log_change('insertBefore', {
+            'newNode': getattr(newNode, 'tagName', type(newNode).__name__),
+            'referenceNode': getattr(referenceNode, 'tagName', type(referenceNode).__name__),
+            'path': self._dom_path()
+        })
         self._notify_dom_change()
 
     def replaceChild(self, newNode: Any, oldNode: Any) -> None:
+        """Replace oldNode with newNode and notify."""
         try:
             lst = self.children._list
             try:
@@ -2496,6 +2528,7 @@ class Element:
                     newNode.parent = self
                     newNode._host = self._host
                     newNode._owner_document = self._owner_document
+                    newNode._dom_log = getattr(self, '_dom_log', None) or (self._owner_document.get('__dom_log_fn') if isinstance(self._owner_document, dict) else None)
                 lst[idx] = newNode
                 if isinstance(oldNode, Element):
                     oldNode.parent = None
@@ -2504,9 +2537,15 @@ class Element:
                     newNode.parent = self
                     newNode._host = self._host
                     newNode._owner_document = self._owner_document
+                    newNode._dom_log = getattr(self, '_dom_log', None) or (self._owner_document.get('__dom_log_fn') if isinstance(self._owner_document, dict) else None)
                 lst.append(newNode)
         except Exception:
             pass
+        self._log_change('replaceChild', {
+            'newNode': getattr(newNode, 'tagName', type(newNode).__name__),
+            'oldNode': getattr(oldNode, 'tagName', type(oldNode).__name__),
+            'path': self._dom_path()
+        })
         self._notify_dom_change()
 
     @property
@@ -2744,46 +2783,43 @@ class Element:
             return False
 
     def appendChild(self, child: Any) -> None:
-        # keep underlying storage and expose JS-like API
-        # set parent pointer for element children
+        """Attach child, propagate host/document and notify."""
         try:
             if isinstance(child, Element):
                 child.parent = self
-            self.children.append(child)
+                child._host = self._host
+                child._owner_document = self._owner_document
+            if isinstance(self.children, JSList):
+                self.children.append(child)
+            else:
+                self.children.append(child)
         except Exception:
-            # fallback append
             try:
                 self.children.append(child)
             except Exception:
                 pass
+        self._notify_dom_change()
 
     def removeChild(self, child: Any) -> None:
-        """Remove a child (no exception thrown on failure)."""
+        """Detach child and notify (no exception on failure)."""
         try:
-            # support JSList and Python lists
             if isinstance(self.children, JSList):
-                lst = list(self.children._list)
+                lst = self.children._list
                 if child in lst:
                     lst.remove(child)
-                    self.children = JSList(lst)
-                    try:
-                        if isinstance(child, Element):
-                            child.parent = None
-                    except Exception:
-                        pass
+                    if isinstance(child, Element):
+                        child.parent = None
             else:
                 if child in self.children:
                     self.children.remove(child)
-                    try:
-                        if isinstance(child, Element):
-                            child.parent = None
-                    except Exception:
-                        pass
+                    if isinstance(child, Element):
+                        child.parent = None
         except Exception:
             pass
+        self._notify_dom_change()
 
     def insertBefore(self, newNode: Any, referenceNode: Any) -> None:
-        """Insert newNode before referenceNode; append if referenceNode not found."""
+        """Insert newNode before referenceNode; append if ref not found; notify."""
         try:
             lst = self.children._list
             try:
@@ -2792,34 +2828,38 @@ class Element:
                 idx = len(lst)
             if isinstance(newNode, Element):
                 newNode.parent = self
+                newNode._host = self._host
+                newNode._owner_document = self._owner_document
             lst.insert(idx, newNode)
         except Exception:
             try:
                 self.appendChild(newNode)
             except Exception:
                 pass
+        self._notify_dom_change()
 
     def replaceChild(self, newNode: Any, oldNode: Any) -> None:
-        """Replace oldNode with newNode."""
+        """Replace oldNode with newNode and notify."""
         try:
             lst = self.children._list
             try:
                 idx = lst.index(oldNode)
                 if isinstance(newNode, Element):
                     newNode.parent = self
+                    newNode._host = self._host
+                    newNode._owner_document = self._owner_document
                 lst[idx] = newNode
-                try:
-                    if isinstance(oldNode, Element):
-                        oldNode.parent = None
-                except Exception:
-                    pass
+                if isinstance(oldNode, Element):
+                    oldNode.parent = None
             except ValueError:
-                # fallback: append
                 if isinstance(newNode, Element):
                     newNode.parent = self
+                    newNode._host = self._host
+                    newNode._owner_document = self._owner_document
                 lst.append(newNode)
         except Exception:
             pass
+        self._notify_dom_change()
 
     @property
     def parentNode(self):
@@ -2887,13 +2927,13 @@ class Element:
         except Exception:
             return ''
 
-
     @textContent.setter
     def textContent(self, val: Any) -> None:
         try:
             self.children = JSList([str(val)])
         except Exception:
             pass
+        self._log_change('setTextContent', {'value': str(val)[:120], 'path': self._dom_path()})
         self._notify_dom_change()
 
     @property
@@ -2903,7 +2943,6 @@ class Element:
             parts = []
             for c in self.children:
                 if isinstance(c, Element):
-                    # Minimal tag + text serialization (does not preserve attributes beyond id/class)
                     attrs = []
                     if c.id:
                         attrs.append(f'id="{c.id}"')
@@ -2927,12 +2966,14 @@ class Element:
                     n.parent = self
                     n._host = self._host
                     n._owner_document = self._owner_document
+                    n._dom_log = getattr(self, '_dom_log', None) or (self._owner_document.get('__dom_log_fn') if isinstance(self._owner_document, dict) else None)
             self.children = JSList(nodes)
         except Exception:
             try:
                 self.children = JSList([str(html_str)])
             except Exception:
                 pass
+        self._log_change('setInnerHTML', {'length': len(str(html_str or '')), 'path': self._dom_path()})
         self._notify_dom_change()
 
     @property
@@ -2967,6 +3008,7 @@ class Element:
             self._class_set = set(s.split())
         except Exception:
             pass
+        self._log_change('setClassName', {'value': str(val), 'path': self._dom_path()})
         self._notify_dom_change()
 
     @property
@@ -3057,6 +3099,7 @@ class Element:
                 el.attrs['class'] = ' '.join(el._class_set)
             except Exception:
                 pass
+            el._log_change('classList.add', {'tokens': [str(n) for n in cls_names], 'path': el._dom_path()})
             el._notify_dom_change()
         def _remove(this, *cls_names):
             try:
@@ -3065,6 +3108,7 @@ class Element:
                 el.attrs['class'] = ' '.join(el._class_set)
             except Exception:
                 pass
+            el._log_change('classList.remove', {'tokens': [str(n) for n in cls_names], 'path': el._dom_path()})
             el._notify_dom_change()
         def _contains(this, name):
             try:
@@ -3088,6 +3132,7 @@ class Element:
                 el.attrs['class'] = ' '.join(el._class_set)
             except Exception:
                 present = False
+            el._log_change('classList.toggle', {'token': str(name), 'force': None if force is None else bool(force), 'path': el._dom_path()})
             el._notify_dom_change()
             return present
         return {
@@ -3225,16 +3270,36 @@ def make_dom_shim(host=None):
         except Exception:
             pass
 
+    def _force_redraw():
+        """Explicit redraw: recompute body.innerHTML and push through host.setRaw."""
+        try:
+            _notify_dom_change()
+        except Exception:
+            pass
+        return body.innerHTML
+
     def _attach(el: Element):
         try:
             el._host = host
             el._owner_document = document
+            # inherit logger if already configured on document
+            try:
+                el._dom_log = document.get('__dom_log_fn')
+            except Exception:
+                pass
         except Exception:
             pass
         return el
 
     def createElement(tag: str) -> Element:
-        return _attach(Element(tag))
+        el = _attach(Element(tag))
+        try:
+            cb = document.get('__dom_log_fn')
+            if callable(cb):
+                cb(el, 'createElement', {'tag': tag, 'path': el._dom_path()})
+        except Exception:
+            pass
+        return el
 
     def getElementById(idv: str) -> Optional[Element]:
         if body.id == idv:
@@ -3256,6 +3321,13 @@ def make_dom_shim(host=None):
         if isinstance(el, Element):
             _attach(el)
         body.appendChild(el)
+        # appendChild logs; also log document-level append for clarity
+        try:
+            cb = document.get('__dom_log_fn')
+            if callable(cb):
+                cb(body, 'document.appendChild', {'child': getattr(el, 'tagName', type(el).__name__), 'path': body._dom_path()})
+        except Exception:
+            pass
         _notify_dom_change()
 
     def querySelector(sel: str) -> Optional[Element]:
@@ -3292,13 +3364,6 @@ def make_dom_shim(host=None):
             return body.getElementsByTagName(sel)
         except Exception:
             return JSList([])
-
-    def append_to_body(el: Any) -> None:
-        body.appendChild(el)
-
-    def append_to_body(el: Any) -> None:
-        body.appendChild(el)
-
 
     # Document-level event helpers (unchanged)
     def _doc_add_event_listener(ev_type, handler, useCapture: bool = False):
@@ -3423,6 +3488,7 @@ def make_dom_shim(host=None):
         'removeEventListener': _w_remove_event_listener,
         'attachEvent': _w_attach_event,
         'dispatchEvent': _w_dispatch_event,
+        'forceRedraw': lambda: _force_redraw(),          
         '_notify_dom_change': _notify_dom_change,
         '__setHost': lambda h: (_set_host(h))
     }
@@ -3598,10 +3664,7 @@ def make_context(log_fn=None):
         return len(ctx_t['_timers'])
 
     # small Math object
-    Math = {
-        'random': lambda: random.random(),
-        'floor': lambda x: int(x)//1
-    }
+    Math = { 'random': lambda: random.random(), 'floor': lambda x: int(x)//1 }
 
     # context - created mutable to allow setTimeout closure reference
     context_ref = {
@@ -3630,6 +3693,7 @@ def make_context(log_fn=None):
     context_ref['google_tags_first_party'] = []           # empty list of first-party container ids
     # google_tag_data.tidr is used by Pj() to store container state; give a minimal holder
     context_ref['google_tag_data'] = {'tidr': {}}
+    context_ref['__flushDom'] = lambda: (document.get('forceRedraw')() if callable(document.get('forceRedraw')) else None)
 
     # Prefer centralized builtins module; register early so consumers of the context get canonical builtins.
     # Fall back to very small safe stubs when js_builtins is missing or registration fails.
@@ -3637,6 +3701,44 @@ def make_context(log_fn=None):
    
     js_builtins.register_builtins(context_ref, JSFunction)
     context_ref["_builtins_registered"] = True
+
+    # DOM mutation logger: opt-in
+    def _enable_dom_log(verbose: bool = False):
+        context_ref['_dom_changes'] = []
+        context_ref['_dom_log_verbose'] = bool(verbose)
+
+        def _dom_log(element: Any, op: str, details: Dict[str, Any]):
+            try:
+                entry = {
+                    'op': op,
+                    'tag': getattr(element, 'tagName', None),
+                    'id': getattr(element, 'id', None),
+                    'path': element._dom_path() if hasattr(element, '_dom_path') else None,
+                    'details': details or {}
+                }
+                context_ref['_dom_changes'].append(entry)
+                # Optional debug stream (only when verbose)
+                if verbose:
+                    try:
+                        _log(f"[jsmini.trace][dom] {op} {entry.get('path')} {details}")
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+        # bind logger to document and existing body
+        try:
+            document['__dom_log_fn'] = _dom_log
+            body = document.get('body')
+            if isinstance(body, Element):
+                body._dom_log = _dom_log
+        except Exception:
+            pass
+
+    # expose toggles/accessors
+    context_ref['__enableDomLog'] = _enable_dom_log
+    context_ref['getDomChanges'] = lambda: list(context_ref.get('_dom_changes', []))
+
     # Helper to set host later (used by run_scripts)
     context_ref['__attachHost'] = lambda h: (
         document.get('__setHost') and document['__setHost'](h)

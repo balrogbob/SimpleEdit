@@ -288,7 +288,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                         pass
                     # Run any inline/remote scripts found in the original raw source for in-place opens (so refresh works)
                     try:
-                        scripts_to_run = funcs.extract_script_tags(raw)
+                        scripts_to_run = funcs.extract_script_tags(frame._raw_html or '')
                         if scripts_to_run:
                             # host callback bound to the current frame/text so scripts can call setRaw / host.setRaw
                             host_cb = _make_host_update_cb_for_frame(frame, textArea)
@@ -296,7 +296,10 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                                 scripts_to_run,
                                 base_url=path,
                                 log_fn=lambda s: (print(s), statusBar.config(text=s)),
-                                host_update_cb=host_cb
+                                host_update_cb=host_cb,
+                                return_dom=True, 
+                                collect_dom_changes=True, 
+                                dom_log_verbose=True
                             )
                             # debug output
                             print("[debug] run_scripts results (in-place open):", run_results)
@@ -373,9 +376,10 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                                 pass
                         except Exception:
                             pass
-
+                    host_cb = _make_host_update_cb_for_frame(fr, tx)
+                    scripts_to_run = funcs.extract_script_tags(fr._raw_html or '')
                     # run scripts with host callback available in JS context as setRaw(...) and host.setRaw(...)
-                    run_results = funcs.run_scripts(scripts, base_url=path, log_fn=lambda s: (print(s), statusBar.config(text=s)), host_update_cb=_host_update_from_script)
+                    run_results = funcs.run_scripts(scripts_to_run, base_url=path, log_fn=lambda s: (print(s), statusBar.config(text=s)), host_update_cb=host_cb, return_dom=True, collect_dom_changes=True, dom_log_verbose=True)
 
                 except Exception:
                     pass
@@ -4151,11 +4155,15 @@ def open_url_action():
                                         frame._raw_html_plain = plain
                                         frame._raw_html_tags_meta = tags_meta
                                         host_cb = _make_host_update_cb_for_frame(frame, tx)
+                                        scripts_to_run = funcs.extract_script_tags(frame._raw_html or '')
                                         run_results = funcs.run_scripts(
-                                            scripts,
+                                            scripts_to_run,
                                             base_url=url2,
                                             log_fn=lambda s: (print(s), statusBar.config(text=s)),
-                                            host_update_cb=host_cb
+                                            host_update_cb=host_cb,
+                                            return_dom=True, 
+                                            collect_dom_changes=True, 
+                                            dom_log_verbose=True
                                         )
                                         print("[debug] run_scripts results (toggle raw->rendered):", run_results)
                                         frame._view_raw = False
@@ -6656,7 +6664,7 @@ def toggle_raw_rendered():
                 # Clear syntax tags before inserting rendered content to avoid collisions
                 for t in SYNTAX_TAGS:
                     try:
-                        tw.tag_remove(t, '1.0', 'end')
+                        tw.tag_remove(t, '0.0', 'end')
                     except Exception:
                         pass
                 # Replace content with rendered/plain text and apply presentation tag configs
@@ -6689,7 +6697,10 @@ def toggle_raw_rendered():
                         scripts_to_run,
                         base_url=getattr(frame, 'fileName', None),
                         log_fn=lambda s: (print(s), statusBar.config(text=s)),
-                        host_update_cb=host_cb
+                        host_update_cb=host_cb,
+                        return_dom=True, 
+                        collect_dom_changes=True, 
+                        dom_log_verbose=True
                     )
                     print("[debug] run_scripts results (toggle raw->rendered):", run_results)
             except Exception:
@@ -8649,13 +8660,22 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                             fr._raw_html = raw
                             fr._raw_html_plain = plain
                             fr._raw_html_tags_meta = tags_meta
-                            host_cb = _make_host_update_cb_for_frame(fr, tx)
-                            run_results = funcs.run_scripts(
-                                scripts,
-                                base_url=url2,
-                                log_fn=lambda s: (print(s), statusBar.config(text=s)),
-                                host_update_cb=host_cb
+                            scripts_to_run = funcs.extract_script_tags(fr._raw_html or '')
+                            if scripts_to_run:
+                                 host_cb = _make_host_update_cb_for_frame(fr, tx)
+                                 run_results = funcs.run_scripts(
+                                    scripts_to_run,
+                                    base_url=url2,
+                                    log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                    host_update_cb=host_cb,
+                                    return_dom=True,
+                                    collect_dom_changes=True,
+                                    dom_log_verbose=True
                             )
+
+                                 print("[debug] run_scripts results (toggle raw->rendered):", run_results)
+                        except Exception:
+                            pass
                             # debug output
                             print("[debug] run_scripts results (in-place open):", run_results)
                             
@@ -8702,13 +8722,19 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                                 frame._raw_html = raw
                                 frame._raw_html_plain = plain
                                 frame._raw_html_tags_meta = tags_meta
+                                
                                 host_cb = _make_host_update_cb_for_frame(frame, tx)
-                                run_results = funcs.run_scripts(
-                                    scripts,
-                                    base_url=url2,
-                                    log_fn=lambda s: (print(s), statusBar.config(text=s)),
-                                    host_update_cb=host_cb
-                                )
+                                scripts_to_run = funcs.extract_script_tags(frame._raw_html or '')
+                                if scripts_to_run:
+                                     run_results = funcs.run_scripts(
+                                         scripts_to_run,
+                                         base_url=url2,
+                                         log_fn=lambda s: (print(s), statusBar.config(text=s)),
+                                         host_update_cb=host_cb,
+                                         return_dom=True, 
+                                         collect_dom_changes=True, 
+                                         dom_log_verbose=True
+                                    )
                                 # debug output
                                 print("[debug] run_scripts results (in-place open):", run_results)
                                 
