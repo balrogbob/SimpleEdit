@@ -62,6 +62,7 @@
     <InterpreterReference Include="Global|VisualStudio|AI Workloads" />
   </ItemGroup>
   <ItemGroup>
+    <Folder Include="docs\" />
     <Folder Include="examples\" />
     <Folder Include="out\" />
     <Folder Include="syntax\" />
@@ -73,6 +74,9 @@
   <ItemGroup>
     <Content Include="atcommands.txt" />
     <Content Include="CONTRIBUTING.md" />
+    <Content Include="docs\API.md" />
+    <Content Include="docs\JSMINI.md" />
+    <Content Include="docs\SYNTAX.md" />
     <Content Include="effect_list.md" />
     <Content Include="examples\demo.html" />
     <Content Include="mapflags.txt" />
