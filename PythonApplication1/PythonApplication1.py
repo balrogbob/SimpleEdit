@@ -299,6 +299,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                                 host_update_cb=host_cb,
                                 return_dom=True, 
                                 collect_dom_changes=True, 
+                                html_source=frame._raw_html,
                                 dom_log_verbose=True
                             )
                             # debug output
@@ -379,7 +380,7 @@ def _open_path(path: str, open_in_new_tab: bool = True):
                     host_cb = _make_host_update_cb_for_frame(fr, tx)
                     scripts_to_run = funcs.extract_script_tags(fr._raw_html or '')
                     # run scripts with host callback available in JS context as setRaw(...) and host.setRaw(...)
-                    run_results = funcs.run_scripts(scripts_to_run, base_url=path, log_fn=lambda s: (print(s), statusBar.config(text=s)), host_update_cb=host_cb, return_dom=True, collect_dom_changes=True, dom_log_verbose=True)
+                    run_results = funcs.run_scripts(scripts_to_run, base_url=path, log_fn=lambda s: (print(s), statusBar.config(text=s)), host_update_cb=host_cb, return_dom=True, collect_dom_changes=True, dom_log_verbose=True, html_source=fr._raw_html)
 
                 except Exception:
                     pass
@@ -4162,7 +4163,8 @@ def open_url_action():
                                             log_fn=lambda s: (print(s), statusBar.config(text=s)),
                                             host_update_cb=host_cb,
                                             return_dom=True, 
-                                            collect_dom_changes=True, 
+                                            collect_dom_changes=True,
+                                            html_source=frame._raw_html,
                                             dom_log_verbose=True
                                         )
                                         print("[debug] run_scripts results (toggle raw->rendered):", run_results)
@@ -6700,6 +6702,7 @@ def toggle_raw_rendered():
                         host_update_cb=host_cb,
                         return_dom=True, 
                         collect_dom_changes=True, 
+                        html_source=frame._raw_html,
                         dom_log_verbose=True
                     )
                     print("[debug] run_scripts results (toggle raw->rendered):", run_results)
@@ -8670,6 +8673,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                                     host_update_cb=host_cb,
                                     return_dom=True,
                                     collect_dom_changes=True,
+                                    html_source=fr._raw_html,
                                     dom_log_verbose=True
                             )
 
@@ -8733,6 +8737,7 @@ def fetch_and_open_url(url: str, open_in_new_tab: bool = True, record_history: b
                                          host_update_cb=host_cb,
                                          return_dom=True, 
                                          collect_dom_changes=True, 
+                                         html_source=frame._raw_html,
                                          dom_log_verbose=True
                                     )
                                 # debug output

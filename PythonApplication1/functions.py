@@ -2238,6 +2238,8 @@ def run_scripts(
     collect_dom_changes: bool = False,
     dom_log_verbose: bool = False,
     force_final_redraw: bool = False,
+    html_source: str | None = None,
+    auto_fire_events: bool = False,
 ):
     """
     Execute script entries using jsmini with optional DOM capture and mutation logging.
@@ -2540,7 +2542,6 @@ def run_scripts(
         except Exception:
             console_created = False
 
-    ctx = _create_context(actual_show_console)
     if host_update_cb:
         try:
             ctx['setRaw'] = host_update_cb
@@ -2553,6 +2554,20 @@ def run_scripts(
 
     ctx = _create_context(actual_show_console)
     console_flag = actual_show_console
+
+    # NEW: preload DOM & inline events
+    if html_source:
+        try:
+            nodes = hydrate_js_dom_from_html(html_source, ctx)
+            register_inline_event_handlers(nodes, ctx)
+        except Exception:
+            pass
+
+    # Provide alert()
+    try:
+        install_alert(ctx, log_fn=lambda s: _log_route(s, actual_show_console))
+    except Exception:
+        pass
 
     for idx, entry in enumerate(scripts):
         try:
@@ -2635,7 +2650,11 @@ def run_scripts(
         final_dom_html = _final_flush(ctx, console_flag)
 
     _log_route("[jsconsole] All scripts processed.", console_flag)
-
+    if auto_fire_events:
+        try:
+            auto_fire_clicks(ctx)
+        except Exception:
+            pass
     if return_dom:
         try:
             if collect_dom_changes:
@@ -2649,8 +2668,125 @@ def run_scripts(
             'dom_changes': dom_changes if collect_dom_changes else None
         }
     return results
-
+import jsmini
     
+# --- JS DOM / inline event helpers (added) ----------------------------------
+def hydrate_js_dom_from_html(raw_html: str, ctx: dict):
+    """
+    Populate jsmini's document.body with Element nodes parsed from raw_html.
+    Returns a list of (element, {attr_name: attr_value}) for further processing.
+    Safe no-op if parsing fails.
+    """
+    try:
+        if not raw_html or not isinstance(raw_html, str):
+            return []
+        import jsmini
+        # Use internal fragment parser (already defined in jsmini)
+        nodes = jsmini._parse_inner_html_fragment(raw_html)
+        doc = ctx.get('document')
+        if not isinstance(doc, dict):
+            return []
+        body = doc.get('body')
+        if not hasattr(body, 'appendChild'):
+            return []
+        collected = []
+        for n in nodes:
+            if isinstance(n, jsmini.Element):
+                body.appendChild(n)
+                collected.append((n, dict(n.attrs)))
+            else:
+                # plain text node
+                body.appendChild(str(n))
+        # final redraw so host sees initial body HTML
+        try:
+            fr = doc.get('forceRedraw')
+            if callable(fr):
+                fr()
+        except Exception:
+            pass
+        return collected
+    except Exception:
+        return []
+
+
+def install_alert(ctx: dict, log_fn=None):
+    """
+    Provide a global alert(msg) for scripts that expect it.
+    """
+    try:
+        def _alert(msg=None):
+            s = str(msg) if msg is not None else ''
+            if callable(log_fn):
+                log_fn(f"[alert] {s}")
+            else:
+                print(f"[alert] {s}")
+        ctx['alert'] = _alert
+    except Exception:
+        pass
+
+
+def register_inline_event_handlers(collected_nodes, ctx: dict):
+    """
+    Scan hydrated Element nodes for inline event attributes (currently just onclick)
+    and install JSFunction handlers that evaluate the attribute code when dispatched.
+    """
+    try:
+        import jsmini
+    except Exception:
+        return
+
+    interp = ctx.get('_interp')  # will be set after first run; for pre-run we ignore
+    for el, attrs in collected_nodes:
+        try:
+            onclick_code = attrs.get('onclick')
+            if onclick_code:
+                # Wrap the attribute code in a function body
+                # Use jsmini.run_in_interpreter later (lazy) so we don't need the interpreter yet.
+                def _make_handler(src):
+                    # Create a JSFunction that, when called, evaluates the original snippet
+                    def _native(interp_obj, this_obj, args_list):
+                        try:
+                            # Provide 'this' semantics (not full browser fidelity)
+                            interp_obj.global_env.set_local('this', el)
+                            jsmini.run_in_interpreter(src, interp_obj)
+                        except Exception:
+                            pass
+                        return None
+                    return jsmini.JSFunction(params=[], body=None, env=None, name="inline_onclick", native_impl=_native)
+
+                handler_fn = _make_handler(onclick_code)
+                try:
+                    el.addEventListener('click', handler_fn)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+
+def auto_fire_clicks(ctx: dict):
+    """
+    Optional: Dispatch a 'click' event for every element that has a click listener
+    so effects become visible immediately after load.
+    """
+    try:
+        doc = ctx.get('document')
+        if not isinstance(doc, dict):
+            return
+        body = doc.get('body')
+        if not isinstance(body, jsmini.Element):
+            return
+        def walk(node):
+            try:
+                if hasattr(node, '_listeners') and 'click' in node._listeners:
+                    node.dispatchEvent('click')
+                for ch in getattr(node, 'children', []):
+                    if isinstance(ch, jsmini.Element):
+                        walk(ch)
+            except Exception:
+                pass
+        walk(body)
+    except Exception:
+        pass
 
 def get_hex_color(color_tuple):
     """Return a hex string from a colorchooser return value."""
@@ -2856,6 +2992,7 @@ def _strip_whitespace_between_tags(html: str) -> str:
         return working
     except Exception:
         return html
+
 def _parse_html_and_apply(raw) -> tuple[str, dict]:
     """
     Parse raw HTML fragment or document and extract plain text and tag ranges.
