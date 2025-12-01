@@ -1,6 +1,6 @@
 # ?? SimpleEdit
 
-> A lightweight, batteries-included Python code editor built with ?? and Tkinter
+> A lightweight, batteries-included Python code editor built with SimpleEdit and Tkinter
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
