@@ -300,40 +300,138 @@ def _launch_wizard_dialog(root, wizard):
                     if messagebox.askyesno("Menu Branches", "Do you want to define dialog branches for each menu option?"):
                         branches = {}
                         for opt in options:
+                            # Full dialog builder for each branch
                             branch_dlg = Toplevel(dlg)
                             branch_dlg.title(f"Branch: {opt}")
                             branch_dlg.transient(dlg)
                             branch_dlg.grab_set()
-                            branch_dlg.geometry("400x300")
+                            branch_dlg.geometry("700x500")
                             
-                            branch_frame = ttk.Frame(branch_dlg, padding=12)
-                            branch_frame.pack(fill=BOTH, expand=True)
+                            main_frame = ttk.Frame(branch_dlg, padding=12)
+                            main_frame.pack(fill=BOTH, expand=True)
                             
-                            ttk.Label(branch_frame, text=f"Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
+                            ttk.Label(main_frame, text=f"Dialog Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
                             
-                            branch_text = Text(branch_frame, height=10, wrap=WORD)
-                            branch_text.pack(fill=BOTH, expand=True, pady=(6, 6))
+                            # Branch actions list
+                            branch_actions = []
                             
-                            ttk.Label(branch_frame, text="Enter one command per line:\n- Message text\n- 'next' or 'close'\n- Script commands", 
-                                     justify=LEFT).pack(anchor='w')
+                            # Listbox
+                            list_frame = ttk.Frame(main_frame)
+                            list_frame.pack(fill=BOTH, expand=True, pady=(6, 6))
                             
+                            branch_listbox = Listbox(list_frame, height=10)
+                            branch_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+                            
+                            branch_scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=branch_listbox.yview)
+                            branch_scrollbar.pack(side=RIGHT, fill=Y)
+                            branch_listbox.config(yscrollcommand=branch_scrollbar.set)
+                            
+                            def refresh_branch_list():
+                                branch_listbox.delete(0, END)
+                                for action in branch_actions:
+                                    atype = action.action_type
+                                    if atype == DialogActionEnum.MESSAGE:
+                                        msg = action.parameters.get('message', '')
+                                        if msg.startswith('{SCRIPT}'):
+                                            branch_listbox.insert(END, f"Script: {msg[8:][:30]}...")
+                                        else:
+                                            branch_listbox.insert(END, f"Message: {msg[:35]}...")
+                                    elif atype == DialogActionEnum.NEXT_BUTTON:
+                                        branch_listbox.insert(END, "Next Button")
+                                    elif atype == DialogActionEnum.CLOSE_BUTTON:
+                                        branch_listbox.insert(END, "Close Button")
+                            
+                            def add_branch_msg():
+                                msg = simpledialog.askstring("Add Message", "Enter message text:", parent=branch_dlg)
+                                if msg:
+                                    branch_actions.append(DialogAction(DialogActionEnum.MESSAGE, {'message': msg}))
+                                    refresh_branch_list()
+                            
+                            def add_branch_next():
+                                branch_actions.append(DialogAction(DialogActionEnum.NEXT_BUTTON, {}))
+                                refresh_branch_list()
+                            
+                            def add_branch_close():
+                                branch_actions.append(DialogAction(DialogActionEnum.CLOSE_BUTTON, {}))
+                                refresh_branch_list()
+                            
+                            def add_branch_script():
+                                cmd_str = simpledialog.askstring("Script Command", "Enter command (e.g., set Zeny, Zeny - 100):", parent=branch_dlg)
+                                if cmd_str:
+                                    branch_actions.append(DialogAction(DialogActionEnum.MESSAGE, {'message': f"{{SCRIPT}}{cmd_str}"}))
+                                    refresh_branch_list()
+                            
+                            def remove_branch_act():
+                                sel = branch_listbox.curselection()
+                                if sel:
+                                    del branch_actions[sel[0]]
+                                    refresh_branch_list()
+                            
+                            def move_branch_up():
+                                sel = branch_listbox.curselection()
+                                if sel and sel[0] > 0:
+                                    idx = sel[0]
+                                    branch_actions[idx], branch_actions[idx-1] = branch_actions[idx-1], branch_actions[idx]
+                                    refresh_branch_list()
+                                    branch_listbox.selection_set(idx-1)
+                            
+                            def move_branch_down():
+                                sel = branch_listbox.curselection()
+                                if sel and sel[0] < len(branch_actions) - 1:
+                                    idx = sel[0]
+                                    branch_actions[idx], branch_actions[idx+1] = branch_actions[idx+1], branch_actions[idx]
+                                    refresh_branch_list()
+                                    branch_listbox.selection_set(idx+1)
+                            
+                            # Action buttons
+                            action_frame = ttk.Frame(main_frame)
+                            action_frame.pack(fill=X, pady=(0, 6))
+                            
+                            ttk.Label(action_frame, text="Add:").pack(side=LEFT, padx=(0, 6))
+                            ttk.Button(action_frame, text="Message", command=add_branch_msg, width=9).pack(side=LEFT, padx=2)
+                            ttk.Button(action_frame, text="Next", command=add_branch_next, width=6).pack(side=LEFT, padx=2)
+                            ttk.Button(action_frame, text="Close", command=add_branch_close, width=6).pack(side=LEFT, padx=2)
+                            ttk.Button(action_frame, text="Script", command=add_branch_script, width=7).pack(side=LEFT, padx=2)
+                            
+                            # Reorder buttons
+                            order_frame = ttk.Frame(main_frame)
+                            order_frame.pack(fill=X, pady=(0, 6))
+                            
+                            ttk.Label(order_frame, text="Reorder:").pack(side=LEFT, padx=(0, 6))
+                            ttk.Button(order_frame, text="↑", command=move_branch_up, width=4).pack(side=LEFT, padx=2)
+                            ttk.Button(order_frame, text="↓", command=move_branch_down, width=4).pack(side=LEFT, padx=2)
+                            ttk.Button(order_frame, text="✕ Remove", command=remove_branch_act, width=10).pack(side=LEFT, padx=2)
+                            
+                            # Bottom buttons
                             branch_saved = [False]
-                            branch_content = ['']
                             
                             def save_branch():
-                                branch_content[0] = branch_text.get('1.0', 'end').strip()
+                                if branch_actions:
+                                    # Convert actions to text format for storage
+                                    lines = []
+                                    for action in branch_actions:
+                                        cmd = action.to_script_command()
+                                        # Simple format: one command per line
+                                        if action.action_type == DialogActionEnum.MESSAGE:
+                                            msg = action.parameters.get('message', '')
+                                            if msg.startswith('{SCRIPT}'):
+                                                lines.append(msg[8:])
+                                            else:
+                                                lines.append(msg)
+                                        elif action.action_type == DialogActionEnum.NEXT_BUTTON:
+                                            lines.append('next')
+                                        elif action.action_type == DialogActionEnum.CLOSE_BUTTON:
+                                            lines.append('close')
+                                    branches[opt] = '\n'.join(lines)
                                 branch_saved[0] = True
                                 branch_dlg.destroy()
                             
-                            btn_frame = ttk.Frame(branch_frame)
+                            btn_frame = ttk.Frame(main_frame)
                             btn_frame.pack(fill=X, pady=(6, 0))
-                            ttk.Button(btn_frame, text="Save", command=save_branch).pack(side=RIGHT, padx=4)
+                            ttk.Button(btn_frame, text="Save Branch", command=save_branch).pack(side=RIGHT, padx=4)
                             ttk.Button(btn_frame, text="Skip", command=branch_dlg.destroy).pack(side=RIGHT, padx=4)
                             
                             branch_dlg.wait_window()
-                            
-                            if branch_saved[0] and branch_content[0]:
-                                branches[opt] = branch_content[0]
                         
                         existing_actions.append(DialogAction(DialogActionEnum.MENU, {'options': options, 'branches': branches}))
                     else:
@@ -848,40 +946,136 @@ def launch_dialog_builder(root, get_textarea):
                 if messagebox.askyesno("Menu Branches", "Do you want to define dialog branches for each menu option?"):
                     branches = {}
                     for opt in options:
+                        # Full dialog builder for each branch
                         branch_dlg = Toplevel(dlg)
                         branch_dlg.title(f"Branch: {opt}")
                         branch_dlg.transient(dlg)
                         branch_dlg.grab_set()
-                        branch_dlg.geometry("400x300")
+                        branch_dlg.geometry("700x500")
                         
-                        branch_frame = ttk.Frame(branch_dlg, padding=12)
-                        branch_frame.pack(fill=BOTH, expand=True)
+                        main_frame = ttk.Frame(branch_dlg, padding=12)
+                        main_frame.pack(fill=BOTH, expand=True)
                         
-                        ttk.Label(branch_frame, text=f"Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
+                        ttk.Label(main_frame, text=f"Dialog Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
                         
-                        branch_text = Text(branch_frame, height=10, wrap=WORD)
-                        branch_text.pack(fill=BOTH, expand=True, pady=(6, 6))
+                        # Branch actions list
+                        branch_actions = []
                         
-                        ttk.Label(branch_frame, text="Enter one command per line:\n- Message text\n- 'next' or 'close'\n- Script commands", 
-                                 justify=LEFT).pack(anchor='w')
+                        # Listbox
+                        list_frame = ttk.Frame(main_frame)
+                        list_frame.pack(fill=BOTH, expand=True, pady=(6, 6))
                         
+                        branch_listbox = Listbox(list_frame, height=10)
+                        branch_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+                        
+                        branch_scrollbar = ttk.Scrollbar(list_frame, orient='vertical', command=branch_listbox.yview)
+                        branch_scrollbar.pack(side=RIGHT, fill=Y)
+                        branch_listbox.config(yscrollcommand=branch_scrollbar.set)
+                        
+                        def refresh_branch_list():
+                            branch_listbox.delete(0, END)
+                            for action in branch_actions:
+                                atype = action.action_type
+                                if atype == DialogActionEnum.MESSAGE:
+                                    msg = action.parameters.get('message', '')
+                                    if msg.startswith('{SCRIPT}'):
+                                        branch_listbox.insert(END, f"Script: {msg[8:][:30]}...")
+                                    else:
+                                        branch_listbox.insert(END, f"Message: {msg[:35]}...")
+                                elif atype == DialogActionEnum.NEXT_BUTTON:
+                                    branch_listbox.insert(END, "Next Button")
+                                elif atype == DialogActionEnum.CLOSE_BUTTON:
+                                    branch_listbox.insert(END, "Close Button")
+                        
+                        def add_branch_msg():
+                            msg = simpledialog.askstring("Add Message", "Enter message text:", parent=branch_dlg)
+                            if msg:
+                                branch_actions.append(DialogAction(DialogActionEnum.MESSAGE, {'message': msg}))
+                                refresh_branch_list()
+                        
+                        def add_branch_next():
+                            branch_actions.append(DialogAction(DialogActionEnum.NEXT_BUTTON, {}))
+                            refresh_branch_list()
+                        
+                        def add_branch_close():
+                            branch_actions.append(DialogAction(DialogActionEnum.CLOSE_BUTTON, {}))
+                            refresh_branch_list()
+                        
+                        def add_branch_script():
+                            cmd_str = simpledialog.askstring("Script Command", "Enter command (e.g., set Zeny, Zeny - 100):", parent=branch_dlg)
+                            if cmd_str:
+                                branch_actions.append(DialogAction(DialogActionEnum.MESSAGE, {'message': f"{{SCRIPT}}{cmd_str}"}))
+                                refresh_branch_list()
+                        
+                        def remove_branch_act():
+                            sel = branch_listbox.curselection()
+                            if sel:
+                                del branch_actions[sel[0]]
+                                refresh_branch_list()
+                        
+                        def move_branch_up():
+                            sel = branch_listbox.curselection()
+                            if sel and sel[0] > 0:
+                                idx = sel[0]
+                                branch_actions[idx], branch_actions[idx-1] = branch_actions[idx-1], branch_actions[idx]
+                                refresh_branch_list()
+                                branch_listbox.selection_set(idx-1)
+                        
+                        def move_branch_down():
+                            sel = branch_listbox.curselection()
+                            if sel and sel[0] < len(branch_actions) - 1:
+                                idx = sel[0]
+                                branch_actions[idx], branch_actions[idx+1] = branch_actions[idx+1], branch_actions[idx]
+                                refresh_branch_list()
+                                branch_listbox.selection_set(idx+1)
+                        
+                        # Action buttons
+                        action_frame = ttk.Frame(main_frame)
+                        action_frame.pack(fill=X, pady=(0, 6))
+                        
+                        ttk.Label(action_frame, text="Add:").pack(side=LEFT, padx=(0, 6))
+                        ttk.Button(action_frame, text="Message", command=add_branch_msg, width=9).pack(side=LEFT, padx=2)
+                        ttk.Button(action_frame, text="Next", command=add_branch_next, width=6).pack(side=LEFT, padx=2)
+                        ttk.Button(action_frame, text="Close", command=add_branch_close, width=6).pack(side=LEFT, padx=2)
+                        ttk.Button(action_frame, text="Script", command=add_branch_script, width=7).pack(side=LEFT, padx=2)
+                        
+                        # Reorder buttons
+                        order_frame = ttk.Frame(main_frame)
+                        order_frame.pack(fill=X, pady=(0, 6))
+                        
+                        ttk.Label(order_frame, text="Reorder:").pack(side=LEFT, padx=(0, 6))
+                        ttk.Button(order_frame, text="↑", command=move_branch_up, width=4).pack(side=LEFT, padx=2)
+                        ttk.Button(order_frame, text="↓", command=move_branch_down, width=4).pack(side=LEFT, padx=2)
+                        ttk.Button(order_frame, text="✕ Remove", command=remove_branch_act, width=10).pack(side=LEFT, padx=2)
+                        
+                        # Bottom buttons
                         branch_saved = [False]
-                        branch_content = ['']
                         
                         def save_branch():
-                            branch_content[0] = branch_text.get('1.0', 'end').strip()
+                            if branch_actions:
+                                # Convert actions to text format for storage
+                                lines = []
+                                for action in branch_actions:
+                                    if action.action_type == DialogActionEnum.MESSAGE:
+                                        msg = action.parameters.get('message', '')
+                                        if msg.startswith('{SCRIPT}'):
+                                            lines.append(msg[8:])
+                                        else:
+                                            lines.append(msg)
+                                    elif action.action_type == DialogActionEnum.NEXT_BUTTON:
+                                        lines.append('next')
+                                    elif action.action_type == DialogActionEnum.CLOSE_BUTTON:
+                                        lines.append('close')
+                                branches[opt] = '\n'.join(lines)
                             branch_saved[0] = True
                             branch_dlg.destroy()
                         
-                        btn_frame_branch = ttk.Frame(branch_frame)
-                        btn_frame_branch.pack(fill=X, pady=(6, 0))
-                        ttk.Button(btn_frame_branch, text="Save", command=save_branch).pack(side=RIGHT, padx=4)
-                        ttk.Button(btn_frame_branch, text="Skip", command=branch_dlg.destroy).pack(side=RIGHT, padx=4)
+                        btn_frame_br = ttk.Frame(main_frame)
+                        btn_frame_br.pack(fill=X, pady=(6, 0))
+                        ttk.Button(btn_frame_br, text="Save Branch", command=save_branch).pack(side=RIGHT, padx=4)
+                        ttk.Button(btn_frame_br, text="Skip", command=branch_dlg.destroy).pack(side=RIGHT, padx=4)
                         
                         branch_dlg.wait_window()
-                        
-                        if branch_saved[0] and branch_content[0]:
-                            branches[opt] = branch_content[0]
                     
                     action = DialogAction(DialogActionEnum.MENU, {'options': options, 'branches': branches})
                     dialog_actions.append(action)
@@ -1069,25 +1263,45 @@ def launch_dialog_builder(root, get_textarea):
             
         # RIGHT: Preview
         ttk.Label(right_frame, text="Preview:", font=("Arial", 10, "bold")).pack(anchor='w')
-            
+        
         preview_text_frame = ttk.Frame(right_frame)
         preview_text_frame.pack(fill=BOTH, expand=True, pady=(6, 0))
-            
+        
         preview_text = Text(preview_text_frame, wrap=WORD, height=20)
         preview_text.pack(side=LEFT, fill=BOTH, expand=True)
-            
+        
         preview_scrollbar = ttk.Scrollbar(preview_text_frame, orient='vertical', command=preview_text.yview)
         preview_scrollbar.pack(side=RIGHT, fill=Y)
         preview_text.config(yscrollcommand=preview_scrollbar.set)
-            
+        
         def update_preview():
             preview_text.delete('1.0', END)
             if not dialog_actions:
                 preview_text.insert('1.0', "// No actions added yet")
                 return
-                
+            
             commands = [action.to_script_command() for action in dialog_actions]
             preview_text.insert('1.0', '\n'.join(commands))
+        
+        # Insert button below preview
+        preview_btn_frame = ttk.Frame(right_frame)
+        preview_btn_frame.pack(fill=X, pady=(6, 0))
+        
+        def insert_preview():
+            """Insert preview content directly into editor"""
+            if not dialog_actions:
+                messagebox.showwarning("Empty", "No dialog actions to insert.")
+                return
+            
+            try:
+                commands = [action.to_script_command() for action in dialog_actions]
+                output = '\n'.join(commands)
+                textArea.insert('end', '\n' + output + '\n')
+                messagebox.showinfo("Success", "Dialog commands inserted into editor!")
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to insert: {e}")
+        
+        ttk.Button(preview_btn_frame, text="Insert into Editor", command=insert_preview).pack(side=LEFT, padx=4)
             
         # Bottom buttons
         btn_frame = ttk.Frame(main_frame)
