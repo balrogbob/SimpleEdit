@@ -37,9 +37,8 @@
     <Compile Include="PythonApplication1.py" />
     <Compile Include="rathena-tools\__init__.py" />
     <Compile Include="rathena_integration_examples.py" />
-    <Compile Include="rathena_script_gen.py" />
-    <Compile Include="rathena_script_ui.py" />
     <Compile Include="rathena_tools\__init__.py" />
+    <Compile Include="rathena_tools_menu.py" />
     <Compile Include="recent_files.py" />
     <Compile Include="run_jsmini_demo.py" />
     <Compile Include="tests\test_base.py" />
@@ -74,6 +73,7 @@
     <Folder Include="examples\" />
     <Folder Include="out\" />
     <Folder Include="rathena_tools\" />
+    <Folder Include="rathena-tools\" />
     <Folder Include="syntax\" />
     <Folder Include="templates\" />
     <Folder Include="tests\" />
@@ -81,6 +81,7 @@
     <Folder Include="worker_logs\" />
   </ItemGroup>
   <ItemGroup>
+    <Content Include="00_INTEGRATION_COMPLETE.md" />
     <Content Include="atcommands.txt" />
     <Content Include="COMPLETE_INTEGRATION_SUMMARY.md" />
     <Content Include="CONTRIBUTING.md" />
@@ -107,7 +108,11 @@
     <Content Include="examples\demo.html" />
     <Content Include="FINAL_CHECKLIST.md" />
     <Content Include="INDEX.md" />
+    <Content Include="INTEGRATION_COMPLETE_VERIFICATION.md" />
+    <Content Include="INTEGRATION_COMPLIANCE_CHECKLIST.md" />
     <Content Include="INTEGRATION_FILES_SUMMARY.md" />
+    <Content Include="INTEGRATION_FINAL_SUMMARY.md" />
+    <Content Include="INTEGRATION_FIX_SUMMARY.md" />
     <Content Include="mapflags.txt" />
     <Content Include="MIGRATION_COMPLETE.md" />
     <Content Include="MIGRATION_SUMMARY.md" />
@@ -120,10 +125,15 @@
     <Content Include="quest_variables.txt" />
     <Content Include="QUICK_REFERENCE.md" />
     <Content Include="rathena-tools\README.md" />
+    <Content Include="RATHENA_INTEGRATION_ARCHITECTURE.md" />
     <Content Include="RATHENA_INTEGRATION_STATUS.md" />
     <Content Include="RATHENA_SCRIPT_GUIDE.md" />
-    <Content Include="RATHENA_TOOLS_INTEGRATION.md" />
+    <Content Include="RATHENA_TOOLS_INTEGRATION_PROPER.md" />
     <Content Include="RATHENA_TOOLS_LOCATION.md" />
+    <Content Include="RATHENA_TOOLS_MENU_FIX.md" />
+    <Content Include="RATHENA_TOOLS_MENU_QUICK_REFERENCE.md" />
+    <Content Include="RATHENA_TOOLS_MENU_SETUP.md" />
+    <Content Include="RATHENA_TOOLS_MENU_VERIFICATION.md" />
     <Content Include="RATHENA_TOOLS_README.md" />
     <Content Include="README_COMPLETE_PACKAGE.md" />
     <Content Include="README_RATHENA_COMPLETE.md" />

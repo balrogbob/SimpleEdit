@@ -2,14 +2,15 @@
 
 ## Overview
 
-The rAthena Script Development Tools have been integrated into SimpleEdit's `PythonApplication1` project. They are located in the `rathena-tools/` directory and can be imported and used by SimpleEdit or external Python scripts.
+The rAthena Script Development Tools have been integrated into SimpleEdit's `PythonApplication1` project. They are located in the `rathena-tools/` package directory and can be imported and used by SimpleEdit or external Python scripts.
 
 ## Directory Structure
 
 ```
 PythonApplication1/
 ├── PythonApplication1.py              ← Main SimpleEdit application
-├── rathena-tools/                     ← rAthena Tools (NEW LOCATION)
+├── rathena_tools_menu.py              ← Menu integration module (NEW)
+├── rathena-tools/                     ← rAthena Tools Package (SEPARATE MODULE)
 │   ├── __init__.py                    ← Package init with imports
 │   ├── README.md                      ← Tools overview
 │   ├── rathena_script_gen.py          ← Generator engine
@@ -22,14 +23,39 @@ PythonApplication1/
 └── [other SimpleEdit files]
 ```
 
+## Important: Package Structure
+
+⚠️ **IMPORTANT**: The `rathena-tools/` directory is a **separate Python package module**, not part of the application core. It should:
+- ✅ Remain in the `rathena-tools/` subdirectory
+- ✅ NOT be moved to the application root directory
+- ✅ Be imported using proper path setup (see below)
+- ✅ Maintain its own `__init__.py` and module structure
+
 ## How to Import from SimpleEdit
 
-The rAthena tools are now automatically available when SimpleEdit starts. They are added to `sys.path`, so you can import them anywhere in the SimpleEdit codebase:
+The rAthena tools require proper path setup to import correctly. Use this pattern:
+
+### Pattern: Proper Path Setup with sys.path
+
+```python
+import os
+import sys
+
+# Ensure rathena-tools package is in path
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_rathena_path = os.path.join(_current_dir, 'rathena-tools')
+if _rathena_path not in sys.path:
+    sys.path.insert(0, _rathena_path)
+
+# Now you can import
+from rathena_script_gen import ScriptGenerator, ScriptNPC
+from rathena_script_ui import DialogBuilder, NPCWizard
+```
 
 ### From within SimpleEdit plugins:
 
 ```python
-# Direct imports (after SimpleEdit initialization)
+# After SimpleEdit initialization and path setup
 from rathena_script_gen import ScriptGenerator, ScriptNPC
 from rathena_script_ui import DialogBuilder, NPCWizard
 ```
@@ -40,11 +66,15 @@ from rathena_script_ui import DialogBuilder, NPCWizard
 import sys
 import os
 
-# Add rathena-tools to path
-rathena_path = os.path.join(os.path.dirname(__file__), 'rathena-tools')
-sys.path.insert(0, rathena_path)
+# Get path to rathena-tools package
+script_dir = os.path.dirname(os.path.abspath(__file__))
+rathena_path = os.path.join(script_dir, 'rathena-tools')
 
-# Now you can import
+# Add to path
+if rathena_path not in sys.path:
+    sys.path.insert(0, rathena_path)
+
+# Now import
 from rathena_script_gen import ScriptGenerator, ScriptNPC
 from rathena_script_ui import DialogBuilder, NPCWizard
 ```
@@ -52,6 +82,14 @@ from rathena_script_ui import DialogBuilder, NPCWizard
 ### Using the convenience package interface:
 
 ```python
+import sys
+import os
+
+# Setup path first
+rathena_path = os.path.join(os.path.dirname(__file__), 'rathena-tools')
+if rathena_path not in sys.path:
+    sys.path.insert(0, rathena_path)
+
 # Import the whole package
 import rathena_tools
 
@@ -74,25 +112,22 @@ print(gen.generate_script())
 - `ScriptCondition` - Conditional logic
 - `ScriptLoop` - Loop structures
 - `QuickScriptBuilders` - Pre-built templates
-- `SimpleEditCallback` - Integration adapter
 
 ### UI Classes (from rathena_script_ui)
 - `DialogBuilder` - Fluent dialog API
-- `NPCWizard` - Step-by-step NPC creation
+- `NPCWizard` - Step-by-step NPC creation (requires on_complete callback)
 - `ScriptValidator` - Validation engine
 - `ScriptTemplates` - Pre-defined patterns
 - `SimpleEditIntegration` - IDE bridge
-
-### Convenience Functions (from rathena_tools package)
-- `create_simple_npc()` - Quick NPC creation
-- `create_simple_dialog()` - Quick dialog creation
-- `validate_script()` - Script validation
 
 ## Quick Start Examples
 
 ### Example 1: Simple NPC Script
 
 ```python
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rathena-tools'))
+
 from rathena_script_gen import ScriptGenerator, ScriptNPC
 
 gen = ScriptGenerator()
@@ -111,6 +146,9 @@ print(script)
 ### Example 2: Dialog with Builder
 
 ```python
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rathena-tools'))
+
 from rathena_script_ui import DialogBuilder
 
 dialog = DialogBuilder()
@@ -127,99 +165,55 @@ for cmd in commands:
     print(cmd)
 ```
 
-### Example 3: Using Helper Functions
+### Example 3: NPC Wizard with Callback
 
 ```python
-import rathena_tools
+import os, sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rathena-tools'))
 
-# Create a simple NPC
-gen = rathena_tools.create_simple_npc(
-    "Healer", "prontera", 200, 200,
-    [
-        'mes "[Healer]";',
-        'mes "Need healing?";',
-        'heal @me,999,999;',
-        'close;'
-    ]
-)
+from rathena_script_ui import NPCWizard
+from rathena_script_gen import ScriptGenerator
 
-# Generate the script
-script = gen.generate_script()
-
-# Validate it
-is_valid, errors = rathena_tools.validate_script(script)
-if is_valid:
-    print("Script is valid!")
+def on_npc_complete(npc):
+    """Callback when wizard completes"""
+    gen = ScriptGenerator()
+    gen.add_npc(npc)
+    script = gen.generate_script()
+    print(f"Generated NPC: {npc.name}")
     print(script)
-else:
-    print("Validation errors:")
-    for error in errors:
-        print(f"  - {error}")
+
+# Create wizard with callback
+wizard = NPCWizard(on_npc_complete)
+# Wizard will call on_npc_complete when finished
 ```
 
 ## Documentation Access
 
-All documentation is now in the `rathena-tools/` directory:
+All documentation is in the `rathena-tools/` package directory:
 
 | Document | Purpose |
 |----------|---------|
 | `README.md` | Package overview and navigation |
 | `RATHENA_SCRIPT_GUIDE.md` | Complete 9-chapter scripting guide |
 | `QUICK_REFERENCE.md` | One-page command and syntax reference |
-| `RATHENA_TOOLS_README.md` | Python API documentation |
-| `examples.py` | 10 working code examples |
+| `examples.py` | Working code examples |
 
-## Integration Points
+## Integration Point: Menu Integration
 
-### SimpleEdit Menu Integration
-
-To add rAthena tools to the SimpleEdit menu:
+The `rathena_tools_menu.py` module provides complete menu integration:
 
 ```python
-def add_rathena_menu():
-    """Add rAthena tools to the Tools menu."""
-    import rathena_tools
-    
-    # Create menu item
-    menu.add_command(
-        label="Create rAthena NPC",
-        command=open_npc_wizard
-    )
+from rathena_tools_menu import create_rathena_menu
 
-def open_npc_wizard():
-    """Open the NPC wizard dialog."""
-    try:
-        from rathena_script_ui import NPCWizard
-        wizard = NPCWizard()
-        wizard.show()  # Show dialog/wizard
-    except ImportError:
-        print("rAthena tools not available")
+# In SimpleEdit initialization:
+rathena_menu = create_rathena_menu(root, menuBar, None)
 ```
 
-### Validation Integration
-
-To validate scripts before saving:
-
-```python
-def save_file_with_validation():
-    """Save file with rAthena script validation."""
-    try:
-        import rathena_tools
-        
-        content = get_editor_content()
-        is_valid, errors = rathena_tools.validate_script(content)
-        
-        if not is_valid:
-            print("Validation errors:")
-            for error in errors:
-                print(f"  {error}")
-        else:
-            save_file(content)
-            print("File saved successfully!")
-    except ImportError:
-        # Tools not available, save anyway
-        save_file(content)
-```
+This automatically:
+- ✅ Sets up sys.path for rathena-tools imports
+- ✅ Creates all menu items
+- ✅ Handles callbacks and dialogs
+- ✅ Manages textArea references dynamically
 
 ## Troubleshooting
 
@@ -227,25 +221,27 @@ def save_file_with_validation():
 
 If you get `ImportError: No module named 'rathena_script_gen'`:
 
-1. Verify `rathena-tools/` directory exists in `PythonApplication1/`
-2. Check that `rathena_script_gen.py` is in that directory
-3. Ensure Python path includes the `rathena-tools/` directory
-4. Try restarting SimpleEdit
+1. ✅ Verify `rathena-tools/` directory exists in `PythonApplication1/`
+2. ✅ Check that `rathena_script_gen.py` is in `rathena-tools/` directory
+3. ✅ Use the proper path setup code (see above)
+4. ✅ Ensure `rathena-tools/__init__.py` exists
+5. ✅ Try restarting SimpleEdit
 
 ### Module Not Found
 
-If `rathena_tools` package import fails:
+If package import fails:
 
-1. Verify `rathena-tools/__init__.py` exists and is not empty
-2. Check file permissions
+1. Verify `rathena-tools/__init__.py` exists with proper imports
+2. Check file permissions in `rathena-tools/`
 3. Try importing specific modules directly:
    ```python
+   sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'rathena-tools'))
    from rathena_script_gen import ScriptGenerator
    ```
 
 ### Path Issues
 
-If relative imports fail, use absolute path:
+Always use absolute paths:
 
 ```python
 import sys
@@ -299,27 +295,16 @@ from rathena_script_gen import ScriptGenerator
 - Quick validation: <100ms
 - Responsive UI dialogs
 
-## License
+## Next Steps
 
-MIT License - See rathena-tools/README.md for details
-
-## Support
-
-For help with:
-- **rAthena scripting**: See `RATHENA_SCRIPT_GUIDE.md`
-- **Python API**: See `RATHENA_TOOLS_README.md`
-- **Code examples**: Run `examples.py` or read docs
-- **SimpleEdit integration**: See this file
-
-## What's Next?
-
-1. **Review** the documentation in `rathena-tools/`
-2. **Run** examples to see working code
-3. **Integrate** into SimpleEdit menus and plugins
-4. **Build** your rAthena scripts!
+1. **Understand the package structure** - rathena-tools is a separate module
+2. **Review** the documentation in `rathena-tools/`
+3. **Run** examples to see working code
+4. **Use** the menu integration in SimpleEdit
+5. **Build** your rAthena scripts!
 
 ---
 
-**Status**: ✅ Complete and Ready to Use
+**Status**: ✅ Properly Integrated as Separate Package Module
 
-The rAthena tools are now fully integrated into SimpleEdit and ready for use.
+The rAthena tools are now properly integrated as a separate package into SimpleEdit, maintaining proper module structure and isolation.

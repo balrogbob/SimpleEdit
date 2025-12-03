@@ -1312,6 +1312,14 @@ symbolsMenu = Menu(menuBar, tearoff=False)
 menuBar.add_cascade(label="Symbols", menu=symbolsMenu)
 symbolsMenu.add_command(label="Manage Symbols...", command=lambda: open_symbols_manager())
 
+# --- rAthena Tools menu -------------------------------------------------
+try:
+    if _RATHENA_TOOLS_AVAILABLE:
+        import rathena_tools_menu
+        rathena_tools_menu.create_rathena_menu(root, menuBar, None)  # textArea not created yet
+except Exception as e:
+    print(f"[DEBUG] Failed to create rAthena Tools menu: {e}")
+
 
 def open_symbols_manager():
     """Small dialog to view/edit/remove/swap persisted vars/defs."""
