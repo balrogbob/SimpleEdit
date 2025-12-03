@@ -2964,6 +2964,24 @@ def insert_quick_npc(root, get_textarea):
     preview_scroll = ttk.Scrollbar(preview_frame, orient='vertical', command=preview_text.yview)
     preview_scroll.pack(side=RIGHT, fill=Y)
     preview_text.config(yscrollcommand=preview_scroll.set, state=DISABLED)
+    
+    # Insert button under preview to copy preview into editor
+    preview_btn_frame = ttk.Frame(right_frame)
+    preview_btn_frame.pack(fill=X, pady=(6, 0))
+
+    def insert_preview_to_editor():
+        """Insert the current preview text into the editor at cursor."""
+        try:
+            content = preview_text.get('1.0', 'end-1c')
+            if not content.strip():
+                messagebox.showwarning("Empty", "Preview is empty.")
+                return
+            textArea.insert('insert', '\n' + content + '\n')
+            messagebox.showinfo("Success", "Preview inserted into editor!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to insert preview: {e}")
+
+    ttk.Button(preview_btn_frame, text="Insert into Editor", command=insert_preview_to_editor).pack(side=LEFT, padx=4)
         
     def update_preview(*args):
         """Update the preview with current selections"""
