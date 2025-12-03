@@ -94,6 +94,7 @@
     <Content Include="docs\CONTRIBUTING.md" />
     <Content Include="docs\DATA-FORMATS.md" />
     <Content Include="docs\development-process.md" />
+    <Content Include="docs\DOCUMENTATION_CONSOLIDATED.md" />
     <Content Include="docs\EDITOR-USAGE.md" />
     <Content Include="docs\EXAMPLES.md" />
     <Content Include="docs\FAQ.md" />
@@ -114,6 +115,7 @@
     <Content Include="docs\RATHENA_TOOLS_MENU.md" />
     <Content Include="docs\RATHENA_TOOLS_PACKAGE_OVERVIEW.md" />
     <Content Include="docs\RATHENA_TOOLS_QUICK_REF.md" />
+    <Content Include="docs\README.md" />
     <Content Include="docs\SYNTAX.md" />
     <Content Include="docs\TROUBLESHOOTING.md" />
     <Content Include="docs\VALIDATOR_CASE_STATEMENT_FIX.md" />

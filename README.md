@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![Version 0.0.3](https://img.shields.io/badge/Version-0.0.3-brightgreen.svg)](#)
+[![Version 0.2.0](https://img.shields.io/badge/Version-2.0.0-brightgreen.svg)](#)
 
 </div>
 
@@ -28,9 +28,9 @@
 
 ## 🎯 About
 
-Started as a weekend boredom project and evolved into a fully-featured Python code editor. Features **syntax highlighting**, **text formatting** (bold/italic/underline), **file management**, and experimental **JavaScript execution** support.
+SimpleEdit started as a weekend project and has evolved into a comprehensive development environment for both Python and **rAthena (Ragnarok Online) server development**. Features advanced **syntax highlighting**, **text formatting**, **code validation**, and integrated **rAthena script development tools**.
 
-> **Fun fact:** The editor is written in the editor it powers! 🎉
+> **Complete rAthena Toolkit:** Generate NPCs, validate scripts, manage YAML databases, and more - all from within the editor! 🎮
 
 ### ⚡ Quick Stats
 
@@ -38,8 +38,10 @@ Started as a weekend boredom project and evolved into a fully-featured Python co
 |---------|---------|
 | 🎨 **Pure Tkinter** | No external GUI dependencies required |
 | ⚙️ **Threaded** | Responsive UI with background syntax highlighting |
-| 🤖 **Optional AI** | GPT-2 powered code suggestions (if ML libraries available) |
-| 🌐 **HTML/Markdown Support** | Parse and render web documents |
+| 🎮 **rAthena Tools** | Complete NPC/script development and validation toolkit |
+| 🔍 **Validators** | Script and YAML database validation with auto-fix suggestions |
+| 🤖 **Optional AI** | GPT-2 based code suggestions (if ML libraries available) |
+| 🌐 **HTML/Markdown** | Parse and render web documents |
 | 🖥️ **Cross-Platform** | Windows executable or Linux/Mac via source
 
 ## 📸 Screenshots
@@ -51,6 +53,32 @@ Started as a weekend boredom project and evolved into a fully-featured Python co
 ---
 
 ## 🚀 Core Features
+
+### 🎮 rAthena Script Development Tools (NEW!)
+
+Complete toolkit for rAthena (Ragnarok Online) server development:
+
+| Feature | Description |
+|---------|-------------|
+| ✅ **Script Validator** | Validate NPC scripts with detailed error reporting |
+| ✅ **YAML Database Validator** | Validate quest_db.yml, item_db.yml, mob_db.yml with fallback parser |
+| 🎨 **NPC Wizard** | Interactive step-by-step NPC creation |
+| 💬 **Dialog Builder** | Visual dialog flow designer |
+| 📜 **Script Generator** | Programmatic NPC/function generation |
+| 📋 **Quick Templates** | Pre-built NPC templates for common patterns |
+| 🔍 **Syntax Highlighting** | Full rAthena NPC script and YAML support |
+
+**Validation Features:**
+- ✅ Syntax errors (missing semicolons, brackets, quotes)
+- ✅ Indentation problems (tabs/spaces mixing)
+- ✅ Invalid commands and typos
+- ✅ YAML structure and schema compliance
+- ✅ Auto-fix suggestions for common issues
+- ✅ Works offline (fallback YAML parser included)
+
+[📖 Complete rAthena Tools Guide](PythonApplication1/docs/RATHENA_TOOLS_MENU.md)
+
+---
 
 ### 📝 Text Editing & Formatting
 
@@ -83,7 +111,7 @@ Started as a weekend boredom project and evolved into a fully-featured Python co
 | 🔗 **Link Extraction** | Captures and preserves hyperlinks with metadata |
 | 📐 **Smart Whitespace** | Intelligent HTML parsing that preserves content structure |
 
-**Supported Code Languages:** Python • JSON • JavaScript • HTML • YAML • C/C++ • Markdown • Rathena NPC/YAML
+**Supported Code Languages:** Python • JSON • JavaScript • HTML • YAML • C/C++ • Markdown • **rAthena NPC** • **rAthena YAML**
 
 ### ⚡ JavaScript Execution (Experimental)
 
@@ -153,6 +181,7 @@ wine PythonApplication1.exe
 - `tkinter` (built-in with most Python installations)
 
 #### Optional
+- `pyyaml` - YAML database validation (falls back to built-in parser if not available)
 - `torch` - AI autocomplete
 - `tiktoken` - AI tokenizer
 - `pyinstaller` - Build Windows executable
@@ -160,6 +189,33 @@ wine PythonApplication1.exe
 ---
 
 ## 📖 Usage
+
+### rAthena Script Development
+
+**Access via:** `rAthena Tools` menu
+
+1. **Validate Scripts** - `rAthena Tools` → `Validate Script`
+   - Checks syntax, indentation, commands
+   - Reports errors with line numbers
+   - Suggests fixes
+
+2. **Validate YAML Databases** - `rAthena Tools` → `Validate YAML Database`
+   - Validates quest_db.yml, item_db.yml, mob_db.yml
+   - Schema compliance checking
+   - Works without PyYAML (fallback parser)
+
+3. **Create NPCs** - `rAthena Tools` → `NPC Wizard`
+   - Interactive NPC creation
+   - Dialog flow design
+   - Quick templates
+
+4. **Insert Templates** - `rAthena Tools` → `Insert Quick NPC`
+   - Pre-built NPC patterns
+   - Merchant, healer, warper templates
+
+[📖 rAthena Tools Documentation](PythonApplication1/docs/RATHENA_TOOLS_MENU.md)
+
+---
 
 ### Basic Workflow
 
@@ -260,20 +316,40 @@ urls=["https://example.com"]
 
 ```
 SimpleEdit/
-├── 📄 PythonApplication1.py      # Main GUI application
-├── 📄 functions.py               # Helper functions (HTML, scripts, etc.)
-├── 📄 jsmini.py                  # JavaScript interpreter
-├── 📄 js_builtins.py             # JS built-in functions
-├── 📄 model.py                   # GPT model (if ML available)
-├── 📄 syntax_worker.py           # Background syntax highlighting
-├── 📄 config.ini                 # Runtime configuration
-├── 📁 tests/                     # Test suite
+├── 📄 PythonApplication1.py          # Main GUI application
+├── 📄 functions.py                   # Helper functions (HTML, scripts, etc.)
+├── 📄 jsmini.py                      # JavaScript interpreter
+├── 📄 js_builtins.py                 # JS built-in functions
+├── 📄 model.py                       # GPT model (if ML available)
+├── 📄 syntax_worker.py               # Background syntax highlighting
+├── 📄 rathena_tools_menu.py          # ✨ NEW: rAthena tools integration
+├── 📄 rathena_yaml_validator.py      # ✨ NEW: YAML validator with fallback parser
+├── 📄 config.ini                     # Runtime configuration
+│
+├── 📁 rathena-tools/                 # ✨ NEW: rAthena toolkit package
+│   ├── 📄 __init__.py
+│   ├── 📄 rathena_script_gen.py      # Script generator
+│   ├── 📄 rathena_script_ui.py       # UI helpers
+│   ├── 📄 README.md                  # Package documentation
+│   ├── 📄 RATHENA_SCRIPT_GUIDE.md    # 9-chapter guide
+│   └── 📄 QUICK_REFERENCE.md         # Command reference
+│
+├── 📁 templates/                     # ✨ NEW: Script templates
+│   ├── 📄 template.npc               # NPC template
+│   └── 📄 template.yml               # YAML database template
+│
+├── 📁 docs/                          # Documentation
+│   ├── 📄 INDEX.md                   # Master documentation index
+│   ├── 📄 RATHENA_TOOLS_MENU.md      # ✨ NEW: rAthena tools guide
+│   ├── 📄 YAML_VALIDATOR.md          # ✨ NEW: YAML validation guide
+│   └── [other docs]
+│
+├── 📁 tests/                         # Test suite
 │   ├── 📄 test_base.py
-│   ├── 📄 test_js_builtins.py
-│   ├── 📄 test_dom_events.py
-│   ├── 📄 test_run_scripts_update.py
-│   └── 📄 __init__.py
-└── 📁 syntax/                    # Syntax definition files
+│   ├── 📄 test_rathena_integration.py  # ✨ NEW: rAthena tests
+│   └── __init__.py
+│
+└── 📁 syntax/                        # Syntax definition files
     ├── 📄 python.ini
     ├── 📄 json.ini
     ├── 📄 yaml.ini
@@ -395,27 +471,31 @@ For issues, questions, or suggestions:
 
 ## 📚 Documentation Hub
 
-### 🚀 Quick Links
+> **📖 Start Here:** [Documentation Index](PythonApplication1/docs/INDEX.md) - Complete navigation guide
+
+### 🚀 Getting Started
 - 🎯 [Quick Start Guide](PythonApplication1/docs/QUICKSTART.md) - Get started in 5 minutes
 - 📥 [Installation Guide](PythonApplication1/docs/INSTALLATION.md) - Setup for any OS
-- 📖 [Documentation Index](PythonApplication1/docs/INDEX.md) - Browse all documentation
+- ⚡ [Editor Features](PythonApplication1/docs/EDITOR-USAGE.md) - Complete feature guide
 
-### 📚 Main Documentation
+### 🎮 rAthena Development
+- 📖 [rAthena Tools Guide](PythonApplication1/docs/RATHENA_TOOLS_MENU.md) - **Complete toolkit reference**
+- ✅ [Script Validator](PythonApplication1/docs/VALIDATOR_MULTILINE_COMMENT_FIX_SIMPLE.md) - Validate NPC scripts
+- ✅ [YAML Validator](PythonApplication1/docs/YAML_VALIDATOR.md) - Validate databases
+- 📜 [9-Chapter Script Guide](PythonApplication1/rathena-tools/RATHENA_SCRIPT_GUIDE.md) - Learn rAthena scripting
+- ⚡ [Quick Reference](PythonApplication1/docs/RATHENA_TOOLS_QUICK_REF.md) - Command cheat sheet
+
+### 🔧 Advanced Topics
 - 🔌 [API Reference](PythonApplication1/docs/API.md) - All functions and features
 - 🎨 [Syntax Highlighting](PythonApplication1/docs/SYNTAX.md) - Language support and colors
 - ⚙️ [JavaScript Engine](PythonApplication1/docs/JSMINI.md) - jsmini interpreter guide
-- ⚡ [Editor Features](PythonApplication1/docs/EDITOR-USAGE.md) - Complete feature guide
-
-### 🛠️ Advanced Topics
-- 🔧 [Contributing Guide](CONTRIBUTING.md) - How to contribute code
 - 📈 [Performance Tuning](PythonApplication1/docs/PERFORMANCE-TUNING.md) - Optimize your setup
-- 🪟 [Windows Build Guide](PythonApplication1/docs/WINDOWS-BUILD.md) - Build standalone .exe
-- 💬 [FAQ](PythonApplication1/docs/FAQ.md) - Frequently asked questions
-- 🆘 [Troubleshooting](PythonApplication1/docs/TROUBLESHOOTING.md) - Solutions to problems
-
-### 📋 Examples & References
 - 🍳 [Code Examples](PythonApplication1/docs/EXAMPLES.md) - Practical recipes
-- 📜 [How jsmini Was Built](PythonApplication1/docs/development-process.md) - Technical history
+
+### 💬 Support
+- 🆘 [Troubleshooting](PythonApplication1/docs/TROUBLESHOOTING.md) - Solutions to common problems
+- 💬 [FAQ](PythonApplication1/docs/FAQ.md) - Frequently asked questions
+- 🔧 [Contributing Guide](PythonApplication1/CONTRIBUTING.md) - How to contribute code
 
 ---
 
