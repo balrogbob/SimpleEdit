@@ -5966,7 +5966,7 @@ def _apply_template_to_widget(tw, kind: str):
             # Prefer project file `scripts/example_quest.npc` if present; otherwise fall back to a bundled sample.
             try:
                 base = os.path.dirname(os.path.abspath(__file__))
-                p = os.path.join(base, "templates", "example_quest.npc")
+                p = os.path.join(base, "templates", "template.npc")
                 if os.path.isfile(p):
                     with open(p, "r", encoding="utf-8", errors="replace") as fh:
                         tpl = fh.read()

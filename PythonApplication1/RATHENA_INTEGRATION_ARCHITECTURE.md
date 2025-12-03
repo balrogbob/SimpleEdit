@@ -1,3 +1,12 @@
+<!--
+NOTE: Public-facing rAthena documentation has been consolidated into the
+`docs/` folder and the package README under `rathena-tools/`.
+See `docs/RATHENA_TOOLS_PACKAGE_OVERVIEW.md` for a short summary and
+`docs/RATHENA_TOOLS_MENU.md`, `docs/RATHENA_TOOLS_COMPLETE_FEATURES.md`,
+and `docs/RATHENA_TOOLS_QUICK_REF.md` for the canonical user-facing docs.
+This file is retained for history and developer reference.
+-->
+
 # rAthena Tools - Proper Package Integration Architecture
 
 ## Architecture Overview
