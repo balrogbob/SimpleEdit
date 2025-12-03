@@ -144,6 +144,7 @@ Practical examples and recipes for using SimpleEdit.
             var li = document.createElement('li');
             li.textContent = item;
             list.appendChild(li);
+            document.body.appendChild(li);
         });
         
         // Update page in SimpleEdit

@@ -203,7 +203,7 @@ def _launch_wizard_dialog(root, wizard):
             state_widgets['type'] = type_var
 
         elif step == 3:
-            # Interactive dialog editor
+            # Interactive dialog editor with advanced options
             from rathena_script_ui import DialogAction, DialogActionEnum
             
             ttk.Label(content_frame, text="Build Dialog Sequence:", font=("Arial", 9, "bold")).pack(anchor='w')
@@ -246,7 +246,7 @@ def _launch_wizard_dialog(root, wizard):
                 elif atype == DialogActionEnum.ITEM_REMOVE:
                     actions_listbox.insert(END, f"Remove: Item {action.parameters.get('item_id', 0)} x{action.parameters.get('amount', 1)}")
             
-            # Action buttons
+            # Action buttons - Basic
             action_btn_frame = ttk.Frame(content_frame)
             action_btn_frame.pack(fill=X, pady=(0, 6))
             
@@ -262,7 +262,9 @@ def _launch_wizard_dialog(root, wizard):
                         actions_listbox.insert(END, "Close Button")
                     elif atype == DialogActionEnum.MENU:
                         opts = action.parameters.get('options', [])
-                        actions_listbox.insert(END, f"Menu: {', '.join(opts[:3])}...")
+                        branches = action.parameters.get('branches', {})
+                        branch_info = f" [{len(branches)} branches]" if branches else ""
+                        actions_listbox.insert(END, f"Menu: {', '.join(opts[:3])}...{branch_info}")
                     elif atype == DialogActionEnum.WARP:
                         m = action.parameters.get('map', '')
                         x = action.parameters.get('x', 0)
@@ -290,11 +292,136 @@ def _launch_wizard_dialog(root, wizard):
                 refresh_list()
             
             def add_mnu():
-                opts = simpledialog.askstring("Add Menu", "Enter options (separated by |):", parent=dlg)
-                if opts:
-                    options = [o.strip() for o in opts.split('|')]
-                    existing_actions.append(DialogAction(DialogActionEnum.MENU, {'options': options}))
+                opts_str = simpledialog.askstring("Add Menu", "Enter options (separated by |):", parent=dlg)
+                if opts_str:
+                    options = [o.strip() for o in opts_str.split('|')]
+                    
+                    # Ask if user wants to define branches now
+                    if messagebox.askyesno("Menu Branches", "Do you want to define dialog branches for each menu option?"):
+                        branches = {}
+                        for opt in options:
+                            branch_dlg = Toplevel(dlg)
+                            branch_dlg.title(f"Branch: {opt}")
+                            branch_dlg.transient(dlg)
+                            branch_dlg.grab_set()
+                            branch_dlg.geometry("400x300")
+                            
+                            branch_frame = ttk.Frame(branch_dlg, padding=12)
+                            branch_frame.pack(fill=BOTH, expand=True)
+                            
+                            ttk.Label(branch_frame, text=f"Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
+                            
+                            branch_text = Text(branch_frame, height=10, wrap=WORD)
+                            branch_text.pack(fill=BOTH, expand=True, pady=(6, 6))
+                            
+                            ttk.Label(branch_frame, text="Enter one command per line:\n- Message text\n- 'next' or 'close'\n- Script commands", 
+                                     justify=LEFT).pack(anchor='w')
+                            
+                            branch_saved = [False]
+                            branch_content = ['']
+                            
+                            def save_branch():
+                                branch_content[0] = branch_text.get('1.0', 'end').strip()
+                                branch_saved[0] = True
+                                branch_dlg.destroy()
+                            
+                            btn_frame = ttk.Frame(branch_frame)
+                            btn_frame.pack(fill=X, pady=(6, 0))
+                            ttk.Button(btn_frame, text="Save", command=save_branch).pack(side=RIGHT, padx=4)
+                            ttk.Button(btn_frame, text="Skip", command=branch_dlg.destroy).pack(side=RIGHT, padx=4)
+                            
+                            branch_dlg.wait_window()
+                            
+                            if branch_saved[0] and branch_content[0]:
+                                branches[opt] = branch_content[0]
+                        
+                        existing_actions.append(DialogAction(DialogActionEnum.MENU, {'options': options, 'branches': branches}))
+                    else:
+                        existing_actions.append(DialogAction(DialogActionEnum.MENU, {'options': options}))
+                    
                     refresh_list()
+            
+            def add_script_cmd():
+                # Common script commands dropdown
+                cmd_dlg = Toplevel(dlg)
+                cmd_dlg.title("Insert Script Command")
+                cmd_dlg.transient(dlg)
+                cmd_dlg.grab_set()
+                cmd_dlg.geometry("400x200")
+                
+                cmd_frame = ttk.Frame(cmd_dlg, padding=12)
+                cmd_frame.pack(fill=BOTH, expand=True)
+                
+                ttk.Label(cmd_frame, text="Select Command:").pack(anchor='w')
+                
+                commands = [
+                    "getitem <id>, <amount>",
+                    "delitem <id>, <amount>",
+                    "set <variable>, <value>",
+                    "if (<condition>) {",
+                    "warp \"<map>\", <x>, <y>",
+                    "heal <hp>, <sp>",
+                    "input <variable>",
+                    "setarray <array>, <values>",
+                    "getarg(<index>)",
+                    "callfunc(\"<function>\")",
+                    "callsub <label>",
+                    "announce \"<text>\", <flag>",
+                ]
+                
+                cmd_var = StringVar()
+                cmd_combo = ttk.Combobox(cmd_frame, textvariable=cmd_var, values=commands, width=40)
+                cmd_combo.pack(fill=X, pady=(6, 6))
+                cmd_combo.current(0)
+                
+                ttk.Label(cmd_frame, text="Custom command:").pack(anchor='w', pady=(12, 0))
+                custom_entry = ttk.Entry(cmd_frame, width=40)
+                custom_entry.pack(fill=X, pady=(6, 6))
+                
+                def insert_cmd():
+                    cmd = custom_entry.get().strip() or cmd_var.get()
+                    if cmd:
+                        existing_actions.append(DialogAction(DialogActionEnum.MESSAGE, {'message': f"{{SCRIPT}}{cmd}"}))
+                        refresh_list()
+                    cmd_dlg.destroy()
+                
+                btn_frame = ttk.Frame(cmd_frame)
+                btn_frame.pack(fill=X, pady=(12, 0))
+                ttk.Button(btn_frame, text="Insert", command=insert_cmd).pack(side=RIGHT, padx=4)
+                ttk.Button(btn_frame, text="Cancel", command=cmd_dlg.destroy).pack(side=RIGHT, padx=4)
+            
+            def add_warp():
+                map_name = simpledialog.askstring("Warp", "Map name:", parent=dlg)
+                if map_name:
+                    x = simpledialog.askinteger("Warp", "X coordinate:", parent=dlg, initialvalue=150)
+                    y = simpledialog.askinteger("Warp", "Y coordinate:", parent=dlg, initialvalue=150)
+                    if x is not None and y is not None:
+                        existing_actions.append(DialogAction(DialogActionEnum.WARP, {'map': map_name, 'x': x, 'y': y}))
+                        refresh_list()
+            
+            def add_item_check():
+                item_id = simpledialog.askinteger("Item Check", "Item ID:", parent=dlg)
+                if item_id:
+                    count = simpledialog.askinteger("Item Check", "Required count:", parent=dlg, initialvalue=1)
+                    if count:
+                        existing_actions.append(DialogAction(DialogActionEnum.ITEM_CHECK, {'item_id': item_id, 'count': count}))
+                        refresh_list()
+            
+            def add_item_give():
+                item_id = simpledialog.askinteger("Give Item", "Item ID:", parent=dlg)
+                if item_id:
+                    amount = simpledialog.askinteger("Give Item", "Amount:", parent=dlg, initialvalue=1)
+                    if amount:
+                        existing_actions.append(DialogAction(DialogActionEnum.ITEM_GIVE, {'item_id': item_id, 'amount': amount}))
+                        refresh_list()
+            
+            def add_item_remove():
+                item_id = simpledialog.askinteger("Remove Item", "Item ID:", parent=dlg)
+                if item_id:
+                    amount = simpledialog.askinteger("Remove Item", "Amount:", parent=dlg, initialvalue=1)
+                    if amount:
+                        existing_actions.append(DialogAction(DialogActionEnum.ITEM_REMOVE, {'item_id': item_id, 'amount': amount}))
+                        refresh_list()
             
             def remove_act():
                 sel = actions_listbox.curselection()
@@ -318,14 +445,28 @@ def _launch_wizard_dialog(root, wizard):
                     refresh_list()
                     actions_listbox.selection_set(idx+1)
             
-            ttk.Button(action_btn_frame, text="+ Message", command=add_msg, width=10).pack(side=LEFT, padx=2)
-            ttk.Button(action_btn_frame, text="+ Next", command=add_nxt, width=8).pack(side=LEFT, padx=2)
-            ttk.Button(action_btn_frame, text="+ Close", command=add_cls, width=8).pack(side=LEFT, padx=2)
-            ttk.Button(action_btn_frame, text="+ Menu", command=add_mnu, width=8).pack(side=LEFT, padx=2)
+            ttk.Label(action_btn_frame, text="Add:").pack(side=LEFT, padx=(0, 6))
+            ttk.Button(action_btn_frame, text="Message", command=add_msg, width=9).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame, text="Next", command=add_nxt, width=6).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame, text="Close", command=add_cls, width=6).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame, text="Menu", command=add_mnu, width=6).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame, text="Script", command=add_script_cmd, width=7).pack(side=LEFT, padx=2)
             
+            # Advanced actions
+            action_btn_frame2 = ttk.Frame(content_frame)
+            action_btn_frame2.pack(fill=X, pady=(0, 6))
+            
+            ttk.Label(action_btn_frame2, text="Advanced:").pack(side=LEFT, padx=(0, 6))
+            ttk.Button(action_btn_frame2, text="Warp", command=add_warp, width=8).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame2, text="Check Item", command=add_item_check, width=10).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame2, text="Give Item", command=add_item_give, width=10).pack(side=LEFT, padx=2)
+            ttk.Button(action_btn_frame2, text="Remove Item", command=add_item_remove, width=12).pack(side=LEFT, padx=2)
+            
+            # Reorder
             order_frame = ttk.Frame(content_frame)
             order_frame.pack(fill=X)
             
+            ttk.Label(order_frame, text="Reorder:").pack(side=LEFT, padx=(0, 6))
             ttk.Button(order_frame, text="↑", command=move_up_act, width=4).pack(side=LEFT, padx=2)
             ttk.Button(order_frame, text="↓", command=move_down_act, width=4).pack(side=LEFT, padx=2)
             ttk.Button(order_frame, text="✕ Remove", command=remove_act, width=10).pack(side=LEFT, padx=2)
@@ -699,12 +840,58 @@ def launch_dialog_builder(root, get_textarea):
             update_preview()
             
         def add_menu():
-            opts = simpledialog.askstring("Add Menu", "Enter menu options (separated by |):", parent=dlg)
-            if opts:
-                options = [o.strip() for o in opts.split('|')]
-                action = DialogAction(DialogActionEnum.MENU, {'options': options})
-                dialog_actions.append(action)
-                actions_listbox.insert(END, f"Menu: {', '.join(options[:3])}...")
+            opts_str = simpledialog.askstring("Add Menu", "Enter menu options (separated by |):", parent=dlg)
+            if opts_str:
+                options = [o.strip() for o in opts_str.split('|')]
+                
+                # Ask if user wants to define branches now
+                if messagebox.askyesno("Menu Branches", "Do you want to define dialog branches for each menu option?"):
+                    branches = {}
+                    for opt in options:
+                        branch_dlg = Toplevel(dlg)
+                        branch_dlg.title(f"Branch: {opt}")
+                        branch_dlg.transient(dlg)
+                        branch_dlg.grab_set()
+                        branch_dlg.geometry("400x300")
+                        
+                        branch_frame = ttk.Frame(branch_dlg, padding=12)
+                        branch_frame.pack(fill=BOTH, expand=True)
+                        
+                        ttk.Label(branch_frame, text=f"Actions for '{opt}':", font=("Arial", 10, "bold")).pack(anchor='w')
+                        
+                        branch_text = Text(branch_frame, height=10, wrap=WORD)
+                        branch_text.pack(fill=BOTH, expand=True, pady=(6, 6))
+                        
+                        ttk.Label(branch_frame, text="Enter one command per line:\n- Message text\n- 'next' or 'close'\n- Script commands", 
+                                 justify=LEFT).pack(anchor='w')
+                        
+                        branch_saved = [False]
+                        branch_content = ['']
+                        
+                        def save_branch():
+                            branch_content[0] = branch_text.get('1.0', 'end').strip()
+                            branch_saved[0] = True
+                            branch_dlg.destroy()
+                        
+                        btn_frame_branch = ttk.Frame(branch_frame)
+                        btn_frame_branch.pack(fill=X, pady=(6, 0))
+                        ttk.Button(btn_frame_branch, text="Save", command=save_branch).pack(side=RIGHT, padx=4)
+                        ttk.Button(btn_frame_branch, text="Skip", command=branch_dlg.destroy).pack(side=RIGHT, padx=4)
+                        
+                        branch_dlg.wait_window()
+                        
+                        if branch_saved[0] and branch_content[0]:
+                            branches[opt] = branch_content[0]
+                    
+                    action = DialogAction(DialogActionEnum.MENU, {'options': options, 'branches': branches})
+                    dialog_actions.append(action)
+                    branches_info = f" [{len(branches)} branches]" if branches else ""
+                    actions_listbox.insert(END, f"Menu: {', '.join(options[:3])}...{branches_info}")
+                else:
+                    action = DialogAction(DialogActionEnum.MENU, {'options': options})
+                    dialog_actions.append(action)
+                    actions_listbox.insert(END, f"Menu: {', '.join(options[:3])}...")
+                
                 update_preview()
             
         def add_warp():
@@ -779,14 +966,20 @@ def launch_dialog_builder(root, get_textarea):
             for action in dialog_actions:
                 atype = action.action_type
                 if atype == DialogActionEnum.MESSAGE:
-                    actions_listbox.insert(END, f"Message: {action.parameters.get('message', '')[:40]}...")
+                    msg = action.parameters.get('message', '')
+                    if msg.startswith('{SCRIPT}'):
+                        actions_listbox.insert(END, f"Script: {msg[8:][:35]}...")
+                    else:
+                        actions_listbox.insert(END, f"Message: {msg[:40]}...")
                 elif atype == DialogActionEnum.NEXT_BUTTON:
                     actions_listbox.insert(END, "Next Button")
                 elif atype == DialogActionEnum.CLOSE_BUTTON:
                     actions_listbox.insert(END, "Close Button")
                 elif atype == DialogActionEnum.MENU:
                     opts = action.parameters.get('options', [])
-                    actions_listbox.insert(END, f"Menu: {', '.join(opts[:3])}...")
+                    branches = action.parameters.get('branches', {})
+                    branch_info = f" [{len(branches)} branches]" if branches else ""
+                    actions_listbox.insert(END, f"Menu: {', '.join(opts[:3])}...{branch_info}")
                 elif atype == DialogActionEnum.WARP:
                     m = action.parameters.get('map', '')
                     x = action.parameters.get('x', 0)
@@ -799,10 +992,62 @@ def launch_dialog_builder(root, get_textarea):
                 elif atype == DialogActionEnum.ITEM_REMOVE:
                     actions_listbox.insert(END, f"Remove: Item {action.parameters.get('item_id', 0)} x{action.parameters.get('amount', 1)}")
             
+        def add_script_cmd():
+            # Common script commands dropdown
+            cmd_dlg = Toplevel(dlg)
+            cmd_dlg.title("Insert Script Command")
+            cmd_dlg.transient(dlg)
+            cmd_dlg.grab_set()
+            cmd_dlg.geometry("400x200")
+            
+            cmd_frame = ttk.Frame(cmd_dlg, padding=12)
+            cmd_frame.pack(fill=BOTH, expand=True)
+            
+            ttk.Label(cmd_frame, text="Select Command:").pack(anchor='w')
+            
+            commands = [
+                "getitem <id>, <amount>",
+                "delitem <id>, <amount>",
+                "set <variable>, <value>",
+                "if (<condition>) {",
+                "warp \"<map>\", <x>, <y>",
+                "heal <hp>, <sp>",
+                "input <variable>",
+                "setarray <array>, <values>",
+                "getarg(<index>)",
+                "callfunc(\"<function>\")",
+                "callsub <label>",
+                "announce \"<text>\", <flag>",
+            ]
+            
+            cmd_var = StringVar()
+            cmd_combo = ttk.Combobox(cmd_frame, textvariable=cmd_var, values=commands, width=40)
+            cmd_combo.pack(fill=X, pady=(6, 6))
+            cmd_combo.current(0)
+            
+            ttk.Label(cmd_frame, text="Custom command:").pack(anchor='w', pady=(12, 0))
+            custom_entry = ttk.Entry(cmd_frame, width=40)
+            custom_entry.pack(fill=X, pady=(6, 6))
+            
+            def insert_cmd():
+                cmd = custom_entry.get().strip() or cmd_var.get()
+                if cmd:
+                    action = DialogAction(DialogActionEnum.MESSAGE, {'message': f"{{SCRIPT}}{cmd}"})
+                    dialog_actions.append(action)
+                    actions_listbox.insert(END, f"Script: {cmd[:35]}...")
+                    update_preview()
+                cmd_dlg.destroy()
+            
+            btn_frame_cmd = ttk.Frame(cmd_frame)
+            btn_frame_cmd.pack(fill=X, pady=(12, 0))
+            ttk.Button(btn_frame_cmd, text="Insert", command=insert_cmd).pack(side=RIGHT, padx=4)
+            ttk.Button(btn_frame_cmd, text="Cancel", command=cmd_dlg.destroy).pack(side=RIGHT, padx=4)
+        
         ttk.Button(action_btn_frame, text="Message", command=add_message, width=10).pack(side=LEFT, padx=2)
         ttk.Button(action_btn_frame, text="Next", command=add_next, width=8).pack(side=LEFT, padx=2)
         ttk.Button(action_btn_frame, text="Close", command=add_close, width=8).pack(side=LEFT, padx=2)
         ttk.Button(action_btn_frame, text="Menu", command=add_menu, width=8).pack(side=LEFT, padx=2)
+        ttk.Button(action_btn_frame, text="Script", command=add_script_cmd, width=8).pack(side=LEFT, padx=2)
             
         action_btn_frame2 = ttk.Frame(left_frame)
         action_btn_frame2.pack(fill=X, pady=(0, 6))

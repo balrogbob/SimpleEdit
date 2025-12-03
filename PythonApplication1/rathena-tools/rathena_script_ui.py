@@ -55,6 +55,9 @@ class DialogAction:
         """Convert action to script command"""
         if self.action_type == DialogActionEnum.MESSAGE:
             msg = self.parameters.get('message', '')
+            # Handle script commands (prefixed with {SCRIPT})
+            if msg.startswith('{SCRIPT}'):
+                return msg[8:]  # Return raw command without prefix
             return f'mes "{msg}";'
         
         elif self.action_type == DialogActionEnum.NEXT_BUTTON:
@@ -65,8 +68,39 @@ class DialogAction:
         
         elif self.action_type == DialogActionEnum.MENU:
             options = self.parameters.get('options', [])
+            branches = self.parameters.get('branches', {})
             opts_str = '":"'.join(options)
-            return f'select("{opts_str}");'
+            
+            # If no branches, just return the select command
+            if not branches:
+                return f'select("{opts_str}");'
+            
+            # Generate switch/case structure for branches
+            lines = [f'switch(select("{opts_str}")) {{']
+            for idx, opt in enumerate(options, 1):
+                lines.append(f'\tcase {idx}:')
+                if opt in branches:
+                    # Parse branch content (simple line-by-line)
+                    branch_content = branches[opt]
+                    for line in branch_content.split('\n'):
+                        line = line.strip()
+                        if not line:
+                            continue
+                        if line.lower() == 'next':
+                            lines.append('\t\tnext;')
+                        elif line.lower() == 'close':
+                            lines.append('\t\tclose;')
+                        elif line.lower() == 'break':
+                            lines.append('\t\tbreak;')
+                        else:
+                            # Assume it's a message or command
+                            if line.startswith('"') or line.endswith(';'):
+                                lines.append(f'\t\t{line}')
+                            else:
+                                lines.append(f'\t\tmes "{line}";')
+                lines.append('\t\tbreak;')
+            lines.append('}')
+            return '\n'.join(lines)
         
         elif self.action_type == DialogActionEnum.ITEM_CHECK:
             item_id = self.parameters.get('item_id', 0)

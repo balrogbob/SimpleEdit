@@ -86,6 +86,7 @@
     <Content Include="COMPLETE_INTEGRATION_SUMMARY.md" />
     <Content Include="CONTRIBUTING.md" />
     <Content Include="DELIVERY_SUMMARY.md" />
+    <Content Include="DIALOG_BUILDER_ENHANCED.md" />
     <Content Include="docs\ADVANCED-EXAMPLES.md" />
     <Content Include="docs\API.md" />
     <Content Include="docs\ARCHITECTURE.md" />
