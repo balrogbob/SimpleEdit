@@ -469,3 +469,4 @@ FodyWeavers.xsd
 /PythonApplication1/out/rwkv_quantized.pth
 /build
 /dist
+/featuread.md
