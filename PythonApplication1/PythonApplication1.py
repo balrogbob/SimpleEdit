@@ -79,6 +79,24 @@ try:
     from js_builtins import register_builtins
 except Exception:
     import functions as funcs  # fallback if running as script
+
+# Optional: Import rAthena tools if available (for SimpleEdit plugins or external use)
+try:
+    import sys
+    import os
+    _current_dir = os.path.dirname(os.path.abspath(__file__))
+    if os.path.isdir(os.path.join(_current_dir, 'rathena-tools')):
+        sys.path.insert(0, os.path.join(_current_dir, 'rathena-tools'))
+    
+    # Try to import rAthena tools if the modules exist
+    try:
+        from rathena_script_gen import ScriptGenerator, ScriptNPC
+        from rathena_script_ui import DialogBuilder, NPCWizard
+        _RATHENA_TOOLS_AVAILABLE = True
+    except ImportError:
+        _RATHENA_TOOLS_AVAILABLE = False
+except Exception:
+    _RATHENA_TOOLS_AVAILABLE = False
 # --- Render / view helpers (config-driven) ------------------------------
 # Decide which file extensions / locations should default to Rendered view.
 def _get_render_on_open_extensions() -> set:

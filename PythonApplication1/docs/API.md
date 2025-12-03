@@ -753,6 +753,12 @@ ctx['_interp']._trace = True  # After first run()
 
 ## See Also
 
-- [Syntax Highlighting Guide](SYNTAX.md)
-- [JavaScript Engine Docs](JSMINI.md)
-- [CONTRIBUTING.md](../CONTRIBUTING.md)
+- **[Quick Start](QUICKSTART.md)** - Getting started guide
+- **[Internal API Reference](INTERNAL-API.md)** - Internal functions and helper utilities
+- **[Code Examples](EXAMPLES.md)** - Practical recipes using these APIs
+- **[Advanced Examples](ADVANCED-EXAMPLES.md)** - Complex use cases and patterns
+- **[JavaScript Engine](JSMINI.md)** - jsmini-specific APIs and features
+- **[Editor Usage Guide](EDITOR-USAGE.md)** - How to use the editor GUI
+- **[Documentation Index](INDEX.md)** - Browse all available documentation
+- **[Contributing Guide](../CONTRIBUTING.md)** - How to extend SimpleEdit
+
