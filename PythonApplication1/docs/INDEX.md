@@ -81,6 +81,8 @@
 | [Configuration](EDITOR-USAGE.md#configuration) | Settings guide | 10 min |
 | [SYNTAX](SYNTAX.md) | Syntax highlighting details | 15 min |
 | [EXAMPLES](EXAMPLES.md) | Code recipes & patterns | 15 min |
+| [RATHENA_TOOLS_MENU](RATHENA_TOOLS_MENU.md) | rAthena script creation tools | 30 min |
+| [RATHENA_TOOLS_QUICK_REF](RATHENA_TOOLS_QUICK_REF.md) | rAthena tools quick reference | 5 min |
 
 **Best for:** Understanding features and capabilities
 
@@ -140,6 +142,14 @@
 - **Keyboard shortcuts?** → [Keyboard Shortcuts](EDITOR-USAGE.md#keyboard-shortcuts)
 - **Customizing fonts/colors?** → [Configuration](EDITOR-USAGE.md#configuration)
 - **Syntax highlighting?** → [SYNTAX](SYNTAX.md)
+
+### rAthena Script Development
+- **Creating NPCs?** → [RATHENA_TOOLS_MENU](RATHENA_TOOLS_MENU.md)
+- **Building dialogs?** → [RATHENA_TOOLS_MENU - Dialog Builder](RATHENA_TOOLS_MENU.md#dialog-builder)
+- **Menu branching?** → [RATHENA_TOOLS_MENU - Menu Branching](RATHENA_TOOLS_MENU.md#menu-branching-deep-dive)
+- **Quick command reference?** → [RATHENA_TOOLS_QUICK_REF](RATHENA_TOOLS_QUICK_REF.md)
+- **Script validation?** → [RATHENA_TOOLS_MENU - Validator](RATHENA_TOOLS_MENU.md#script-validator)
+- **Template NPCs?** → [RATHENA_TOOLS_MENU - Quick NPC](RATHENA_TOOLS_MENU.md#quick-npc)
 
 ### Coding & Development
 - **How do I contribute?** → [CONTRIBUTING](../CONTRIBUTING.md)
@@ -337,6 +347,8 @@ Problem solved? ✅
 - ✅ development-process.md - History
 - ✅ ARCHITECTURE.md - System design
 - ✅ CONTRIBUTING.md - Dev guide
+- ✅ RATHENA_TOOLS_MENU.md - rAthena script tools
+- ✅ RATHENA_TOOLS_QUICK_REF.md - rAthena quick reference
 
 ---
 

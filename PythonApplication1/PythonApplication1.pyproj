@@ -102,6 +102,9 @@
     <Content Include="docs\JSMINI.md" />
     <Content Include="docs\PERFORMANCE-TUNING.md" />
     <Content Include="docs\QUICKSTART.md" />
+    <Content Include="docs\RATHENA_TOOLS_COMPLETE_SUMMARY.md" />
+    <Content Include="docs\RATHENA_TOOLS_MENU.md" />
+    <Content Include="docs\RATHENA_TOOLS_QUICK_REF.md" />
     <Content Include="docs\SYNTAX.md" />
     <Content Include="docs\TROUBLESHOOTING.md" />
     <Content Include="docs\WINDOWS-BUILD.md" />
