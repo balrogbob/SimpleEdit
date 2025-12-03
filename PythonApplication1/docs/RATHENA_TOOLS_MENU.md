@@ -28,7 +28,7 @@ The **rAthena Tools** menu provides a comprehensive suite of visual tools for cr
 ### Key Features
 
 ✅ **Visual NPC Creation** - Step-by-step wizard for building NPCs  
-✅ **Interactive Dialog Builder** - Drag-and-drop dialog creation  
+✅ **Interactive Dialog Builder** - Easy selection driven dialog creation  
 ✅ **Menu Branching** - Visual menu system with conditional branches  
 ✅ **Live Preview** - See generated code in real-time  
 ✅ **Script Validation** - Check scripts for common errors  
@@ -506,45 +506,215 @@ close;
 
 ## Function Creator
 
-Create reusable script functions with parameters.
+Create reusable script functions with advanced parameter typing, templates, and live preview.
 
-### Interface
+### Interface Layout
 
-**Fields:**
-- **Function Name:** Identifier (no spaces)
-- **Parameters:** Comma-separated list
-- **Function Body:** Multi-line script editor
+```
+┌────────────────────────────────────────────────────────────────┐
+│                 Create rAthena Function                        │
+├──────────────────────────────┬─────────────────────────────────┤
+│ LEFT: Function Definition    │ RIGHT: Templates & Helpers     │
+├──────────────────────────────┼─────────────────────────────────┤
+│ Function Name:               │ Code Templates:                │
+│ [________________]           │ [Dropdown: Select Template   ▼]│
+│                              │                                │
+│ Return Type:                 │ Template Preview:              │
+│ [void (no return)        ▼] │ ┌───────────────────────────┐ │
+│                              │ │// Check if player has item│ │
+│ Parameters:                  │ │if (countitem({id}) < {n}) │ │
+│ ┌──────────────────────────┐ │ │{                          │ │
+│ │item_id (int)             │ │ │  mes "Not enough!";       │ │
+│ │amount (int)              │ │ │  return 0;                │ │
+│ └──────────────────────────┘ │ │}                          │ │
+│ [+ Add Parameter][✕ Remove] │ │return 1;                  │ │
+│                              │ └───────────────────────────┘ │
+│ Function Body:               │ [Insert Template into Body]   │
+│ ┌──────────────────────────┐ │                                │
+│ │                          │ │ Quick Snippets:               │
+│ │                          │ │ [getarg][return][if][for]     │
+│ │                          │ │ [mes][close]                  │
+│ └──────────────────────────┘ │                                │
+│                              │ Preview:                       │
+│                              │ ┌───────────────────────────┐ │
+│                              │ │function MyFunction {      │ │
+│                              │ │  // item_id (int)         │ │
+│                              │ │  // ...                   │ │
+│                              │ │}                          │ │
+│                              │ └───────────────────────────┘ │
+│                              │ [Insert into Editor]          │
+├──────────────────────────────┴─────────────────────────────────┤
+│   [Cancel] [Insert Function] [Insert & Close]                 │
+└────────────────────────────────────────────────────────────────┘
+```
 
 ### Features
 
-- Syntax highlighting in body editor
-- Parameter validation
-- Auto-formatting
-- Direct insertion
+#### **1. Parameter Type System**
+Define typed parameters for better documentation:
 
-### Example
+**Available Types:**
+- `int` - Integer values
+- `string` - Text/string values
+- `array` - Array data structures
+- `any` - Untyped parameter
 
-**Input:**
+**Workflow:**
+1. Click "+ Add Parameter"
+2. Enter parameter name and select type
+3. Parameter added with type annotation: `param_name (type)`
+
+#### **2. Return Type Specification**
+Specify what the function returns:
+
+**Available Types:**
+- `void (no return)` - Function doesn't return a value
+- `int` - Returns integer
+- `string` - Returns text
+- `array` - Returns array
+- `auto` - Return type determined dynamically
+
+#### **3. Code Templates (9 Templates)**
+
+| Template | Purpose |
+|----------|---------|
+| **Empty Function** | Blank starting point |
+| **Item Checker** | Verify item possession |
+| **Item Giver** | Award items to player |
+| **Zeny Checker** | Check player money |
+| **Variable Setter** | Set quest/game variables |
+| **Level Checker** | Validate player level |
+| **Random Reward** | Give random items |
+| **Array Helper** | Work with arrays |
+| **Time Check** | Time-based restrictions |
+
+**Template Example - Item Checker:**
+```javascript
+// Check if player has item
+if (countitem({item_id}) < {amount}) {
+    mes "You don't have enough items!";
+    return 0;
+}
+return 1;
 ```
-Name: GiveReward
-Parameters: item_id, amount, bonus
-Body:
-    getitem item_id, amount;
-    if (bonus > 0) {
-        set Zeny, Zeny + bonus;
+
+#### **4. Quick Snippets (6 Snippets)**
+One-click insertion of common code patterns:
+
+- `getarg` - Get function parameter: `getarg({index})`
+- `return` - Return value: `return {value};`
+- `if` - Conditional block: `if ({condition}) { }`
+- `for` - Loop structure: `for (.@i = 0; .@i < {count}; .@i++) { }`
+- `mes` - Display message: `mes "{message}";`
+- `close` - Close dialog: `close;`
+
+#### **5. Live Preview**
+Real-time preview of generated function structure as you type.
+
+#### **6. Triple Insert Options**
+
+| Button | Location | Behavior | Use Case |
+|--------|----------|----------|----------|
+| **Insert into Editor** | Preview pane | Inserts at cursor, stays open | Quick preview insert |
+| **Insert Function** | Bottom | Inserts at cursor, stays open | Multiple functions |
+| **Insert & Close** | Bottom | Inserts at cursor, closes | One-time insert |
+
+### Auto-Generated Documentation
+
+Every function includes comprehensive comments:
+
+```javascript
+// Function: CheckZeny
+// Parameters:
+//   - required_amount (int) via getarg(0)
+// Returns: int
+
+function	CheckZeny	{
+    // required_amount = getarg(0);
+    
+    // Check if player has enough Zeny
+    if (Zeny < required_amount) {
+        mes "You don't have enough Zeny!";
+        return 0;
     }
+    return 1;
+}
 ```
+
+### Usage Examples
+
+#### **Example 1: Simple Zeny Checker**
+
+**Setup:**
+1. Function Name: `CheckZeny`
+2. Return Type: `int`
+3. Add Parameter: `required_amount (int)`
+4. Select Template: "Zeny Checker"
+5. Replace `{amount}` with `required_amount`
 
 **Generated:**
 ```javascript
-function	GiveReward	{
-    getitem getarg(0), getarg(1);
-    if (getarg(2) > 0) {
-        set Zeny, Zeny + getarg(2);
+// Function: CheckZeny
+// Parameters:
+//   - required_amount (int) via getarg(0)
+// Returns: int
+
+function	CheckZeny	{
+    // required_amount = getarg(0);
+    
+    if (Zeny < required_amount) {
+        mes "You don't have enough Zeny!";
+        return 0;
     }
+    return 1;
+}
+```
+
+#### **Example 2: Quest Reward Giver**
+
+**Setup:**
+1. Function Name: `GiveQuestReward`
+2. Return Type: `void (no return)`
+3. Add Parameters:
+   - `quest_id (int)`
+   - `item_reward (int)`
+   - `zeny_bonus (int)`
+4. Use snippets to build body
+
+**Generated:**
+```javascript
+// Function: GiveQuestReward
+// Parameters:
+//   - quest_id (int) via getarg(0)
+//   - item_reward (int) via getarg(1)
+//   - zeny_bonus (int) via getarg(2)
+
+function	GiveQuestReward	{
+    // quest_id = getarg(0);
+    // item_reward = getarg(1);
+    // zeny_bonus = getarg(2);
+    
+    getitem item_reward, 1;
+    set Zeny, Zeny + zeny_bonus;
+    mes "Quest completed! Reward received.";
     return;
 }
 ```
+
+### Workflow Tips
+
+**Creating Multiple Helper Functions:**
+1. Create first function
+2. Click "Insert Function" (keeps dialog open)
+3. Clear/modify for next function
+4. Repeat as needed
+5. Click "Cancel" when done
+
+**Quick Single Function:**
+1. Build function
+2. Preview looks good
+3. Click "Insert into Editor" from preview OR
+4. Click "Insert & Close" from bottom
 
 ---
 

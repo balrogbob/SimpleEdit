@@ -765,7 +765,7 @@ def launch_npc_wizard(root, get_textarea):
 
 
 def launch_function_creator(root, get_textarea):
-    """Launch a simple function creator dialog."""
+    """Launch enhanced function creator with types and templates."""
     if not _RATHENA_TOOLS_AVAILABLE:
         messagebox.showerror(
             "Not Available",
@@ -787,68 +787,376 @@ def launch_function_creator(root, get_textarea):
     dlg.title("Create rAthena Function")
     dlg.transient(root)
     dlg.grab_set()
-    dlg.geometry("500x400")
+    dlg.geometry("750x600")
     
-    frame = ttk.Frame(dlg, padding=12)
-    frame.pack(fill=BOTH, expand=True)
+    main_frame = ttk.Frame(dlg, padding=12)
+    main_frame.pack(fill=BOTH, expand=True)
+    
+    # Split into left (definition) and right (templates/preview)
+    left_frame = ttk.Frame(main_frame)
+    left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 6))
+    
+    right_frame = ttk.Frame(main_frame)
+    right_frame.pack(side=RIGHT, fill=BOTH, expand=True, padx=(6, 0))
+    
+    # LEFT: Function definition
+    ttk.Label(left_frame, text="Function Definition", font=("Arial", 10, "bold")).pack(anchor='w', pady=(0, 6))
     
     # Function name
-    ttk.Label(frame, text="Function Name:").grid(row=0, column=0, sticky='w')
-    func_name = ttk.Entry(frame, width=30)
-    func_name.grid(row=0, column=1, sticky='ew', padx=(6, 0))
+    ttk.Label(left_frame, text="Function Name:").pack(anchor='w')
+    func_name = ttk.Entry(left_frame, width=40)
+    func_name.pack(fill=X, pady=(2, 6))
     
-    # Parameters
-    ttk.Label(frame, text="Parameters (comma-separated):").grid(row=1, column=0, sticky='w')
-    params = ttk.Entry(frame, width=30)
-    params.grid(row=1, column=1, sticky='ew', padx=(6, 0))
+    # Return type
+    ttk.Label(left_frame, text="Return Type:").pack(anchor='w')
+    return_types = ["void (no return)", "int", "string", "array", "auto"]
+    return_type_var = StringVar(value="void (no return)")
+    return_type_combo = ttk.Combobox(left_frame, textvariable=return_type_var, values=return_types, width=37, state='readonly')
+    return_type_combo.pack(fill=X, pady=(2, 6))
+    
+    # Parameters frame
+    ttk.Label(left_frame, text="Parameters:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(6, 2))
+    
+    param_frame = ttk.Frame(left_frame)
+    param_frame.pack(fill=BOTH, expand=False, pady=(0, 6))
+    
+    # Parameter list
+    param_list = []  # List of (name, type) tuples
+    
+    params_listbox = Listbox(param_frame, height=5)
+    params_listbox.pack(side=LEFT, fill=BOTH, expand=True)
+    
+    params_scroll = ttk.Scrollbar(param_frame, orient='vertical', command=params_listbox.yview)
+    params_scroll.pack(side=RIGHT, fill=Y)
+    params_listbox.config(yscrollcommand=params_scroll.set)
+    
+    # Parameter buttons
+    param_btn_frame = ttk.Frame(left_frame)
+    param_btn_frame.pack(fill=X, pady=(0, 6))
+    
+    def add_parameter():
+        param_dlg = Toplevel(dlg)
+        param_dlg.title("Add Parameter")
+        param_dlg.transient(dlg)
+        param_dlg.grab_set()
+        param_dlg.geometry("350x150")
+        
+        param_dlg_frame = ttk.Frame(param_dlg, padding=12)
+        param_dlg_frame.pack(fill=BOTH, expand=True)
+        
+        ttk.Label(param_dlg_frame, text="Parameter Name:").grid(row=0, column=0, sticky='w')
+        param_name_entry = ttk.Entry(param_dlg_frame, width=25)
+        param_name_entry.grid(row=0, column=1, sticky='ew', padx=(6, 0), pady=(0, 6))
+        
+        ttk.Label(param_dlg_frame, text="Parameter Type:").grid(row=1, column=0, sticky='w')
+        param_types = ["int", "string", "array", "any"]
+        param_type_var = StringVar(value="int")
+        param_type_combo = ttk.Combobox(param_dlg_frame, textvariable=param_type_var, values=param_types, width=22, state='readonly')
+        param_type_combo.grid(row=1, column=1, sticky='ew', padx=(6, 0), pady=(0, 12))
+        
+        param_dlg_frame.columnconfigure(1, weight=1)
+        
+        def save_param():
+            pname = param_name_entry.get().strip()
+            ptype = param_type_var.get()
+            if pname:
+                param_list.append((pname, ptype))
+                params_listbox.insert(END, f"{pname} ({ptype})")
+                param_dlg.destroy()
+            else:
+                messagebox.showwarning("Input Error", "Parameter name is required.", parent=param_dlg)
+        
+        btn_frame_p = ttk.Frame(param_dlg_frame)
+        btn_frame_p.grid(row=2, column=0, columnspan=2, sticky='e')
+        
+        ttk.Button(btn_frame_p, text="Add", command=save_param).pack(side=RIGHT, padx=4)
+        ttk.Button(btn_frame_p, text="Cancel", command=param_dlg.destroy).pack(side=RIGHT, padx=4)
+        
+        param_name_entry.focus()
+    
+    def remove_parameter():
+        sel = params_listbox.curselection()
+        if sel:
+            idx = sel[0]
+            del param_list[idx]
+            params_listbox.delete(idx)
+    
+    ttk.Button(param_btn_frame, text="+ Add Parameter", command=add_parameter, width=15).pack(side=LEFT, padx=2)
+    ttk.Button(param_btn_frame, text="✕ Remove", command=remove_parameter, width=10).pack(side=LEFT, padx=2)
     
     # Function body
-    ttk.Label(frame, text="Function Body:").grid(row=2, column=0, sticky='nw')
-    body = Text(frame, width=40, height=15, wrap=WORD)
-    body.grid(row=2, column=1, sticky='nsew', padx=(6, 0))
+    ttk.Label(left_frame, text="Function Body:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(6, 2))
     
-    # Scrollbar for body
-    scrollbar = ttk.Scrollbar(frame, orient='vertical', command=body.yview)
-    scrollbar.grid(row=2, column=2, sticky='ns')
-    body.config(yscrollcommand=scrollbar.set)
+    body_frame = ttk.Frame(left_frame)
+    body_frame.pack(fill=BOTH, expand=True)
     
-    frame.columnconfigure(1, weight=1)
-    frame.rowconfigure(2, weight=1)
+    body = Text(body_frame, width=40, height=12, wrap=WORD)
+    body.pack(side=LEFT, fill=BOTH, expand=True)
     
-    def save_function():
+    body_scrollbar = ttk.Scrollbar(body_frame, orient='vertical', command=body.yview)
+    body_scrollbar.pack(side=RIGHT, fill=Y)
+    body.config(yscrollcommand=body_scrollbar.set)
+    
+    # RIGHT: Templates and preview
+    ttk.Label(right_frame, text="Code Templates", font=("Arial", 10, "bold")).pack(anchor='w', pady=(0, 6))
+    
+    # Template selector
+    templates = {
+        "Empty Function": "",
+        "Item Checker": """// Check if player has item
+if (countitem({item_id}) < {amount}) {{
+    mes "You don't have enough items!";
+    return 0;
+}}
+return 1;""",
+        "Item Giver": """// Give items to player
+getitem {item_id}, {amount};
+mes "You received items!";
+return;""",
+        "Zeny Checker": """// Check if player has enough Zeny
+if (Zeny < {amount}) {{
+    mes "You don't have enough Zeny!";
+    return 0;
+}}
+return 1;""",
+        "Variable Setter": """// Set quest/game variable
+set {variable_name}, {value};
+return;""",
+        "Level Checker": """// Check player level
+if (BaseLevel < {min_level}) {{
+    mes "Your level is too low!";
+    return 0;
+}}
+return 1;""",
+        "Random Reward": """// Give random reward
+.@rand = rand(1, 100);
+if (.@rand <= 50) {{
+    getitem 501, 1;  // Red Potion
+}} else if (.@rand <= 80) {{
+    getitem 502, 1;  // Orange Potion
+}} else {{
+    getitem 503, 1;  // Yellow Potion
+}}
+return;""",
+        "Array Helper": """// Work with arrays
+setarray .@items[0], 501, 502, 503;
+for (.@i = 0; .@i < getarraysize(.@items); .@i++) {{
+    getitem .@items[.@i], 1;
+}}
+return;""",
+        "Time Check": """// Check if time restriction applies
+.@hour = gettime(3);  // 0-23
+if (.@hour >= {start_hour} && .@hour < {end_hour}) {{
+    return 1;  // Within time range
+}}
+return 0;  // Outside time range"""
+    }
+    
+    template_list = list(templates.keys())
+    template_var = StringVar(value=template_list[0])
+    template_combo = ttk.Combobox(right_frame, textvariable=template_var, values=template_list, width=30, state='readonly')
+    template_combo.pack(fill=X, pady=(0, 6))
+    
+    # Template preview
+    ttk.Label(right_frame, text="Template Preview:").pack(anchor='w')
+    
+    template_preview_frame = ttk.Frame(right_frame)
+    template_preview_frame.pack(fill=BOTH, expand=True, pady=(2, 6))
+    
+    template_preview = Text(template_preview_frame, height=10, wrap=WORD, state=DISABLED)
+    template_preview.pack(side=LEFT, fill=BOTH, expand=True)
+    
+    template_preview_scroll = ttk.Scrollbar(template_preview_frame, orient='vertical', command=template_preview.yview)
+    template_preview_scroll.pack(side=RIGHT, fill=Y)
+    template_preview.config(yscrollcommand=template_preview_scroll.set)
+    
+    def update_template_preview(*args):
+        selected = template_var.get()
+        template_code = templates.get(selected, "")
+        template_preview.config(state=NORMAL)
+        template_preview.delete('1.0', END)
+        template_preview.insert('1.0', template_code)
+        template_preview.config(state=DISABLED)
+    
+    template_var.trace_add('write', update_template_preview)
+    update_template_preview()
+    
+    def insert_template():
+        selected = template_var.get()
+        template_code = templates.get(selected, "")
+        if template_code:
+            body.insert('end', template_code)
+    
+    ttk.Button(right_frame, text="Insert Template into Body", command=insert_template, width=25).pack(pady=(0, 12))
+    
+    # Common snippets
+    ttk.Label(right_frame, text="Quick Snippets:", font=("Arial", 9, "bold")).pack(anchor='w')
+    
+    snippets_frame = ttk.Frame(right_frame)
+    snippets_frame.pack(fill=X)
+    
+    def insert_snippet(snippet):
+        body.insert('end', snippet + '\n')
+    
+    snippets = [
+        ("getarg", "getarg({index})"),
+        ("return", "return {value};"),
+        ("if", "if ({condition}) {{\n    \n}}"),
+        ("for", "for (.@i = 0; .@i < {count}; .@i++) {{\n    \n}}"),
+        ("mes", "mes \"{message}\";"),
+        ("close", "close;")
+    ]
+    
+    for label, snippet in snippets:
+        ttk.Button(snippets_frame, text=label, command=lambda s=snippet: insert_snippet(s), width=8).pack(side=LEFT, padx=2, pady=2)
+    
+    # Function preview (optional - below snippets)
+    ttk.Label(right_frame, text="Preview:", font=("Arial", 9, "bold")).pack(anchor='w', pady=(12, 2))
+    
+    preview_frame = ttk.Frame(right_frame)
+    preview_frame.pack(fill=BOTH, expand=True)
+    
+    preview_display = Text(preview_frame, height=6, wrap=WORD, state=DISABLED, bg='#f0f0f0')
+    preview_display.pack(side=LEFT, fill=BOTH, expand=True)
+    
+    preview_scroll = ttk.Scrollbar(preview_frame, orient='vertical', command=preview_display.yview)
+    preview_scroll.pack(side=RIGHT, fill=Y)
+    preview_display.config(yscrollcommand=preview_scroll.set)
+    
+    def update_preview():
+        """Update the function preview"""
+        name = func_name.get().strip() or "MyFunction"
+        return_type = return_type_var.get()
+        body_str = body.get('1.0', 'end').strip()
+        
+        lines = []
+        lines.append(f"function\t{name}\t{{")
+        
+        if param_list:
+            for idx, (pname, ptype) in enumerate(param_list):
+                lines.append(f"\t// {pname} ({ptype})")
+        
+        if body_str:
+            for line in body_str.split('\n')[:3]:  # Show first 3 lines
+                if line.strip():
+                    lines.append('\t' + line[:40])
+        
+        if len(body_str.split('\n')) > 3:
+            lines.append('\t// ...')
+        
+        lines.append("}")
+        
+        preview_display.config(state=NORMAL)
+        preview_display.delete('1.0', END)
+        preview_display.insert('1.0', '\n'.join(lines))
+        preview_display.config(state=DISABLED)
+    
+    # Update preview on changes
+    func_name.bind('<KeyRelease>', lambda e: update_preview())
+    body.bind('<KeyRelease>', lambda e: update_preview())
+    
+    # Insert button below preview
+    preview_btn_frame = ttk.Frame(right_frame)
+    preview_btn_frame.pack(fill=X, pady=(6, 0))
+    
+    def insert_from_preview():
+        """Insert function from preview directly into editor"""
         try:
-            name = func_name.get().strip()
-            params_str = params.get().strip()
-            body_str = body.get('1.0', 'end').strip()
+            script_text = generate_function_code()
             
-            if not name:
+            if not script_text:
+                messagebox.showwarning("Empty", "Function name is required to insert.")
+                return
+            
+            textArea.insert('insert', '\n' + script_text + '\n')
+            messagebox.showinfo("Success", "Function inserted at cursor position!")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to insert: {e}")
+    
+    ttk.Button(preview_btn_frame, text="Insert into Editor", command=insert_from_preview).pack(side=LEFT, padx=4)
+    
+    # Bottom buttons
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=X, pady=(12, 0), side=BOTTOM)
+    
+    def generate_function_code():
+        """Generate the function code without inserting"""
+        name = func_name.get().strip()
+        return_type = return_type_var.get()
+        body_str = body.get('1.0', 'end').strip()
+        
+        if not name:
+            return None
+        
+        # Build function comment header
+        script_lines = []
+        script_lines.append(f"// Function: {name}")
+        
+        if param_list:
+            script_lines.append("// Parameters:")
+            for idx, (pname, ptype) in enumerate(param_list):
+                script_lines.append(f"//   - {pname} ({ptype}) via getarg({idx})")
+        
+        if not return_type.startswith("void"):
+            script_lines.append(f"// Returns: {return_type}")
+        
+        # Function definition
+        script_lines.append(f"function\t{name}\t{{")
+        
+        # Add parameter comments in body
+        if param_list:
+            for idx, (pname, ptype) in enumerate(param_list):
+                script_lines.append(f"\t// {pname} = getarg({idx});")
+        
+        # Add body
+        for line in body_str.split('\n'):
+            if line.strip():
+                script_lines.append('\t' + line)
+        
+        # Add return if needed
+        if not return_type.startswith("void") and "return" not in body_str.lower():
+            script_lines.append("\treturn 0;  // TODO: Return appropriate value")
+        
+        script_lines.append("}")
+        
+        return '\n'.join(script_lines)
+    
+    def insert_function():
+        """Insert function into editor and close"""
+        try:
+            script_text = generate_function_code()
+            
+            if not script_text:
                 messagebox.showwarning("Input Error", "Function name is required.")
                 return
             
-            # Create script function
-            param_list = [p.strip() for p in params_str.split(',')] if params_str else []
-            func = ScriptFunction(name, param_list)
-            for line in body_str.split('\n'):
-                if line.strip():
-                    func.add_command(line)
-            
-            # Generate and insert
-            gen = ScriptGenerator()
-            gen.add_function(func)
-            script_text = gen.generate_script()
-            
-            textArea.insert('end', '\n' + script_text)
+            textArea.insert('insert', '\n' + script_text + '\n')
             messagebox.showinfo("Success", "Function inserted successfully!")
             dlg.destroy()
         except Exception as e:
-            messagebox.showerror("Error", f"Failed to create function: {e}")
+            messagebox.showerror("Error", f"Failed to insert function: {e}")
     
-    # Buttons
-    btn_frame = ttk.Frame(frame)
-    btn_frame.grid(row=3, column=0, columnspan=3, sticky='e', pady=(12, 0))
+    def insert_function_keep_open():
+        """Insert function into editor but keep dialog open"""
+        try:
+            script_text = generate_function_code()
+            
+            if not script_text:
+                messagebox.showwarning("Input Error", "Function name is required.")
+                return
+            
+            textArea.insert('insert', '\n' + script_text + '\n')
+            messagebox.showinfo("Success", "Function inserted! Dialog remains open for more functions.")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to insert function: {e}")
     
-    ttk.Button(btn_frame, text="Insert", command=save_function).pack(side=RIGHT, padx=4)
+    ttk.Button(btn_frame, text="Insert & Close", command=insert_function).pack(side=RIGHT, padx=4)
+    ttk.Button(btn_frame, text="Insert Function", command=insert_function_keep_open).pack(side=RIGHT, padx=4)
     ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=RIGHT, padx=4)
+    
+    # Initial preview
+    update_preview()
+    func_name.focus()
 
 
 
