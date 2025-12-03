@@ -719,6 +719,12 @@ Variables are looked up by walking the scope chain from innermost to global.
 
 ## See Also
 
-- [API Documentation](API.md)
-- [Syntax Highlighting Guide](SYNTAX.md)
-- [jsmini.py Source](../jsmini.py) - Full implementation
+- **[API Reference](API.md)** - SimpleEdit function reference
+- **[Advanced Examples](ADVANCED-EXAMPLES.md)** - Complex JavaScript patterns
+- **[Data Formats](DATA-FORMATS.md)** - File format specifications
+- **[Code Examples](EXAMPLES.md)** - Practical JavaScript examples
+- **[Syntax Highlighting](SYNTAX.md)** - Language support
+- **[Performance Tuning](PERFORMANCE-TUNING.md)** - Optimization & limits
+- **[System Architecture](ARCHITECTURE.md)** - How jsmini fits into the system (see Contributing guide)
+- **[jsmini.py Source](../jsmini.py)** - Full implementation
+

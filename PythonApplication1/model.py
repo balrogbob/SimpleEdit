@@ -18,9 +18,13 @@ from dataclasses import dataclass
 from functools import lru_cache  # added for cached w matrix builder
 
 import torch
+import torch._dynamo.config
 import torch.nn as nn
+import torch._dynamo
+
 from torch.nn import functional as F
 
+torch._dynamo.config.suppress_errors = True  # dynamo may have bugs, suppress them for now
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 

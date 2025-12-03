@@ -26,6 +26,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="beep.py" />
+    <Compile Include="examples.py" />
     <Compile Include="examples\run_jsmini_demo.py" />
     <Compile Include="functions.py" />
     <Compile Include="jsmini.py" />
@@ -34,6 +35,11 @@
     <Compile Include="moartest.py" />
     <Compile Include="model.py" />
     <Compile Include="PythonApplication1.py" />
+    <Compile Include="rathena-tools\__init__.py" />
+    <Compile Include="rathena_integration_examples.py" />
+    <Compile Include="rathena_script_gen.py" />
+    <Compile Include="rathena_script_ui.py" />
+    <Compile Include="rathena_tools\__init__.py" />
     <Compile Include="recent_files.py" />
     <Compile Include="run_jsmini_demo.py" />
     <Compile Include="tests\test_base.py" />
@@ -41,9 +47,11 @@
     <Compile Include="tests\test_event_builtin.py" />
     <Compile Include="tests\test_json_reviver.py" />
     <Compile Include="tests\test_object_helpers.py" />
+    <Compile Include="tests\test_rathena_integration.py" />
     <Compile Include="tests\__init__.py" />
     <Compile Include="test\test_js_builtins.py" />
     <Compile Include="tests\test_run_scripts_update.py" />
+    <Compile Include="test_rathena_integration.py" />
     <Compile Include="test_tokendiag_run_test.py" />
   </ItemGroup>
   <ItemGroup>
@@ -65,6 +73,7 @@
     <Folder Include="docs\" />
     <Folder Include="examples\" />
     <Folder Include="out\" />
+    <Folder Include="rathena_tools\" />
     <Folder Include="syntax\" />
     <Folder Include="templates\" />
     <Folder Include="tests\" />
@@ -73,20 +82,57 @@
   </ItemGroup>
   <ItemGroup>
     <Content Include="atcommands.txt" />
+    <Content Include="COMPLETE_INTEGRATION_SUMMARY.md" />
     <Content Include="CONTRIBUTING.md" />
+    <Content Include="DELIVERY_SUMMARY.md" />
+    <Content Include="docs\ADVANCED-EXAMPLES.md" />
     <Content Include="docs\API.md" />
+    <Content Include="docs\ARCHITECTURE.md" />
+    <Content Include="docs\CONTRIBUTING.md" />
+    <Content Include="docs\DATA-FORMATS.md" />
+    <Content Include="docs\development-process.md" />
+    <Content Include="docs\EDITOR-USAGE.md" />
+    <Content Include="docs\EXAMPLES.md" />
+    <Content Include="docs\FAQ.md" />
+    <Content Include="docs\INDEX.md" />
+    <Content Include="docs\INSTALLATION.md" />
+    <Content Include="docs\INTERNAL-API.md" />
     <Content Include="docs\JSMINI.md" />
+    <Content Include="docs\PERFORMANCE-TUNING.md" />
+    <Content Include="docs\QUICKSTART.md" />
     <Content Include="docs\SYNTAX.md" />
+    <Content Include="docs\TROUBLESHOOTING.md" />
+    <Content Include="docs\WINDOWS-BUILD.md" />
     <Content Include="effect_list.md" />
     <Content Include="examples\demo.html" />
+    <Content Include="FINAL_CHECKLIST.md" />
+    <Content Include="INDEX.md" />
+    <Content Include="INTEGRATION_FILES_SUMMARY.md" />
     <Content Include="mapflags.txt" />
+    <Content Include="MIGRATION_COMPLETE.md" />
+    <Content Include="MIGRATION_SUMMARY.md" />
+    <Content Include="ORGANIZATION_SUMMARY.md" />
     <Content Include="out\ckpt.pt">
       <Publish>True</Publish>
     </Content>
     <Content Include="permissions.txt" />
+    <Content Include="PROJECT_COMPLETE.md" />
     <Content Include="quest_variables.txt" />
+    <Content Include="QUICK_REFERENCE.md" />
+    <Content Include="rathena-tools\README.md" />
+    <Content Include="RATHENA_INTEGRATION_STATUS.md" />
+    <Content Include="RATHENA_SCRIPT_GUIDE.md" />
+    <Content Include="RATHENA_TOOLS_INTEGRATION.md" />
+    <Content Include="RATHENA_TOOLS_LOCATION.md" />
+    <Content Include="RATHENA_TOOLS_README.md" />
+    <Content Include="README_COMPLETE_PACKAGE.md" />
+    <Content Include="README_RATHENA_COMPLETE.md" />
+    <Content Include="REQUIREMENTS-MAINTENANCE-REPORT.md" />
+    <Content Include="REQUIREMENTS-VERIFICATION.md" />
     <Content Include="requirements.txt" />
     <Content Include="script_commands.txt" />
+    <Content Include="SIMPLEEDIT_INTEGRATION.md" />
+    <Content Include="START_HERE.md" />
     <Content Include="syntax\c.ini" />
     <Content Include="syntax\cpp.ini" />
     <Content Include="syntax\csharp.ini" />
@@ -101,6 +147,7 @@
     <Content Include="syntax\yaml_header.ini" />
     <Content Include="templates\quest_db.yml" />
     <Content Include="test.txt" />
+    <Content Include="VERIFICATION.md" />
     <Content Include="worker_logs\syntax_worker_19916.stderr.log" />
     <Content Include="worker_logs\syntax_worker_19916.worker.log" />
     <Content Include="worker_logs\syntax_worker_24880.stderr.log" />

@@ -393,11 +393,29 @@ For issues, questions, or suggestions:
 
 ---
 
-## 📚 Additional Resources
+## 📚 Documentation Hub
 
-- 📖 [Detailed API Documentation](docs/API.md) — Coming soon
-- 🎨 [Syntax Highlighting Guide](docs/SYNTAX.md) — Coming soon
-- ⚙️ [JavaScript Engine Docs](docs/JSMINI.md) — Coming soon
+### 🚀 Quick Links
+- 🎯 [Quick Start Guide](PythonApplication1/docs/QUICKSTART.md) - Get started in 5 minutes
+- 📥 [Installation Guide](PythonApplication1/docs/INSTALLATION.md) - Setup for any OS
+- 📖 [Documentation Index](PythonApplication1/docs/INDEX.md) - Browse all documentation
+
+### 📚 Main Documentation
+- 🔌 [API Reference](PythonApplication1/docs/API.md) - All functions and features
+- 🎨 [Syntax Highlighting](PythonApplication1/docs/SYNTAX.md) - Language support and colors
+- ⚙️ [JavaScript Engine](PythonApplication1/docs/JSMINI.md) - jsmini interpreter guide
+- ⚡ [Editor Features](PythonApplication1/docs/EDITOR-USAGE.md) - Complete feature guide
+
+### 🛠️ Advanced Topics
+- 🔧 [Contributing Guide](CONTRIBUTING.md) - How to contribute code
+- 📈 [Performance Tuning](PythonApplication1/docs/PERFORMANCE-TUNING.md) - Optimize your setup
+- 🪟 [Windows Build Guide](PythonApplication1/docs/WINDOWS-BUILD.md) - Build standalone .exe
+- 💬 [FAQ](PythonApplication1/docs/FAQ.md) - Frequently asked questions
+- 🆘 [Troubleshooting](PythonApplication1/docs/TROUBLESHOOTING.md) - Solutions to problems
+
+### 📋 Examples & References
+- 🍳 [Code Examples](PythonApplication1/docs/EXAMPLES.md) - Practical recipes
+- 📜 [How jsmini Was Built](PythonApplication1/docs/development-process.md) - Technical history
 
 ---
 
