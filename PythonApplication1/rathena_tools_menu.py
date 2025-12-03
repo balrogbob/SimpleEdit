@@ -2595,99 +2595,541 @@ def validate_yaml_database(root, get_textarea):
 
 
 def insert_quick_npc(root, get_textarea):
-    """Insert a quick/template NPC."""
+    """Insert a quick/template NPC with pre-built templates."""
     if not _RATHENA_TOOLS_AVAILABLE:
         messagebox.showerror(
             "Not Available",
             "rAthena Tools are not available."
         )
         return
-    
+        
     # Get the textArea
     if callable(get_textarea):
         textArea = get_textarea()
     else:
         textArea = get_textarea
-    
+        
     if textArea is None:
         messagebox.showerror("Error", "No text editor found")
         return
-    
+        
     dlg = Toplevel(root)
-    dlg.title("Quick NPC")
+    dlg.title("Quick NPC Templates")
     dlg.transient(root)
     dlg.grab_set()
-    dlg.geometry("400x300")
-    
-    frame = ttk.Frame(dlg, padding=12)
-    frame.pack(fill=BOTH, expand=True)
-    
+    dlg.geometry("800x650")
+        
+    main_frame = ttk.Frame(dlg, padding=12)
+    main_frame.pack(fill=BOTH, expand=True)
+        
+    # Split into left (selection) and right (preview)
+    left_frame = ttk.Frame(main_frame)
+    left_frame.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 6))
+        
+    right_frame = ttk.Frame(main_frame)
+    right_frame.pack(side=RIGHT, fill=BOTH, expand=True, padx=(6, 0))
+        
+    # LEFT: Template selection and customization
+    ttk.Label(left_frame, text="NPC Template:", font=("Arial", 10, "bold")).pack(anchor='w')
+        
+    # Template selection
+    templates = {
+        "Simple Dialog": {
+            "description": "Basic NPC with greeting and close",
+            "sprite": 111,  # Default sprite
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "Hello there!";',
+                'mes "Welcome to our server!";',
+                'close;'
+            ]
+        },
+        "Healer NPC": {
+            "description": "Heals HP/SP and removes status effects",
+            "sprite": "4_W_SISTER",  # Priestess
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "Would you like me to heal you?";',
+                'next;',
+                'if(select("Yes, please!:No, thanks") == 1) {',
+                '\tpercentheal 100, 100;',
+                '\tsc_end SC_ALL;',
+                '\tmes "[{name}]";',
+                '\tmes "There you go! All healed up!";',
+                '}',
+                'close;'
+            ]
+        },
+        "Warper/Teleporter": {
+            "description": "Teleports player to different locations",
+            "sprite": "4_M_SAGE_A",  # Sage
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "Where would you like to go?";',
+                'next;',
+                'switch(select("Prontera:Morocc:Geffen:Payon:Alberta:Cancel")) {',
+                'case 1:',
+                '\twarp "prontera", 156, 191;',
+                '\tbreak;',
+                'case 2:',
+                '\twarp "morocc", 156, 93;',
+                '\tbreak;',
+                'case 3:',
+                '\twarp "geffen", 119, 59;',
+                '\tbreak;',
+                'case 4:',
+                '\twarp "payon", 152, 75;',
+                '\tbreak;',
+                'case 5:',
+                '\twarp "alberta", 28, 234;',
+                '\tbreak;',
+                '}',
+                'close;'
+            ]
+        },
+        "Item Shop": {
+            "description": "Sells items to players",
+            "sprite": "4_M_01",  # Merchant
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "Welcome to my shop!";',
+                'mes "Take a look at what I have!";',
+                'close;',
+                'OnInit:',
+                '\tnpcshopitem "ItemShop", 501, 50;  // Red Potion - 50z',
+                '\tnpcshopitem "ItemShop", 502, 200;  // Orange Potion - 200z',
+                '\tnpcshopitem "ItemShop", 503, 500;  // Yellow Potion - 500z',
+                '\tend;'
+            ]
+        },
+        "Buffer NPC": {
+            "description": "Provides buffs to players",
+            "sprite": "4_F_KAFRA1",  # Kafra
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "I can provide you with buffs!";',
+                'mes "Which buff would you like?";',
+                'next;',
+                'switch(select("Blessing:Increase AGI:Both:Cancel")) {',
+                'case 1:',
+                '\tsc_start SC_BLESSING, 240000, 10;',
+                '\tbreak;',
+                'case 2:',
+                '\tsc_start SC_INCREASEAGI, 240000, 10;',
+                '\tbreak;',
+                'case 3:',
+                '\tsc_start SC_BLESSING, 240000, 10;',
+                '\tsc_start SC_INCREASEAGI, 240000, 10;',
+                '\tbreak;',
+                '}',
+                'close;'
+            ]
+        },
+        "Quest Starter": {
+            "description": "Simple quest NPC with item requirement",
+            "sprite": "1_M_MERCHANT",
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "I need your help!";',
+                'mes "Can you bring me 10 Jellopy?";',
+                'next;',
+                'if(select("Sure!:No, sorry") == 2) {',
+                '\tmes "[{name}]";',
+                '\tmes "Come back if you change your mind.";',
+                '\tclose;',
+                '}',
+                'if(countitem(909) < 10) {',
+                '\tmes "[{name}]";',
+                '\tmes "You don\'t have enough Jellopy yet.";',
+                '\tmes "Please bring me 10 Jellopy!";',
+                '\tclose;',
+                '}',
+                'delitem 909, 10;',
+                'getitem 501, 5;  // Give 5 Red Potions as reward',
+                'mes "[{name}]";',
+                'mes "Thank you so much!";',
+                'mes "Here\'s a small reward!";',
+                'close;'
+            ]
+        },
+        "Job Changer": {
+            "description": "Changes player job class",
+            "sprite": "1_F_PRIEST",
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "I can help you change your job!";',
+                'mes "What job would you like?";',
+                'next;',
+                'if(BaseLevel < 10) {',
+                '\tmes "[{name}]";',
+                '\tmes "Sorry, you need to be at least level 10.";',
+                '\tclose;',
+                '}',
+                'switch(select("Swordman:Mage:Archer:Acolyte:Merchant:Thief:Cancel")) {',
+                'case 1: jobchange Job_Swordman; break;',
+                'case 2: jobchange Job_Mage; break;',
+                'case 3: jobchange Job_Archer; break;',
+                'case 4: jobchange Job_Acolyte; break;',
+                'case 5: jobchange Job_Merchant; break;',
+                'case 6: jobchange Job_Thief; break;',
+                'case 7: close;',
+                '}',
+                'mes "[{name}]";',
+                'mes "Congratulations on your new job!";',
+                'close;'
+            ]
+        },
+        "Information NPC": {
+            "description": "Provides server information",
+            "sprite": "8W_SOLDIER",
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "^0000FFServer Information^000000";',
+                'mes "─────────────────────────";',
+                'mes "^008000Rates:^000000";',
+                'mes "  • Base EXP: 1x";',
+                'mes "  • Job EXP: 1x";',
+                'mes "  • Drop Rate: 1x";',
+                'next;',
+                'mes "[{name}]";',
+                'mes "^008000Max Stats:^000000";',
+                'mes "  • Max Level: 99/70";',
+                'mes "  • Max Stats: 99";',
+                'next;',
+                'mes "[{name}]";',
+                'mes "Enjoy your time on the server!";',
+                'close;'
+            ]
+        },
+        "Stylist NPC": {
+            "description": "Changes player appearance",
+            "sprite": "4_F_ALCHE",
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "I can change your appearance!";',
+                'mes "What would you like to change?";',
+                'next;',
+                'switch(select("Hair Style:Hair Color:Cloth Color:Cancel")) {',
+                'case 1:',
+                '\tmes "[{name}]";',
+                '\tmes "Choose a style (1-27):";',
+                '\tinput .@style;',
+                '\tif(.@style < 1 || .@style > 27) {',
+                '\t\tmes "Invalid style!";',
+                '\t\tclose;',
+                '\t}',
+                '\tsetlook LOOK_HAIR, .@style;',
+                '\tbreak;',
+                'case 2:',
+                '\tmes "[{name}]";',
+                '\tmes "Choose a color (0-8):";',
+                '\tinput .@color;',
+                '\tsetlook LOOK_HAIR_COLOR, .@color;',
+                '\tbreak;',
+                'case 3:',
+                '\tmes "[{name}]";',
+                '\tmes "Choose a color (0-4):";',
+                '\tinput .@color;',
+                '\tsetlook LOOK_CLOTHES_COLOR, .@color;',
+                '\tbreak;',
+                '}',
+                'close;'
+            ]
+        },
+        "Tool Dealer": {
+            "description": "Sells common tools and consumables",
+            "sprite": "1_M_INNKEEPER",
+            "dialog": [
+                'mes "[{name}]";',
+                'mes "I sell various tools and supplies!";',
+                'callshop "ToolDealer", 0;',
+                'npcshopattach "ToolDealer";',
+                'end;',
+                '',
+                'OnBuyItem:',
+                '\tend;',
+                '',
+                'OnSellItem:',
+                '\tend;',
+                '',
+                'OnInit:',
+                '\tnpcshopitem "ToolDealer", 1750, 50;   // Arrow',
+                '\tnpcshopitem "ToolDealer", 611, 500;   // Fly Wing',
+                '\tnpcshopitem "ToolDealer", 601, 1000;  // Butterfly Wing',
+                '\tend;'
+            ]
+        }
+    }
+        
+    template_list = list(templates.keys())
+    template_var = StringVar(value=template_list[0])
+        
+    template_combo = ttk.Combobox(left_frame, textvariable=template_var, values=template_list, width=35, state='readonly')
+    template_combo.pack(fill=X, pady=(6, 2))
+        
+    # Template description
+    desc_label = ttk.Label(left_frame, text="", wraplength=350, justify=LEFT, foreground='#666666')
+    desc_label.pack(anchor='w', pady=(2, 12))
+        
+    # NPC Details
+    ttk.Label(left_frame, text="NPC Details:", font=("Arial", 10, "bold")).pack(anchor='w', pady=(12, 6))
+        
+    details_frame = ttk.Frame(left_frame)
+    details_frame.pack(fill=X)
+        
     # NPC Name
-    ttk.Label(frame, text="NPC Name:").grid(row=0, column=0, sticky='w')
-    npc_name = ttk.Entry(frame, width=30)
-    npc_name.grid(row=0, column=1, sticky='ew', padx=(6, 0))
-    
+    ttk.Label(details_frame, text="Name:").grid(row=0, column=0, sticky='w', pady=4)
+    npc_name = ttk.Entry(details_frame, width=30)
+    npc_name.grid(row=0, column=1, sticky='ew', padx=(6, 0), pady=4)
+        
     # Map
-    ttk.Label(frame, text="Map:").grid(row=1, column=0, sticky='w')
-    map_name = ttk.Entry(frame, width=30)
-    map_name.insert(0, 'prontera')
-    map_name.grid(row=1, column=1, sticky='ew', padx=(6, 0))
-    
-    # X, Y
-    ttk.Label(frame, text="X Position:").grid(row=2, column=0, sticky='w')
-    x_pos = ttk.Entry(frame, width=10)
-    x_pos.insert(0, '100')
-    x_pos.grid(row=2, column=1, sticky='w', padx=(6, 0))
-    
-    ttk.Label(frame, text="Y Position:").grid(row=3, column=0, sticky='w')
-    y_pos = ttk.Entry(frame, width=10)
-    y_pos.insert(0, '100')
-    y_pos.grid(row=3, column=1, sticky='w', padx=(6, 0))
-    
-    # Sprite ID
-    ttk.Label(frame, text="Sprite ID:").grid(row=4, column=0, sticky='w')
-    sprite_id = ttk.Entry(frame, width=10)
-    sprite_id.insert(0, '111')
-    sprite_id.grid(row=4, column=1, sticky='w', padx=(6, 0))
-    
-    frame.columnconfigure(1, weight=1)
-    
-    def create_npc():
-        try:
-            name = npc_name.get().strip()
-            if not name:
-                messagebox.showwarning("Input Error", "NPC name is required.")
-                return
+    ttk.Label(details_frame, text="Map:").grid(row=1, column=0, sticky='w', pady=4)
+        
+    common_maps = ["prontera", "morocc", "geffen", "payon", "alberta", "izlude", "aldebaran", "yuno", "rachel", "veins"]
+    map_var = StringVar(value="prontera")
+    map_combo = ttk.Combobox(details_frame, textvariable=map_var, values=common_maps, width=27)
+    map_combo.grid(row=1, column=1, sticky='ew', padx=(6, 0), pady=4)
+        
+    # Position
+    pos_frame = ttk.Frame(details_frame)
+    pos_frame.grid(row=2, column=1, sticky='ew', padx=(6, 0), pady=4)
+        
+    ttk.Label(details_frame, text="Position:").grid(row=2, column=0, sticky='w', pady=4)
+    ttk.Label(pos_frame, text="X:").pack(side=LEFT)
+    x_pos = ttk.Entry(pos_frame, width=8)
+    x_pos.insert(0, '150')
+    x_pos.pack(side=LEFT, padx=(4, 12))
+        
+    ttk.Label(pos_frame, text="Y:").pack(side=LEFT)
+    y_pos = ttk.Entry(pos_frame, width=8)
+    y_pos.insert(0, '150')
+    y_pos.pack(side=LEFT, padx=(4, 0))
+        
+    # Sprite selection with preview
+    ttk.Label(details_frame, text="Sprite:").grid(row=3, column=0, sticky='w', pady=4)
+        
+    # Common sprites with names
+    common_sprites = {
+        "Novice (Male)": "1_M_01",
+        "Novice (Female)": "1_F_01",
+        "Merchant": "4_M_01",
+        "Priest": "1_M_PASTOR",
+        "Priestess": "1_F_PRIEST",
+        "Sage": "4_M_SAGE_A",
+        "Kafra": "4_F_KAFRA1",
+        "Butler": "4_M_BUTLER",
+        "Maid": "4_F_MAID",
+        "Knight": "4_M_KN_KIYOM",
+        "Wizard": "4_M_WIZARD",
+        "Blacksmith": "4_M_REPAIR",
+        "Soldier": "8W_SOLDIER",
+        "King": "4_M_KING",
+        "Queen": "4_F_QUEEN",
+        "Custom ID": "CUSTOM"
+    }
+        
+    sprite_names = list(common_sprites.keys())
+    sprite_var = StringVar(value=sprite_names[0])
+    sprite_combo = ttk.Combobox(details_frame, textvariable=sprite_var, values=sprite_names, width=27)
+    sprite_combo.grid(row=3, column=1, sticky='ew', padx=(6, 0), pady=4)
+        
+    # Custom sprite ID entry (hidden by default)
+    custom_sprite_frame = ttk.Frame(details_frame)
+    custom_sprite_var = StringVar(value="111")
+    ttk.Label(custom_sprite_frame, text="ID:").pack(side=LEFT)
+    custom_sprite_entry = ttk.Entry(custom_sprite_frame, textvariable=custom_sprite_var, width=10)
+    custom_sprite_entry.pack(side=LEFT, padx=(4, 0))
+        
+    def on_sprite_change(*args):
+        selected = sprite_var.get()
+        if selected == "Custom ID":
+            custom_sprite_frame.grid(row=4, column=1, sticky='w', padx=(6, 0), pady=4)
+        else:
+            custom_sprite_frame.grid_forget()
+        update_preview()
+        
+    sprite_var.trace_add('write', on_sprite_change)
+        
+    details_frame.columnconfigure(1, weight=1)
+        
+    # RIGHT: Preview
+    ttk.Label(right_frame, text="Script Preview:", font=("Arial", 10, "bold")).pack(anchor='w')
+        
+    preview_frame = ttk.Frame(right_frame)
+    preview_frame.pack(fill=BOTH, expand=True, pady=(6, 0))
+        
+    preview_text = Text(preview_frame, wrap=WORD, height=25, width=45)
+    preview_text.pack(side=LEFT, fill=BOTH, expand=True)
+        
+    preview_scroll = ttk.Scrollbar(preview_frame, orient='vertical', command=preview_text.yview)
+    preview_scroll.pack(side=RIGHT, fill=Y)
+    preview_text.config(yscrollcommand=preview_scroll.set, state=DISABLED)
+        
+    def update_preview(*args):
+        """Update the preview with current selections"""
+        selected_template = template_var.get()
+        template_data = templates.get(selected_template, templates["Simple Dialog"])
             
-            # Create NPC
+        # Update description
+        desc_label.config(text=template_data["description"])
+            
+        # Generate preview
+        name = npc_name.get().strip() or "NPC_Name"
+        mapname = map_var.get()
+        x = x_pos.get()
+        y = y_pos.get()
+            
+        # Get sprite
+        sprite_name = sprite_var.get()
+        if sprite_name == "Custom ID":
+            sprite = custom_sprite_var.get()
+        else:
+            sprite = common_sprites.get(sprite_name, "111")
+            
+        # Build script
+        lines = []
+        lines.append(f"// {selected_template} NPC")
+        lines.append(f"{mapname},{x},{y},4\tscript\t{name}\t{sprite},{{")
+            
+        # Add dialog from template
+        for dialog_line in template_data["dialog"]:
+            formatted_line = dialog_line.replace("{name}", name)
+            if dialog_line.startswith('\t') or dialog_line.startswith('case') or dialog_line.startswith('}'):
+                lines.append('\t' + formatted_line)
+            else:
+                lines.append('\t' + formatted_line)
+            
+        lines.append("}")
+            
+        preview_text.config(state=NORMAL)
+        preview_text.delete('1.0', END)
+        preview_text.insert('1.0', '\n'.join(lines))
+        preview_text.config(state=DISABLED)
+        
+    # Update preview when selections change
+    template_var.trace_add('write', update_preview)
+    npc_name.bind('<KeyRelease>', update_preview)
+    map_var.trace_add('write', update_preview)
+    x_pos.bind('<KeyRelease>', update_preview)
+    y_pos.bind('<KeyRelease>', update_preview)
+    custom_sprite_var.trace_add('write', update_preview)
+        
+    # Bottom buttons
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=X, pady=(12, 0), side=BOTTOM)
+    
+def update_preview(*args):
+    """Update the preview with current selections"""
+    selected_template = template_var.get()
+    template_data = templates.get(selected_template, templates["Simple Dialog"])
+        
+    # Update description
+    desc_label.config(text=template_data["description"])
+        
+    # Generate preview
+    name = npc_name.get().strip() or "NPC_Name"
+    mapname = map_var.get()
+    x = x_pos.get()
+    y = y_pos.get()
+        
+    # Get sprite
+    sprite_name = sprite_var.get()
+    if sprite_name == "Custom ID":
+        sprite = custom_sprite_var.get()
+    else:
+        sprite = common_sprites.get(sprite_name, "111")
+        
+    # Build script
+    lines = []
+    lines.append(f"// {selected_template} NPC")
+    lines.append(f"{mapname},{x},{y},4\tscript\t{name}\t{sprite},{{")
+        
+    # Add dialog from template
+    for dialog_line in template_data["dialog"]:
+        formatted_line = dialog_line.replace("{name}", name)
+        if dialog_line.startswith('\t') or dialog_line.startswith('case') or dialog_line.startswith('}'):
+            lines.append('\t' + formatted_line)
+        else:
+            lines.append('\t' + formatted_line)
+        
+    lines.append("}")
+        
+    preview_text.config(state=NORMAL)
+    preview_text.delete('1.0', END)
+    preview_text.insert('1.0', '\n'.join(lines))
+    preview_text.config(state=DISABLED)
+    
+    # Update preview when selections change
+    template_var.trace_add('write', update_preview)
+    npc_name.bind('<KeyRelease>', update_preview)
+    map_var.trace_add('write', update_preview)
+    x_pos.bind('<KeyRelease>', update_preview)
+    y_pos.bind('<KeyRelease>', update_preview)
+    custom_sprite_var.trace_add('write', update_preview)
+    
+    # Bottom buttons
+    btn_frame = ttk.Frame(main_frame)
+    btn_frame.pack(fill=X, pady=(12, 0), side=BOTTOM)
+    
+def create_npc():
+    try:
+        name = npc_name.get().strip()
+        if not name:
+            messagebox.showwarning("Input Error", "NPC name is required.")
+            return
+            
+        # Get sprite
+        sprite_name = sprite_var.get()
+        if sprite_name == "Custom ID":
+            sprite = custom_sprite_var.get()
+        else:
+            sprite = common_sprites.get(sprite_name, "111")
+            
+        # Get template
+        selected_template = template_var.get()
+        template_data = templates.get(selected_template, templates["Simple Dialog"])
+            
+        # Create NPC
+        try:
             npc = ScriptNPC(
                 name,
-                map_name.get().strip(),
+                map_var.get(),
                 int(x_pos.get()),
                 int(y_pos.get()),
-                int(sprite_id.get())
+                sprite_id=sprite
+            )
+        except:
+            # Fallback if sprite is not numeric
+            npc = ScriptNPC(
+                name,
+                map_var.get(),
+                int(x_pos.get()),
+                int(y_pos.get()),
+                sprite_id=111
             )
             
-            npc.add_command('mes "[' + name + ']";')
-            npc.add_command('mes "Hello there!";')
-            npc.add_command('close;')
+        # Add dialog from template
+        for dialog_line in template_data["dialog"]:
+            formatted_line = dialog_line.replace("{name}", name)
+            npc.add_command(formatted_line)
             
-            # Generate and insert
-            gen = ScriptGenerator()
-            gen.add_npc(npc)
-            script_text = gen.generate_script()
+        # Generate and insert
+        gen = ScriptGenerator()
+        gen.add_npc(npc)
+        script_text = gen.generate_script()
             
-            textArea.insert('end', '\n' + script_text)
-            messagebox.showinfo("Success", "Quick NPC inserted successfully!")
-            dlg.destroy()
-        except ValueError as e:
-            messagebox.showerror("Input Error", f"Invalid input: {e}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to create NPC: {e}")
+        textArea.insert('end', '\n' + script_text + '\n')
+        messagebox.showinfo("Success", f"{selected_template} NPC inserted successfully!")
+        dlg.destroy()
+            
+    except ValueError as e:
+        messagebox.showerror("Input Error", f"Invalid input: {e}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to create NPC: {e}")
     
-    # Buttons
-    btn_frame = ttk.Frame(frame)
-    btn_frame.grid(row=5, column=0, columnspan=2, sticky='e', pady=(12, 0))
-    
-    ttk.Button(btn_frame, text="Create", command=create_npc).pack(side=RIGHT, padx=4)
+    ttk.Button(btn_frame, text="Insert NPC", command=create_npc).pack(side=RIGHT, padx=4)
     ttk.Button(btn_frame, text="Cancel", command=dlg.destroy).pack(side=RIGHT, padx=4)
+    
+    # Initial preview
+    update_preview()
+    npc_name.focus()
