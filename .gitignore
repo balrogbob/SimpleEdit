@@ -29,7 +29,6 @@ x86/
 bld/
 [Bb]in/
 [Oo]bj/
-[Oo]ut/
 [Ll]og/
 [Ll]ogs/
 
@@ -450,3 +449,21 @@ FodyWeavers.xsd
 /PythonApplication1/docs/DOCUMENTATION_CONSOLIDATED.md
 /PythonApplication1/docs/DOCUMENTATION_CONSOLIDATED.md
 /PythonApplication1/RATHENA_INTEGRATION_ARCHITECTURE.md
+/PythonApplication1/RATHENA_INTEGRATION_ARCHITECTURE.md
+/PythonApplication1/RATHENA_INTEGRATION_ARCHITECTURE.md
+/PythonApplication1/docs/_archive/INDENTATION_FIX_COMPLETE.md
+/PythonApplication1/docs/_archive/INDENTATION_FIX_FINAL.md
+/PythonApplication1/docs/_archive/INDENTATION_FIX_FIRST_LINE.md
+/PythonApplication1/docs/_archive/INDENTATION_VALIDATION.md
+/PythonApplication1/docs/_archive/README.md
+/PythonApplication1/docs/_archive/VALIDATOR_CASE_STATEMENT_FIX.md
+/PythonApplication1/docs/_archive/VALIDATOR_ENHANCED_SEMICOLON.md
+/PythonApplication1/docs/_archive/VALIDATOR_IMPROVEMENTS.md
+/PythonApplication1/docs/_archive/VALIDATOR_MULTILINE_COMMENT_FIX.md
+/PythonApplication1/docs/_archive/VALIDATOR_MULTILINE_FIX.md
+/PythonApplication1/docs/_archive/YAML_VALIDATOR_SUMMARY.md
+/dist/out
+/PythonApplication1/out/ckpt.pt
+/PythonApplication1/out/rwkv_quantized.pth
+/PythonApplication1/out/ckpt.pt
+/PythonApplication1/out/rwkv_quantized.pth

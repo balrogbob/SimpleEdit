@@ -695,47 +695,64 @@ def _start_model_load(start_autocomplete: bool = False):
             root.after(0, lambda: status.config(text="Loading checkpoint..."))
             root.after(0, lambda: pb.config(value=10))
             try:
-                init_from = 'resume'
                 out_dir = 'out'
-                ckpt_path = os.path.join(out_dir, 'ckpt.pt')
-                checkpoint = torch.load(ckpt_path, map_location='cpu', weights_only=True)
+                ckpt_path = os.path.join(out_dir, 'rwkv_quantized.pth')
+                checkpoint = torch.load(ckpt_path, map_location='cpu')
             except Exception as ex:
                 raise RuntimeError(f"Failed to load checkpoint: {ex}")
 
             root.after(0, lambda: pb.config(value=30))
             root.after(0, lambda: status.config(text="Constructing model..."))
+
             try:
-                gptconf = GPTConfig(**checkpoint['model_args'])
-                model_local = GPT(gptconf)
-                state_dict = checkpoint['model']
-                unwanted_prefix = '_orig_mod.'
-                for k in list(state_dict.keys()):
-                    if k.startswith(unwanted_prefix):
-                        state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
-                model_local.load_state_dict(state_dict)
-                model_local.eval()
-                model_local.to('cpu')
+                # Two supported formats:
+                # 1) Entire model object saved (torch.save(model_quantized, path))
+                # 2) Dict with keys: 'model_args', 'model', and optional 'quantized': True
+                if isinstance(checkpoint, torch.nn.Module):
+                    # Directly loaded quantized model object
+                    model_local = checkpoint
+                    model_local.eval()
+                    model_local.to('cpu')
+                    is_quantized = True
+                else:
+                    # Dict-style checkpoint
+                    gptconf = GPTConfig(**checkpoint['model_args'])
+                    model_local = GPT(gptconf)
+                    state_dict = checkpoint['model']
+                    unwanted_prefix = '_orig_mod.'
+                    for k in list(state_dict.keys()):
+                        if isinstance(k, str) and k.startswith(unwanted_prefix):
+                            state_dict[k[len(unwanted_prefix):]] = state_dict.pop(k)
+                    # When quantized, allow non-strict to tolerate minor dtype/key differences
+                    is_quantized = bool(checkpoint.get('quantized', False))
+                    model_local.load_state_dict(state_dict, strict=not is_quantized)
+                    model_local.eval()
+                    model_local.to('cpu')
             except Exception as ex:
                 raise RuntimeError(f"Failed to construct/load model state: {ex}")
 
             root.after(0, lambda: pb.config(value=60))
-            root.after(0, lambda: status.config(text="Compiling model (may take a moment)..."))
+            # Avoid compiling quantized models; compile only float models
+            root.after(0, lambda: status.config(text="Preparing model..."))
             try:
-                # preserve original for fallback
                 original_model = model_local
-                if sys.platform == "win32" and shutil.which("cl") is None:
-                    try:
-                        compiled = torch.compile(model_local, backend="eager", mode="reduce-overhead")
-                    except Exception:
-                        compiled = model_local
+                if not is_quantized:
+                    # Optional compile for float models only
+                    if sys.platform == "win32" and shutil.which("cl") is None:
+                        try:
+                            compiled = torch.compile(model_local, backend="eager", mode="reduce-overhead")
+                        except Exception:
+                            compiled = model_local
+                    else:
+                        try:
+                            compiled = torch.compile(model_local, mode="reduce-overhead")
+                        except Exception:
+                            compiled = model_local
+                    model = compiled
                 else:
-                    try:
-                        compiled = torch.compile(model_local, mode="reduce-overhead")
-                    except Exception:
-                        compiled = model_local
-                model = compiled
+                    # Keep quantized model eager on CPU
+                    model = model_local
             except Exception:
-                # if compile fails, keep the eager model
                 model = model_local
 
             root.after(0, lambda: pb.config(value=80))
@@ -755,7 +772,6 @@ def _start_model_load(start_autocomplete: bool = False):
             # update UI: compute initial context token count on main thread (safe access to textArea)
             def set_loaded_ui():
                 try:
-                    # determine selection / context same as autocomplete does
                     try:
                         ranges = textArea.tag_ranges("sel")
                         if ranges:
@@ -776,12 +792,10 @@ def _start_model_load(start_autocomplete: bool = False):
                     except Exception:
                         pass
                     try:
-                        # show unload button (only when model is loaded)
                         buttonUnload.pack(side=LEFT, padx=2, pady=2)
                     except Exception:
                         pass
                     try:
-                        # update params label
                         paramsLabel.config(text=_get_model_param_text())
                     except Exception:
                         pass
@@ -802,7 +816,6 @@ def _start_model_load(start_autocomplete: bool = False):
             except Exception:
                 pass
 
-            # if requested, automatically begin autocomplete after load
             if _model_loaded and start_autocomplete:
                 try:
                     Thread(target=python_ai_autocomplete, daemon=True).start()
@@ -810,7 +823,6 @@ def _start_model_load(start_autocomplete: bool = False):
                     pass
 
     Thread(target=worker, daemon=True).start()
-
 
 
 def on_ai_button_click():

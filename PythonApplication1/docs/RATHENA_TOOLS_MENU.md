@@ -1061,3 +1061,125 @@ For issues or feature requests:
 ---
 
 *This documentation is part of the SimpleEdit rAthena Tools integration package.*
+
+---
+
+# Consolidated Technical and Feature Reference
+
+## Complete Tool Suite Overview
+- NPC Wizard: 5-step guided creation (Name & Location, Sprite Selection, Dialog Editor, NPC Type, Preview & Confirm)
+- Dialog Builder: Split-pane interface, 9 action types, menu branching, live preview, dual insert (preview/bottom)
+- Function Creator: Parameter type system (int, string, array, any), return types (void, int, string, array, auto), 9 templates, 6 quick snippets, live preview, triple insert, auto-generated headers
+- Script Validator: Basic structural checks, command presence, syntax hints
+- Quick NPC: Rapid template NPC insertion with name, map, coords, sprite
+
+## Feature Matrix
+| Feature | NPC Wizard | Dialog Builder | Function Creator |
+|---------|------------|----------------|------------------|
+| Visual Interface | 5-Step | Split-pane | Split-pane |
+| Live Preview | Step 5 | Real-time | Real-time |
+| Menu Branching | Full builder | Full builder | N/A |
+| Script Commands | Dropdown | Dropdown | Snippets |
+| Templates | N/A | N/A | 9 templates |
+| Type System | N/A | N/A | Params + Return |
+| Auto-Documentation | Basic | N/A | Full headers |
+| Insert Options | Single | Dual | Triple |
+| Reorder Actions | ↑↓✕ | ↑↓✕ | N/A |
+| Advanced Actions | 9 types | 9 types | N/A |
+| Nested Menus | Supported | Supported | N/A |
+
+## Usage Statistics (Typical)
+- Quick NPC: 30–60s; Simple Dialog: 2–3m; Basic Function: ~3m
+- Full NPC Wizard: 5–10m; Multi-branch Dialog: 10–15m; Typed Function: ~5m
+- Complex Quest NPC: 15–30m; Nested Menus: 20–30m; Function Library: 30m+
+
+Average Lines Generated:
+- Quick NPC: 5–7; Simple Dialog: 10–20; Menu Dialog: 30–50; Function: 15–30; Complete NPC: 40–100+
+
+## Technical Details
+### Module Structure
+```
+PythonApplication1/
+├── PythonApplication1.py
+├── rathena_tools_menu.py
+├── rathena-tools/
+│   ├── __init__.py
+│   ├── rathena_script_gen.py
+│   ├── rathena_script_ui.py
+└── docs/
+```
+
+### Import Setup Example
+```python
+import os, sys
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+_rathena_path = os.path.join(_current_dir, 'rathena-tools')
+if _rathena_path not in sys.path:
+    sys.path.insert(0, _rathena_path)
+from rathena_script_gen import ScriptGenerator
+from rathena_script_ui import DialogBuilder
+```
+
+### Dependencies and Performance
+- Dependencies: Python 3.x, tkinter, SimpleEdit
+- Performance: Dialog generation <100ms; Preview update <50ms; Insert <10ms; Wizard step transition <200ms
+
+### Dialog Action System (Python-side)
+```python
+class DialogActionEnum(Enum):
+    MESSAGE = "Display Message"
+    NEXT_BUTTON = "Show Next Button"
+    CLOSE_BUTTON = "Show Close Button"
+    MENU = "Show Menu"
+    INPUT = "Get Input"
+    ITEM_CHECK = "Check Item"
+    ITEM_GIVE = "Give Item"
+    ITEM_REMOVE = "Remove Item"
+    CONDITION = "If Condition"
+    WARP = "Warp Player"
+
+@dataclass
+class DialogAction:
+    action_type: DialogActionEnum
+    parameters: Dict[str, Any]
+    def to_script_command(self) -> str:
+        ...
+```
+
+### Menu Branching Storage and Generation
+```python
+{
+    'options': ['Accept', 'Decline', 'More'],
+    'branches': {
+        'Accept': 'Great!\nnext\nclose',
+        'Decline': 'Maybe later.\nclose'
+    }
+}
+
+if action_type == MENU:
+    if branches:
+        lines = [f'switch(select("{opts}")) {{']
+        for idx, opt in enumerate(options, 1):
+            lines.append(f'\tcase {idx}:')
+            # branch content
+            lines.append('\t\tbreak;')
+        lines.append('}')
+        return '\n'.join(lines)
+    else:
+        return f'select("{opts}");'
+```
+
+### Script Command Handling
+```python
+msg = parameters.get('message', '')
+if msg.startswith('{SCRIPT}'):
+    return msg[8:]  # raw command
+else:
+    return f'mes "{msg}";'
+```
+
+## Best Practices (Concise)
+- Plan menu structure first (3–5 options)
+- Validate before deploy; test incrementally
+- Name clearly; comment complex branches
+
