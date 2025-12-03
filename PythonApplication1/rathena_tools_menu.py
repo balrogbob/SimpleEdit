@@ -27,6 +27,14 @@ except ImportError as e:
     _RATHENA_TOOLS_AVAILABLE = False
     print(f"[DEBUG] Failed to import rAthena tools: {e}")
 
+# Import YAML validator (separate module, works independently)
+try:
+    from rathena_yaml_validator import validate_yaml_content
+    _YAML_VALIDATOR_AVAILABLE = True
+except ImportError as e:
+    _YAML_VALIDATOR_AVAILABLE = False
+    print(f"[DEBUG] Failed to import YAML validator: {e}")
+
 
 def _launch_wizard_dialog(root, wizard):
     """Helper to launch a wizard dialog step-by-step."""
@@ -710,6 +718,10 @@ def create_rathena_menu(root, menuBar, textArea):
     rathenaMenu.add_command(
         label="Validate Script",
         command=lambda: validate_current_script(root, get_textarea)
+    )
+    rathenaMenu.add_command(
+        label="Validate YAML Database",
+        command=lambda: validate_yaml_database(root, get_textarea)
     )
     rathenaMenu.add_command(
         label="Insert Quick NPC",
@@ -2410,6 +2422,176 @@ def validate_current_script(root, get_textarea):
             
     except Exception as e:
         messagebox.showerror("Error", f"Validation error: {e}")
+
+
+def validate_yaml_database(root, get_textarea):
+    """Validate rAthena YAML database files."""
+    if not _YAML_VALIDATOR_AVAILABLE:
+        messagebox.showerror(
+            "Not Available",
+            "YAML Validator is not available.\n\n"
+            "Please ensure rathena_yaml_validator.py is present\n"
+            "and PyYAML is installed (pip install pyyaml)."
+        )
+        return
+    
+    # Get the textArea
+    if callable(get_textarea):
+        textArea = get_textarea()
+    else:
+        textArea = get_textarea
+        
+    if textArea is None:
+        messagebox.showerror("Error", "No text editor found")
+        return
+    
+    try:
+        # Create validation dialog (reuse same UI as script validator)
+        dlg = Toplevel(root)
+        dlg.title("YAML Database Validator")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.geometry("700x600")
+        
+        main_frame = ttk.Frame(dlg, padding=12)
+        main_frame.pack(fill=BOTH, expand=True)
+        
+        ttk.Label(main_frame, text="YAML Database Validation Results", font=("Arial", 12, "bold")).pack(anchor='w', pady=(0, 12))
+        
+        # Results area with tabs
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill=BOTH, expand=True)
+        
+        # Tab 1: Errors
+        errors_frame = ttk.Frame(notebook)
+        notebook.add(errors_frame, text="Errors")
+        
+        errors_list = Text(errors_frame, height=15, wrap=WORD)
+        errors_list.pack(side=LEFT, fill=BOTH, expand=True)
+        
+        errors_scroll = ttk.Scrollbar(errors_frame, orient='vertical', command=errors_list.yview)
+        errors_scroll.pack(side=RIGHT, fill=Y)
+        errors_list.config(yscrollcommand=errors_scroll.set)
+        
+        # Tab 2: Warnings
+        warnings_frame = ttk.Frame(notebook)
+        notebook.add(warnings_frame, text="Warnings")
+        
+        warnings_list = Text(warnings_frame, height=15, wrap=WORD)
+        warnings_list.pack(side=LEFT, fill=BOTH, expand=True)
+        
+        warnings_scroll = ttk.Scrollbar(warnings_frame, orient='vertical', command=warnings_list.yview)
+        warnings_scroll.pack(side=RIGHT, fill=Y)
+        warnings_list.config(yscrollcommand=warnings_scroll.set)
+        
+        # Tab 3: Best Practices / Suggestions
+        suggestions_frame = ttk.Frame(notebook)
+        notebook.add(suggestions_frame, text="Suggestions")
+        
+        suggestions_list = Text(suggestions_frame, height=15, wrap=WORD)
+        suggestions_list.pack(side=LEFT, fill=BOTH, expand=True)
+        
+        suggestions_scroll = ttk.Scrollbar(suggestions_frame, orient='vertical', command=suggestions_list.yview)
+        suggestions_scroll.pack(side=RIGHT, fill=Y)
+        suggestions_list.config(yscrollcommand=suggestions_scroll.set)
+        
+        # Summary label
+        summary_label = ttk.Label(main_frame, text="", font=("Arial", 10, "bold"))
+        summary_label.pack(pady=(12, 0))
+        
+        # Progress bar
+        progress = ttk.Progressbar(main_frame, mode='indeterminate')
+        progress.pack(fill=X, pady=(6, 12))
+        
+        # Bottom buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=X)
+        
+        def close_dialog():
+            dlg.destroy()
+        
+        ttk.Button(btn_frame, text="Close", command=close_dialog).pack(side=RIGHT, padx=4)
+        
+        # Configure text widget tags
+        errors_list.tag_config('error', foreground='#FF0000', font=("Arial", 9, "bold"))
+        errors_list.tag_config('location', foreground='#0000FF')
+        warnings_list.tag_config('warning', foreground='#FFA500', font=("Arial", 9, "bold"))
+        warnings_list.tag_config('location', foreground='#0000FF')
+        suggestions_list.tag_config('suggestion', foreground='#008000', font=("Arial", 9, "bold"))
+        suggestions_list.tag_config('location', foreground='#0000FF')
+        
+        # Start validation
+        progress.start()
+        
+        def perform_validation():
+            """Run YAML validation"""
+            try:
+                yaml_text = textArea.get('1.0', 'end-1c')
+                
+                # Validate using the YAML validator module
+                errors, warnings, suggestions = validate_yaml_content(yaml_text)
+                
+                # Display errors
+                if errors:
+                    for line_num, col, message in errors:
+                        if line_num > 0:
+                            errors_list.insert('end', f"✗ Line {line_num}: ", ('error', 'location'))
+                        else:
+                            errors_list.insert('end', "✗ Error: ", 'error')
+                        errors_list.insert('end', f"{message}\n")
+                else:
+                    errors_list.insert('end', "\n✓ No errors found!\n", 'error')
+                
+                # Display warnings
+                if warnings:
+                    for line_num, col, message in warnings:
+                        if line_num > 0:
+                            warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                        else:
+                            warnings_list.insert('end', "⚠ Warning: ", 'warning')
+                        warnings_list.insert('end', f"{message}\n")
+                else:
+                    warnings_list.insert('end', "\n✓ No warnings!\n", 'warning')
+                
+                # Display suggestions
+                if suggestions:
+                    for line_num, col, message in suggestions:
+                        if line_num > 0:
+                            suggestions_list.insert('end', f"💡 Line {line_num}: ", ('suggestion', 'location'))
+                        else:
+                            suggestions_list.insert('end', "💡 Suggestion: ", 'suggestion')
+                        suggestions_list.insert('end', f"{message}\n")
+                else:
+                    suggestions_list.insert('end', "\n✓ No suggestions!\n", 'suggestion')
+                
+                # Update summary
+                if not errors and not warnings:
+                    summary_label.config(text="✓ YAML validation passed!", foreground='#008000')
+                elif errors:
+                    summary_label.config(text=f"✗ {len(errors)} error(s) found", foreground='#FF0000')
+                else:
+                    summary_label.config(text=f"⚠ {len(warnings)} warning(s) found", foreground='#FFA500')
+                
+                # Disable text widgets
+                errors_list.config(state=DISABLED)
+                warnings_list.config(state=DISABLED)
+                suggestions_list.config(state=DISABLED)
+                
+            except Exception as e:
+                errors_list.insert('end', "✗ Error: ", 'error')
+                errors_list.insert('end', f"Validation error: {e}\n")
+                errors_list.config(state=DISABLED)
+        
+        def finish_validation():
+            """Complete validation and update UI"""
+            progress.stop()
+            perform_validation()
+        
+        # Run validation after dialog appears
+        dlg.after(100, finish_validation)
+        
+    except Exception as e:
+        messagebox.showerror("Error", f"YAML validation error: {e}")
 
 
 def insert_quick_npc(root, get_textarea):
