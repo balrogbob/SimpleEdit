@@ -467,3 +467,5 @@ FodyWeavers.xsd
 /PythonApplication1/out/rwkv_quantized.pth
 /PythonApplication1/out/ckpt.pt
 /PythonApplication1/out/rwkv_quantized.pth
+/build
+/dist

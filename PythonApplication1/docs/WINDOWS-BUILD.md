@@ -24,9 +24,9 @@ Instructions for building a standalone Windows executable (.exe) from the Python
 pip install pyinstaller
 
 # Build executable (from SimpleEdit root)
-pyinstaller --onefile --windowed --name PythonApplication1 PythonApplication1/PythonApplication1.py
+pyinstaller --onefile --windowed --name SimpleEdit --paths=PythonApplication1\\rathena-tools --hidden-import=rathena_script_gen --hidden-import=rathena_script_ui --hidden-import=rathena_yaml_validator --add-data "PythonApplication1\\rathena-tools;rathena-tools" PythonApplication1\\PythonApplication1.py
 
-# Output: dist/PythonApplication1.exe
+# Output: dist/SimpleEdit.exe
 ```
 
 That's it! The `.exe` is in the `dist/` folder.

@@ -6,7 +6,7 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE.txt)
 [![Python 3.8+](https://img.shields.io/badge/Python-3.8+-blue.svg)](https://www.python.org/)
-[![Version 0.2.0](https://img.shields.io/badge/Version-2.0.0-brightgreen.svg)](#)
+[![Version 0.2.1](https://img.shields.io/badge/Version-0.2.1-brightgreen.svg)](#)
 
 </div>
 
@@ -46,9 +46,11 @@ SimpleEdit started as a weekend project and has evolved into a comprehensive dev
 
 ## 📸 Screenshots
 
-| Main Editor | Rendered View |
-|---|---|
-| ![Main Editor](2024-12-05-2.png) | ![Rendered View](2024-12-05.png) |
+| New Interface | rAthena Tools | NPC Wizard |
+|---|---|---|
+| ![New Interface](newinterface.png) | ![rAthena Tools](rathena-tools.png) | ![NPC Wizard](NPC-Wizard.png) |
+| Dialog Editor | Script Validator | |
+| ![Dialog Editor](dialog-editor.png) | ![Script Validator](script-validator.png) | |
 
 ---
 

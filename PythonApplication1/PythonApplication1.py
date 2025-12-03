@@ -70,7 +70,7 @@ except Exception:
 _AI_BUTTON_DEFAULT_TEXT = "AI Autocomplete (Experimental)"
 __author__ = 'Joshua Richards'
 __license__ = 'MIT'
-__version__ = '0.2.0'
+__version__ = '0.2.1'
 
 try:
     import functions as funcs
