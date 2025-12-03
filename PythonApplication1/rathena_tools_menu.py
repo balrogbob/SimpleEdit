@@ -1640,7 +1640,7 @@ def launch_dialog_builder(root, get_textarea):
 
 
 def validate_current_script(root, get_textarea):
-    """Validate the current script in the text area."""
+    """Validate the current script with line-by-line error highlighting."""
     if not _RATHENA_TOOLS_AVAILABLE:
         messagebox.showerror(
             "Not Available",
@@ -1653,35 +1653,761 @@ def validate_current_script(root, get_textarea):
         textArea = get_textarea()
     else:
         textArea = get_textarea
-    
+        
     if textArea is None:
         messagebox.showerror("Error", "No text editor found")
         return
-    
+        
     try:
-        script_text = textArea.get('1.0', 'end')
+        # Create validation dialog
+        dlg = Toplevel(root)
+        dlg.title("Script Validator")
+        dlg.transient(root)
+        dlg.grab_set()
+        dlg.geometry("700x600")
+            
+        main_frame = ttk.Frame(dlg, padding=12)
+        main_frame.pack(fill=BOTH, expand=True)
+            
+        ttk.Label(main_frame, text="Script Validation Results", font=("Arial", 12, "bold")).pack(anchor='w', pady=(0, 12))
+            
+        # Results area with tabs
+        notebook = ttk.Notebook(main_frame)
+        notebook.pack(fill=BOTH, expand=True)
+            
+        # Tab 1: Errors
+        errors_frame = ttk.Frame(notebook)
+        notebook.add(errors_frame, text="Errors")
+            
+        errors_list = Text(errors_frame, height=15, wrap=WORD)
+        errors_list.pack(side=LEFT, fill=BOTH, expand=True)
+            
+        errors_scroll = ttk.Scrollbar(errors_frame, orient='vertical', command=errors_list.yview)
+        errors_scroll.pack(side=RIGHT, fill=Y)
+        errors_list.config(yscrollcommand=errors_scroll.set)
+            
+        # Tab 2: Warnings
+        warnings_frame = ttk.Frame(notebook)
+        notebook.add(warnings_frame, text="Warnings")
+            
+        warnings_list = Text(warnings_frame, height=15, wrap=WORD)
+        warnings_list.pack(side=LEFT, fill=BOTH, expand=True)
+            
+        warnings_scroll = ttk.Scrollbar(warnings_frame, orient='vertical', command=warnings_list.yview)
+        warnings_scroll.pack(side=RIGHT, fill=Y)
+        warnings_list.config(yscrollcommand=warnings_scroll.set)
+            
+        # Tab 3: Best Practices
+        practices_frame = ttk.Frame(notebook)
+        notebook.add(practices_frame, text="Best Practices")
+            
+        practices_list = Text(practices_frame, height=15, wrap=WORD)
+        practices_list.pack(side=LEFT, fill=BOTH, expand=True)
+            
+        practices_scroll = ttk.Scrollbar(practices_frame, orient='vertical', command=practices_list.yview)
+        practices_scroll.pack(side=RIGHT, fill=Y)
+        practices_list.config(yscrollcommand=practices_scroll.set)
+            
+        # Summary label
+        summary_label = ttk.Label(main_frame, text="", font=("Arial", 10, "bold"))
+        summary_label.pack(pady=(12, 0))
+            
+        # Progress bar
+        progress = ttk.Progressbar(main_frame, mode='indeterminate')
+        progress.pack(fill=X, pady=(6, 12))
+            
+        # Bottom buttons
+        btn_frame = ttk.Frame(main_frame)
+        btn_frame.pack(fill=X)
         
-        # Basic validation checks
-        if len(script_text.strip()) < 10:
-            messagebox.showwarning("Validation", "Script is too short or empty.")
-            return
+        # Store fixable issues for auto-fix feature
+        fixable_issues = []
+            
+        def clear_highlights():
+            """Clear all validation-related highlights from editor"""
+            try:
+                textArea.tag_remove('validation_error', '1.0', 'end')
+                textArea.tag_remove('validation_warning', '1.0', 'end')
+                textArea.tag_remove('validation_suggestion', '1.0', 'end')
+                textArea.tag_remove('validation_error_line', '1.0', 'end')
+                textArea.tag_remove('validation_warning_line', '1.0', 'end')
+            except Exception:
+                pass
         
-        # Check for common elements
-        has_npc = 'script' in script_text.lower() or 'prontera' in script_text.lower()
-        has_commands = 'mes' in script_text.lower() or 'close' in script_text.lower()
+        def apply_all_fixes():
+            """Apply all auto-fixable issues with user confirmation"""
+            if not fixable_issues:
+                messagebox.showinfo("No Fixes", "No auto-fixable issues found.")
+                return
+            
+            if not messagebox.askyesno("Apply All Fixes", 
+                f"Apply all {len(fixable_issues)} suggested fixes?\n\n"
+                "This will modify your script automatically.\n"
+                "You can undo these changes if needed."):
+                return
+            
+            try:
+                # Sort by line number in reverse order to preserve positions
+                sorted_fixes = sorted(fixable_issues, key=lambda x: x['line'], reverse=True)
+                
+                applied_count = 0
+                for fix in sorted_fixes:
+                    line_num = fix['line']
+                    old_text = fix['old']
+                    new_text = fix['new']
+                    
+                    # Get current line text
+                    current_line = textArea.get(f"{line_num}.0", f"{line_num}.end")
+                    
+                    # Verify the line still contains the old text
+                    if old_text in current_line:
+                        # Replace in the line
+                        updated_line = current_line.replace(old_text, new_text, 1)
+                        
+                        # Update in editor
+                        textArea.delete(f"{line_num}.0", f"{line_num}.end")
+                        textArea.insert(f"{line_num}.0", updated_line)
+                        applied_count += 1
+                
+                messagebox.showinfo("Fixes Applied", 
+                    f"Successfully applied {applied_count} of {len(fixable_issues)} fixes.\n\n"
+                    "Please re-validate to check for remaining issues.")
+                
+                # Clear and re-run validation
+                fixable_issues.clear()
+                clear_highlights()
+                dlg.destroy()
+                validate_current_script(root, get_textarea)
+                
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to apply fixes: {e}")
         
-        if has_npc and has_commands:
-            messagebox.showinfo("Validation", "Script looks valid! ✓\n\nContains NPC definition and commands.")
-        elif script_text.strip():
-            messagebox.showwarning(
-                "Validation Issues",
-                "Script may be incomplete.\n\n"
-                "Make sure to include:\n"
-                "• NPC location (e.g., 'prontera')\n"
-                "• NPC commands (e.g., 'mes', 'close')"
-            )
-        else:
-            messagebox.showwarning("Validation", "Script is empty.")
+        def review_fixes():
+            """Review and selectively apply fixes one by one"""
+            if not fixable_issues:
+                messagebox.showinfo("No Fixes", "No auto-fixable issues found.")
+                return
+            
+            # Create review dialog
+            review_dlg = Toplevel(dlg)
+            review_dlg.title("Review & Apply Fixes")
+            review_dlg.transient(dlg)
+            review_dlg.grab_set()
+            review_dlg.geometry("700x500")
+            
+            review_frame = ttk.Frame(review_dlg, padding=12)
+            review_frame.pack(fill=BOTH, expand=True)
+            
+            ttk.Label(review_frame, text="Review Suggested Fixes", font=("Arial", 12, "bold")).pack(anchor='w', pady=(0, 12))
+            
+            # Current fix index
+            current_idx = [0]
+            applied_fixes = []
+            
+            def show_fix():
+                """Display current fix"""
+                if current_idx[0] >= len(fixable_issues):
+                    messagebox.showinfo("Complete", 
+                        f"Review complete!\n\n"
+                        f"Applied {len(applied_fixes)} of {len(fixable_issues)} fixes.")
+                    review_dlg.destroy()
+                    if applied_fixes:
+                        # Re-run validation
+                        clear_highlights()
+                        dlg.destroy()
+                        validate_current_script(root, get_textarea)
+                    return
+                
+                fix = fixable_issues[current_idx[0]]
+                
+                # Update display
+                info_text.config(state=NORMAL)
+                info_text.delete('1.0', END)
+                info_text.insert('1.0', f"Fix {current_idx[0] + 1} of {len(fixable_issues)}\n\n", 'bold')
+                info_text.insert('end', f"Line {fix['line']}: {fix['type']}\n\n", 'location')
+                info_text.insert('end', "Original:\n", 'bold')
+                info_text.insert('end', f"  {fix['old']}\n\n", 'old')
+                info_text.insert('end', "Suggested Fix:\n", 'bold')
+                info_text.insert('end', f"  {fix['new']}\n\n", 'new')
+                info_text.insert('end', f"Description: {fix['description']}", 'normal')
+                info_text.config(state=DISABLED)
+                
+                # Update progress
+                progress_label.config(text=f"Progress: {current_idx[0] + 1} / {len(fixable_issues)}")
+            
+            # Info display
+            info_frame = ttk.Frame(review_frame)
+            info_frame.pack(fill=BOTH, expand=True, pady=(0, 12))
+            
+            info_text = Text(info_frame, height=15, wrap=WORD, state=DISABLED)
+            info_text.pack(side=LEFT, fill=BOTH, expand=True)
+            
+            info_scroll = ttk.Scrollbar(info_frame, orient='vertical', command=info_text.yview)
+            info_scroll.pack(side=RIGHT, fill=Y)
+            info_text.config(yscrollcommand=info_scroll.set)
+            
+            # Configure tags
+            info_text.tag_config('bold', font=("Arial", 9, "bold"))
+            info_text.tag_config('location', foreground='#0000FF')
+            info_text.tag_config('old', foreground='#FF0000', background='#FFE6E6')
+            info_text.tag_config('new', foreground='#008000', background='#E6FFE6')
+            info_text.tag_config('normal', foreground='#000000')
+            
+            # Progress label
+            progress_label = ttk.Label(review_frame, text="", font=("Arial", 9))
+            progress_label.pack(anchor='w')
+            
+            # Action buttons
+            action_frame = ttk.Frame(review_frame)
+            action_frame.pack(fill=X, pady=(12, 0))
+            
+            def apply_fix():
+                """Apply current fix and move to next"""
+                fix = fixable_issues[current_idx[0]]
+                try:
+                    line_num = fix['line']
+                    old_text = fix['old']
+                    new_text = fix['new']
+                    
+                    # Get current line
+                    current_line = textArea.get(f"{line_num}.0", f"{line_num}.end")
+                    
+                    # Apply fix
+                    if old_text in current_line:
+                        updated_line = current_line.replace(old_text, new_text, 1)
+                        textArea.delete(f"{line_num}.0", f"{line_num}.end")
+                        textArea.insert(f"{line_num}.0", updated_line)
+                        applied_fixes.append(fix)
+                    
+                    current_idx[0] += 1
+                    show_fix()
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to apply fix: {e}")
+            
+            def skip_fix():
+                """Skip current fix and move to next"""
+                current_idx[0] += 1
+                show_fix()
+            
+            def apply_all_remaining():
+                """Apply all remaining fixes without review"""
+                if messagebox.askyesno("Apply All", 
+                    f"Apply all {len(fixable_issues) - current_idx[0]} remaining fixes?"):
+                    try:
+                        remaining = fixable_issues[current_idx[0]:]
+                        # Sort by line number in reverse
+                        remaining_sorted = sorted(remaining, key=lambda x: x['line'], reverse=True)
+                        
+                        for fix in remaining_sorted:
+                            line_num = fix['line']
+                            old_text = fix['old']
+                            new_text = fix['new']
+                            
+                            current_line = textArea.get(f"{line_num}.0", f"{line_num}.end")
+                            if old_text in current_line:
+                                updated_line = current_line.replace(old_text, new_text, 1)
+                                textArea.delete(f"{line_num}.0", f"{line_num}.end")
+                                textArea.insert(f"{line_num}.0", updated_line)
+                                applied_fixes.append(fix)
+                        
+                        messagebox.showinfo("Complete", 
+                            f"Applied {len(applied_fixes)} fixes total.")
+                        review_dlg.destroy()
+                        
+                        # Re-run validation
+                        clear_highlights()
+                        dlg.destroy()
+                        validate_current_script(root, get_textarea)
+                    except Exception as e:
+                        messagebox.showerror("Error", f"Failed to apply fixes: {e}")
+            
+            ttk.Button(action_frame, text="✓ Apply Fix", command=apply_fix, width=12).pack(side=LEFT, padx=4)
+            ttk.Button(action_frame, text="→ Skip", command=skip_fix, width=10).pack(side=LEFT, padx=4)
+            ttk.Button(action_frame, text="Apply All Remaining", command=apply_all_remaining, width=18).pack(side=LEFT, padx=4)
+            ttk.Button(action_frame, text="Cancel", command=review_dlg.destroy, width=10).pack(side=RIGHT, padx=4)
+            
+            # Show first fix
+            show_fix()
+            
+        def close_dialog():
+            clear_highlights()
+            dlg.destroy()
+            
+        ttk.Button(btn_frame, text="Clear Highlights", command=clear_highlights).pack(side=LEFT, padx=4)
+        ttk.Button(btn_frame, text="Review & Fix...", command=review_fixes).pack(side=LEFT, padx=4)
+        ttk.Button(btn_frame, text="Apply All Fixes", command=apply_all_fixes).pack(side=LEFT, padx=4)
+        ttk.Button(btn_frame, text="Close", command=close_dialog).pack(side=RIGHT, padx=4)
+            
+        # Configure text widget tags
+        errors_list.tag_config('error', foreground='#FF0000', font=("Arial", 9, "bold"))
+        errors_list.tag_config('location', foreground='#0000FF')
+        warnings_list.tag_config('warning', foreground='#FFA500', font=("Arial", 9, "bold"))
+        warnings_list.tag_config('location', foreground='#0000FF')
+        practices_list.tag_config('suggestion', foreground='#008000', font=("Arial", 9, "bold"))
+        practices_list.tag_config('location', foreground='#0000FF')
+            
+        # Configure editor highlighting tags
+        try:
+            textArea.tag_config('validation_error', foreground='#FF0000', background='#FFE6E6')
+            textArea.tag_config('validation_warning', foreground='#FFA500', background='#FFF8E6')
+            textArea.tag_config('validation_suggestion', foreground='#008000', background='#E6FFE6')
+            textArea.tag_config('validation_error_line', background='#FFE6E6')
+            textArea.tag_config('validation_warning_line', background='#FFF8E6')
+        except Exception:
+            pass
+            
+        # Start validation
+        progress.start()
+            
+        def perform_validation():
+            """Run comprehensive validation checks"""
+            try:
+                script_text = textArea.get('1.0', 'end-1c')
+                lines = script_text.split('\n')
+                    
+                errors = []
+                warnings = []
+                suggestions = []
+                
+                # Load rAthena commands from syntax file
+                rathena_commands = set()
+                try:
+                    syntax_file = os.path.join(_current_dir, 'syntax', 'rathena.ini')
+                    if os.path.exists(syntax_file):
+                        with open(syntax_file, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                if line.startswith('builtins.csv'):
+                                    # Extract commands from builtins.csv line
+                                    builtins_line = line.split('=', 1)[1].strip()
+                                    commands = [cmd.strip() for cmd in builtins_line.split(',') if cmd.strip()]
+                                    rathena_commands.update(commands)
+                                    break
+                        # Add keywords too
+                        with open(syntax_file, 'r', encoding='utf-8') as f:
+                            for line in f:
+                                if line.startswith('keywords.csv'):
+                                    keywords_line = line.split('=', 1)[1].strip()
+                                    keywords = [kw.strip() for kw in keywords_line.split(',') if kw.strip()]
+                                    rathena_commands.update(keywords)
+                                    break
+                except Exception as e:
+                    # Fallback to basic commands if syntax file fails
+                    rathena_commands = {'mes', 'close', 'next', 'end', 'set', 'getitem', 'delitem', 'warp', 
+                                       'menu', 'select', 'if', 'else', 'switch', 'case', 'break', 'goto'}
+                    
+                # Clear previous highlights
+                clear_highlights()
+                    
+                # 1. Empty script check
+                if not script_text.strip():
+                    errors.append((0, 0, "Script is empty"))
+                    errors_list.insert('end', "✗ Error: ", 'error')
+                    errors_list.insert('end', "Script is empty\n")
+                    return errors, warnings, suggestions
+                    
+                # 2. Line-by-line validation
+                in_npc = False
+                in_function = False
+                in_block = False
+                in_multiline_comment = False
+                bracket_count = 0
+                npc_name = None
+                function_name = None
+                expected_indent = 0  # Track expected indentation level
+                indent_stack = [0]  # Stack to track indentation levels
+                    
+                for line_num, line in enumerate(lines, 1):
+                    stripped = line.strip()
+                    
+                    # Simple multi-line comment handling - just like bracket tracking
+                    if '/*' in stripped:
+                        in_multiline_comment = True
+                    if '*/' in stripped:
+                        in_multiline_comment = False
+                        continue  # Skip the line with */
+                    
+                    # Skip everything inside multi-line comments
+                    if in_multiline_comment:
+                        continue
+                        
+                    # Skip empty lines and single-line comments
+                    if not stripped or stripped.startswith('//'):
+                        continue
+                        
+                    # Check for NPC definition
+                    if '\tscript\t' in line:
+                        # Format: map,x,y,dir<tab>script<tab>name<tab>sprite,{
+                        parts = line.split('\t')
+                        if len(parts) >= 3:
+                            in_npc = True
+                            npc_name = parts[2].strip()
+                                
+                            # Validate NPC name
+                            if not npc_name:
+                                errors.append((line_num, len(line), "NPC name is empty"))
+                                _highlight_line_error(textArea, line_num, 'validation_error_line')
+                                errors_list.insert('end', f"✗ Line {line_num}: ", ('error', 'location'))
+                                errors_list.insert('end', "NPC name is empty\n")
+                            elif len(npc_name) > 24:
+                                warnings.append((line_num, len(line), f"NPC name '{npc_name}' exceeds 24 characters"))
+                                _highlight_line_warning(textArea, line_num, 'validation_warning_line')
+                                warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                warnings_list.insert('end', f"NPC name '{npc_name}' exceeds 24 characters\n")
+                                
+                            # Validate location format
+                            location = parts[0].strip()
+                            loc_parts = location.split(',')
+                            if len(loc_parts) != 4:
+                                errors.append((line_num, len(location), "Invalid NPC location format (expected: map,x,y,dir)"))
+                                _highlight_error(textArea, line_num, 0, len(location), 'validation_error')
+                                errors_list.insert('end', f"✗ Line {line_num}: ", ('error', 'location'))
+                                errors_list.insert('end', "Invalid NPC location format\n")
+                        
+                    # Check for function definition
+                    if 'function\t' in line:
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            in_function = True
+                            function_name = parts[1].strip()
+                                
+                            # Validate function name
+                            if not function_name:
+                                errors.append((line_num, len(line), "Function name is empty"))
+                                _highlight_line_error(textArea, line_num, 'validation_error_line')
+                                errors_list.insert('end', f"✗ Line {line_num}: ", ('error', 'location'))
+                                errors_list.insert('end', "Function name is empty\n")
+                        
+                    # Update indentation stack FIRST (for current line)
+                    if '{' in stripped:
+                        in_block = True
+                        expected_indent += 1
+                        indent_stack.append(expected_indent)
+                    
+                    # Track brackets
+                    bracket_count += stripped.count('{') - stripped.count('}')
+                    
+                    # SIMPLE RULE: If we're in a block (after seeing {), validate ALL non-empty lines
+                    # Skip ONLY: empty lines, pure comments, and definition lines
+                    if in_block and stripped and not stripped.startswith('//'):
+                        # Skip only the definition line itself
+                        is_definition_line = ('function\t' in line or '\tscript\t' in line)
+                        
+                        if not is_definition_line:
+                            # Calculate current indentation
+                            current_indent = len(line) - len(line.lstrip('\t '))
+                            leading_whitespace = line[:current_indent]
+                            
+                            # Determine line characteristics
+                            opens_block = '{' in stripped
+                            closes_block = '}' in stripped
+                            is_else_clause = closes_block and 'else' in stripped.lower()
+                            
+                            # Expected indentation (use CURRENT stack state)
+                            expected_tabs = indent_stack[-1] if indent_stack else 0
+                            
+                            # Check indentation type
+                            has_spaces = ' ' in leading_whitespace
+                            has_tabs = '\t' in leading_whitespace
+                            
+                            # Issue 1: Mixed tabs and spaces
+                            if has_spaces and has_tabs:
+                                warnings.append((line_num, 0, "Mixed tabs and spaces in indentation"))
+                                warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                warnings_list.insert('end', "Mixed tabs and spaces in indentation\n")
+                                
+                                if is_else_clause:
+                                    correct_indent = '\t' * (expected_tabs - 1) if expected_tabs > 0 else ''
+                                elif closes_block and not opens_block:
+                                    correct_indent = '\t' * (expected_tabs - 1) if expected_tabs > 0 else ''
+                                else:
+                                    correct_indent = '\t' * expected_tabs
+                                
+                                fixable_issues.append({
+                                    'line': line_num,
+                                    'type': 'Indentation (Mixed)',
+                                    'old': leading_whitespace,
+                                    'new': correct_indent,
+                                    'description': f'Replace mixed indentation with {len(correct_indent)} tab(s)'
+                                })
+                            
+                            # Issue 2: Using spaces instead of tabs
+                            elif has_spaces and not has_tabs:
+                                warnings.append((line_num, 0, "Using spaces instead of tabs for indentation"))
+                                warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                warnings_list.insert('end', "Using spaces instead of tabs (rAthena standard uses tabs)\n")
+                                
+                                space_count = len(leading_whitespace)
+                                if is_else_clause:
+                                    correct_indent = '\t' * (expected_tabs - 1) if expected_tabs > 0 else ''
+                                elif closes_block and not opens_block:
+                                    correct_indent = '\t' * (expected_tabs - 1) if expected_tabs > 0 else ''
+                                else:
+                                    correct_indent = '\t' * expected_tabs
+                                
+                                fixable_issues.append({
+                                    'line': line_num,
+                                    'type': 'Indentation (Spaces)',
+                                    'old': leading_whitespace,
+                                    'new': correct_indent,
+                                    'description': f'Convert {space_count} space(s) to {len(correct_indent)} tab(s)'
+                                })
+                            
+                            # Issue 3: Wrong number of tabs
+                            elif has_tabs and not has_spaces:
+                                tab_count = leading_whitespace.count('\t')
+                                
+                                # Determine correct level
+                                if is_else_clause:
+                                    check_indent = expected_tabs - 1 if expected_tabs > 0 else 0
+                                elif closes_block and not opens_block:
+                                    check_indent = expected_tabs - 1 if expected_tabs > 0 else 0
+                                else:
+                                    check_indent = expected_tabs
+                                
+                                if tab_count != check_indent:
+                                    warnings.append((line_num, 0, f"Incorrect indentation: found {tab_count} tab(s), expected {check_indent}"))
+                                    warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                    warnings_list.insert('end', f"Incorrect indentation: {tab_count} tab(s), expected {check_indent}\n")
+                                    
+                                    correct_indent = '\t' * check_indent
+                                    fixable_issues.append({
+                                        'line': line_num,
+                                        'type': 'Indentation (Tab Count)',
+                                        'old': leading_whitespace,
+                                        'new': correct_indent,
+                                        'description': f'Adjust indentation from {tab_count} to {check_indent} tab(s)'
+                                    })
+                            
+                            # Issue 4: No indentation at all (0 tabs when we expect some)
+                            elif not has_tabs and not has_spaces and expected_tabs > 0:
+                                # Only flag if this is not a closing brace
+                                if not (closes_block and not opens_block):
+                                    warnings.append((line_num, 0, f"Missing indentation: found 0 tab(s), expected {expected_tabs}"))
+                                    warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                    warnings_list.insert('end', f"Missing indentation: found 0 tab(s), expected {expected_tabs}\n")
+                                    
+                                    correct_indent = '\t' * expected_tabs
+                                    fixable_issues.append({
+                                        'line': line_num,
+                                        'type': 'Indentation (Missing)',
+                                        'old': '',
+                                        'new': correct_indent,
+                                        'description': f'Add {expected_tabs} tab(s) for proper indentation'
+                                    })
+                    
+                    # Update indentation stack AFTER validation (for closing braces)
+                    if '}' in stripped and bracket_count == 0:
+                        in_block = False
+                        in_npc = False
+                        in_function = False
+                        if len(indent_stack) > 1:
+                            indent_stack.pop()
+                        expected_indent = indent_stack[-1] if indent_stack else 0
+                        
+                    if '}' in stripped:
+                        if len(indent_stack) > 1:
+                            indent_stack.pop()
+                        expected_indent = indent_stack[-1] if indent_stack else 0
+                        
+                    # Check for common syntax errors
+                        
+                    # Missing semicolons - use comprehensive command list from syntax file
+                    # Exceptions:
+                    # - Lines ending with comma (,) are continuations
+                    # - Case labels should end with colon (:)
+                    if in_block and not stripped.endswith((';', '{', '}', ':', ',')):
+                        # Check if this is a case statement (should end with :)
+                        is_case_label = stripped.lower().startswith('case ') or stripped.lower().startswith('default')
+                        
+                        if is_case_label:
+                            # Case labels need colon, not semicolon
+                            warnings.append((line_num, len(line), "Case label should end with colon (:)"))
+                            _highlight_warning(textArea, line_num, len(line) - 1, len(line), 'validation_warning')
+                            warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                            warnings_list.insert('end', "Case label should end with colon (:)\n")
+                            
+                            # Add to fixable issues
+                            fixable_issues.append({
+                                'line': line_num,
+                                'type': 'Missing Colon',
+                                'old': stripped,
+                                'new': stripped + ':',
+                                'description': 'Add missing colon at end of case label'
+                            })
+                        else:
+                            # Regular statements need semicolons
+                            # Check if line contains any rAthena command
+                            line_lower = stripped.lower()
+                            has_command = any(cmd in line_lower for cmd in rathena_commands if cmd)
+                            
+                            # Also check for common patterns that need semicolons
+                            needs_semicolon = (
+                                has_command or
+                                '=' in stripped or  # Variable assignment
+                                stripped.startswith('.@') or  # Local variable
+                                stripped.startswith('@') or   # Temp variable
+                                stripped.startswith('$') or   # Global variable
+                                stripped.startswith('#')      # Account variable
+                            )
+                            
+                            if needs_semicolon:
+                                warnings.append((line_num, len(line), "Missing semicolon"))
+                                _highlight_warning(textArea, line_num, len(line) - 1, len(line), 'validation_warning')
+                                warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                                warnings_list.insert('end', "Missing semicolon\n")
+                                
+                                # Add to fixable issues
+                                fixable_issues.append({
+                                    'line': line_num,
+                                    'type': 'Missing Semicolon',
+                                    'old': stripped,
+                                    'new': stripped + ';',
+                                    'description': 'Add missing semicolon at end of line'
+                                })
+                        
+                    # Unclosed strings
+                    quote_count = stripped.count('"')
+                    if quote_count % 2 != 0:
+                        errors.append((line_num, len(line), "Unclosed string"))
+                        # Find position of first quote
+                        quote_pos = line.find('"')
+                        _highlight_error(textArea, line_num, quote_pos, len(line), 'validation_error')
+                        errors_list.insert('end', f"✗ Line {line_num}: ", ('error', 'location'))
+                        errors_list.insert('end', "Unclosed string\n")
+                        
+                    # Common command typos (using word boundaries to avoid false positives)
+                    import re
+                    typos = {
+                        'mesage': 'mes',
+                        'messge': 'mes',
+                        'nxt': 'next',
+                        'clos': 'close',
+                        'closse': 'close',
+                        'warpp': 'warp',
+                        'getiitem': 'getitem',
+                        'deliitem': 'delitem'
+                    }
+                    for typo, correct in typos.items():
+                        # Match whole word followed by non-letter (punctuation, whitespace, end of string)
+                        # This catches "clos;" but not "close;" or "closest"
+                        pattern = r'\b' + re.escape(typo) + r'(?=[^a-zA-Z]|$)'
+                        match = re.search(pattern, stripped, re.IGNORECASE)
+                        if match:
+                            typo_pos = line.lower().find(typo)
+                            warnings.append((line_num, typo_pos, f"Possible typo: '{typo}' (did you mean '{correct}'?)"))
+                            _highlight_warning(textArea, line_num, typo_pos, typo_pos + len(typo), 'validation_warning')
+                            warnings_list.insert('end', f"⚠ Line {line_num}: ", ('warning', 'location'))
+                            warnings_list.insert('end', f"Possible typo: '{typo}' → '{correct}'\n")
+                            
+                            # Add to fixable issues
+                            fixable_issues.append({
+                                'line': line_num,
+                                'type': 'Typo',
+                                'old': typo,
+                                'new': correct,
+                                'description': f"Replace '{typo}' with '{correct}'"
+                            })
+                        
+                    # Best practice: Use mes for NPC dialog
+                    if in_npc and '"' in stripped and 'mes' not in stripped and not stripped.startswith('//'):
+                        if not any(cmd in stripped for cmd in ['select', 'input', 'set', 'if', 'switch', 'case']):
+                            suggestions.append((line_num, 0, "Consider using 'mes' for NPC dialog"))
+                            practices_list.insert('end', f"💡 Line {line_num}: ", ('suggestion', 'location'))
+                            practices_list.insert('end', "Consider using 'mes' for NPC dialog\n")
+                        
+                    # Best practice: Close dialogs properly
+                    if in_npc and line_num == len(lines) and 'close' not in stripped and 'end' not in stripped:
+                        suggestions.append((line_num, 0, "NPC dialog should end with 'close;' or 'end;'"))
+                        practices_list.insert('end', f"💡 Line {line_num}: ", ('suggestion', 'location'))
+                        practices_list.insert('end', "NPC should end with 'close;' or 'end;'\n")
+                    
+                # 3. Check bracket balance
+                if bracket_count != 0:
+                    errors.append((0, 0, f"Unbalanced brackets (difference: {bracket_count})"))
+                    errors_list.insert('end', "✗ Error: ", 'error')
+                    errors_list.insert('end', f"Unbalanced brackets (difference: {bracket_count})\n")
+                    
+                # 4. Check for required elements
+                has_npc = any('\tscript\t' in line for line in lines)
+                has_function = any('function\t' in line for line in lines)
+                    
+                if not has_npc and not has_function:
+                    warnings.append((0, 0, "Script contains no NPCs or functions"))
+                    warnings_list.insert('end', "⚠ Warning: ", 'warning')
+                    warnings_list.insert('end', "Script contains no NPCs or functions\n")
+                    
+                return errors, warnings, suggestions
+                    
+            except Exception as e:
+                errors_list.insert('end', "✗ Error: ", 'error')
+                errors_list.insert('end', f"Validation error: {e}\n")
+                return [(0, 0, str(e))], [], []
+            
+        def _highlight_line_error(text_widget, line_num, tag):
+            """Highlight entire line for errors"""
+            try:
+                start = f"{line_num}.0"
+                end = f"{line_num}.end"
+                text_widget.tag_add(tag, start, end)
+            except Exception:
+                pass
+            
+        def _highlight_line_warning(text_widget, line_num, tag):
+            """Highlight entire line for warnings"""
+            try:
+                start = f"{line_num}.0"
+                end = f"{line_num}.end"
+                text_widget.tag_add(tag, start, end)
+            except Exception:
+                pass
+            
+        def _highlight_error(text_widget, line_num, start_col, end_col, tag):
+            """Highlight specific text range for errors"""
+            try:
+                start = f"{line_num}.{start_col}"
+                end = f"{line_num}.{end_col}"
+                text_widget.tag_add(tag, start, end)
+            except Exception:
+                pass
+            
+        def _highlight_warning(text_widget, line_num, start_col, end_col, tag):
+            """Highlight specific text range for warnings"""
+            try:
+                start = f"{line_num}.{start_col}"
+                end = f"{line_num}.{end_col}"
+                text_widget.tag_add(tag, start, end)
+            except Exception:
+                pass
+            
+        def finish_validation():
+            """Complete validation and update UI"""
+            progress.stop()
+                
+            errors, warnings, suggestions = perform_validation()
+                
+            # Update summary
+            if not errors and not warnings:
+                summary_label.config(text="✓ Script validation passed!", foreground='#008000')
+                errors_list.insert('end', "\n✓ No errors found!\n", 'error')
+            elif errors:
+                summary_label.config(text=f"✗ {len(errors)} error(s) found", foreground='#FF0000')
+            else:
+                summary_label.config(text=f"⚠ {len(warnings)} warning(s) found", foreground='#FFA500')
+                
+            if not warnings:
+                warnings_list.insert('end', "\n✓ No warnings!\n", 'warning')
+                
+            if not suggestions:
+                practices_list.insert('end', "\n✓ No suggestions!\n", 'suggestion')
+                
+            # Disable text widgets
+            errors_list.config(state=DISABLED)
+            warnings_list.config(state=DISABLED)
+            practices_list.config(state=DISABLED)
+            
+        # Run validation after dialog appears
+        dlg.after(100, finish_validation)
+            
     except Exception as e:
         messagebox.showerror("Error", f"Validation error: {e}")
 

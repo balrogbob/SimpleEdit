@@ -96,6 +96,11 @@
     <Content Include="docs\EDITOR-USAGE.md" />
     <Content Include="docs\EXAMPLES.md" />
     <Content Include="docs\FAQ.md" />
+    <Content Include="docs\INDENTATION_FIX_COMPLETE.md" />
+    <Content Include="docs\INDENTATION_FIX_FINAL.md" />
+    <Content Include="docs\INDENTATION_FIX_FIRST_LINE.md" />
+    <Content Include="docs\INDENTATION_FIX_SIMPLE.md" />
+    <Content Include="docs\INDENTATION_VALIDATION.md" />
     <Content Include="docs\INDEX.md" />
     <Content Include="docs\INSTALLATION.md" />
     <Content Include="docs\INTERNAL-API.md" />
@@ -109,6 +114,12 @@
     <Content Include="docs\RATHENA_TOOLS_QUICK_REF.md" />
     <Content Include="docs\SYNTAX.md" />
     <Content Include="docs\TROUBLESHOOTING.md" />
+    <Content Include="docs\VALIDATOR_CASE_STATEMENT_FIX.md" />
+    <Content Include="docs\VALIDATOR_ENHANCED_SEMICOLON.md" />
+    <Content Include="docs\VALIDATOR_IMPROVEMENTS.md" />
+    <Content Include="docs\VALIDATOR_MULTILINE_COMMENT_FIX.md" />
+    <Content Include="docs\VALIDATOR_MULTILINE_COMMENT_FIX_SIMPLE.md" />
+    <Content Include="docs\VALIDATOR_MULTILINE_FIX.md" />
     <Content Include="docs\WINDOWS-BUILD.md" />
     <Content Include="effect_list.md" />
     <Content Include="examples\demo.html" />

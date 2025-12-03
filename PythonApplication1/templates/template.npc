@@ -1,0 +1,63 @@
+prontera,150,150,5	script	Example_Quest_NPC	999,{
+
+// Example rAthena NPC quest
+// - Start: choose "Start Quest" to begin
+// - Objective: bring 3 apples (item id 10001)
+// - Claim: exchange apples for exp reward
+/* Multi-line comment example:
+   This demonstrates // and /* ... */ comment forms (both supported).
+*/
+
+	mes "[Example NPC]";
+	mes "Greetings, adventurer!";
+	next;
+	menu "What can I do for you?",
+	"Start Quest",
+	"Check Progress",
+	"Claim Reward",
+	"Leave"
+
+	switch (select);
+	case 1:
+        // start quest if not already started
+		if (.@eq_started == 0) {
+		set .@eq_started, 1;
+		set .@apple_count, 0;
+		mes "Quest started: bring me 3 apples (item id 10001).";
+		close;
+		} else {
+		mes "You already have the quest. Good luck!";
+		close;
+	}
+
+	case 2:
+		if (.@eq_started == 1) {
+		.@have = countitem(10001);
+		mes "Your progress: " + .@have + " / 3 apples.";
+		} else {
+		mes "You don't have an active quest.";
+	}
+	close;
+
+	case 3:
+		if (.@eq_started == 1) {
+			if (countitem(10001) >= 3) {
+			delitem 10001,3;
+			set .@eq_started, 0;
+			getexp 500,500;
+			addspiritball 10;
+			mes "Thank you! Here is your reward.";
+			} else {
+			mes "You don't have enough apples.";
+		}
+		} else {
+		mes "You have no quest to claim.";
+	}
+	close;
+
+	case 4:
+	mes "Farewell.";
+	close;
+	end;
+
+}
